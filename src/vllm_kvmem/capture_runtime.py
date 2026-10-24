@@ -983,6 +983,15 @@ class CaptureRuntime(EarlyCaptureFeedback):
                 query_window_cache_bytes=getattr(self.options, 'query_window_cache_bytes', 2147483648),
                 cpu_mean_index_simd=getattr(self.options, 'cpu_mean_index_simd', False),
                 mean_index_stats=self.cpu_mean_index_stats)
+            if getattr(self.options, 'query_fps_prebuild', False):
+                if getattr(self, 'fps_prebuild_manager', None) is None:
+                    from .query_fps_prebuild import FPSPrebuildManager
+                    device = (self.runner.device if self.options.query_fps_prebuild_device == 'cuda'
+                              else 'cpu')
+                    self.fps_prebuild_manager = FPSPrebuildManager(device=device,
+                        cpu_backend=getattr(self.options, 'query_fps_cpu_backend', 'torch'),
+                        cpu_workers=getattr(self.options, 'query_fps_cpu_workers', 8))
+                authority.fps_prebuild = self.fps_prebuild_manager.bind(authority)
             if getattr(self,'action',None) is not None:
                 from .action_attention import ActionHistory
                 authority.action_history = ActionHistory(self.options,self.action.ids)
@@ -1488,6 +1497,7 @@ class CaptureRuntime(EarlyCaptureFeedback):
                 if getattr(self.runner, '_kvmem_capture_opaque', None) is not None else {}),
             'cpu_mean_index_simd': getattr(self.options, 'cpu_mean_index_simd', False),
             'query_score_mode': getattr(self.options, 'query_score_mode', 'mean_k'),
+            'query_mean_quota_fraction': getattr(self.options, 'query_mean_quota_fraction', 0.),
             'query_window_cache_bytes': getattr(self.options, 'query_window_cache_bytes', 2147483648),
             'cpu_mean_index_stats': (self.cpu_mean_index_stats.snapshot()
                 if getattr(self, 'cpu_mean_index_stats', None) is not None else {}),
@@ -1610,6 +1620,8 @@ class CaptureRuntime(EarlyCaptureFeedback):
             terminal_report = {
                 'terminal_prefix': asdict(terminal) if terminal is not None else None,
                 'terminal_discarded_tokens': getattr(self, 'terminal_discarded', {}).pop(request_id, 0)}
+            if getattr(authority, 'fps_prebuild', None) is not None:
+                terminal_report['query_fps_prebuild'] = authority.fps_prebuild.snapshot()
             if getattr(self,'action',None) is not None:
                 terminal_report['action_attention'] = self.action.finish(request_id,authority)
             sessions = getattr(self.runner, '_kvmem_sessions', None)
@@ -1699,6 +1711,8 @@ class CaptureRuntime(EarlyCaptureFeedback):
     def shutdown_retirement(self):
         """Graceful engine shutdown drains detached work before releasing storage."""
         self.join_cpu_scatter()
+        if getattr(self, 'fps_prebuild_manager', None) is not None:
+            self.fps_prebuild_manager.close()
         executor=getattr(self,'_cpu_scatter_executor',None)
         if executor is not None:
             executor.shutdown(wait=True)

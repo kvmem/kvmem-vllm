@@ -19,7 +19,8 @@ setup(
             ("kvmem_store", "kvmem_repository", "kvmem_repository_gc", "kvmem_gc")
         ],
         include_dirs=["third_party/qw3/include", "third_party/qw3/src"],
-        depends=["csrc/private_record_pack.hpp", "csrc/graph_propagation.hpp"],
+        depends=["csrc/private_record_pack.hpp", "csrc/graph_propagation.hpp",
+                 "csrc/query_key_fps_cpu.hpp"],
         cxx_std=17,
         extra_compile_args=["-pthread"],
         extra_link_args=["-pthread"],

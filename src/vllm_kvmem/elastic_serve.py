@@ -13,7 +13,8 @@ import signal
 from .multi_user import _load_users
 from .serve import _validate_safetensors_config, _validate_profiler_config
 from .options import (GRAPH_DEFAULTS, canonical_policy_payload, resolve_graph_policy,
-                      validate_graph_options, validate_query_score_mode, validate_query_fps_experiments)
+                      validate_graph_options, validate_query_score_mode, validate_query_fps_experiments,
+                      validate_graph_query_trace_bytes)
 
 
 def build_launch(profile, base, run_dir):
@@ -45,6 +46,11 @@ def build_launch(profile, base, run_dir):
         'request_planning': False, 'mean_k_backend': 'torch_reference', 'session_checkpoint_policy':None,
         'query_score_mode': 'mean_k', 'query_window_cache_bytes': 2147483648,
         'query_fps_halo_blocks': 0, 'query_fps_optimized': False,
+        'query_fps_prebuild': False,
+        'query_fps_prebuild_device': 'cpu',
+        'query_fps_cpu_backend': 'torch', 'query_fps_cpu_workers': 8,
+        'query_mean_quota_fraction': 0.0,
+        'graph_query_trace_max_bytes': 16777216,
         'query_history':False,'query_history_decay':0.5,'guided_query_tokens':0,
         'action_attention':False,'action_scope':'tool-call','action_layers':'spread3',
         'action_interval':16,'action_fraction':.25,'action_decay':.5,'action_combine':'quota',
@@ -74,9 +80,12 @@ def build_launch(profile, base, run_dir):
         graph_scoring_version=cfg['graph_scoring_version'],
         graph_aggregation=cfg['graph_aggregation'], graph_alpha=cfg['graph_alpha'],
         query_history=cfg['query_history'], guided_query_tokens=cfg['guided_query_tokens'],
-        context_mode=cfg['context_mode'])
+        context_mode=cfg['context_mode'], mean_quota_fraction=cfg['query_mean_quota_fraction'])
     validate_query_fps_experiments(cfg['query_score_mode'],
-        cfg['query_fps_halo_blocks'], cfg['query_fps_optimized'])
+        cfg['query_fps_halo_blocks'], cfg['query_fps_optimized'], cfg['query_fps_prebuild'],
+        cfg['query_fps_prebuild_device'], cfg['query_fps_cpu_backend'], cfg['query_fps_cpu_workers'],
+        mean_quota_fraction=cfg['query_mean_quota_fraction'])
+    validate_graph_query_trace_bytes(cfg['graph_query_trace_max_bytes'])
     if type(cfg['repository_gc']) is not bool:
         raise ValueError('repository_gc must be boolean')
     if cfg['historical_gc'] is not None:
@@ -198,7 +207,9 @@ def build_launch(profile, base, run_dir):
                                'draft_quantization', 'profiler_config', 'async_seal', 'cpu_direct_record_seal', 'cpu_seal_serial_allocate', 'cpu_mean_index_simd', 'assembly_read_prefetch', 'assembly_fused_layers', 'draft_method',
                                'reuse_resident_v', 'gpu_raw_k_cache_bytes','async_cpu_scatter', 'execution_mode', 'batched_cpu_append',
                                'request_planning', 'mean_k_backend', 'query_score_mode', 'session_checkpoint_policy',
-                               'query_fps_halo_blocks', 'query_fps_optimized',
+                               'query_fps_halo_blocks', 'query_fps_optimized', 'query_fps_prebuild', 'query_fps_prebuild_device',
+                               'query_fps_cpu_backend', 'query_fps_cpu_workers',
+                               'query_mean_quota_fraction',
                                'query_history','query_history_decay','guided_query_tokens','repository_gc','historical_gc',
                                'query_replay_backend','query_replay_cobatch',
                                'action_attention','action_scope','action_layers','action_interval',
@@ -304,6 +315,12 @@ def build_launch(profile, base, run_dir):
                 'query_window_cache_bytes': cfg['query_window_cache_bytes'],
                 'query_fps_halo_blocks': cfg['query_fps_halo_blocks'],
                 'query_fps_optimized': cfg['query_fps_optimized'],
+                'query_fps_prebuild': cfg['query_fps_prebuild'],
+                'query_fps_prebuild_device': cfg['query_fps_prebuild_device'],
+                'query_fps_cpu_backend': cfg['query_fps_cpu_backend'],
+                'query_fps_cpu_workers': cfg['query_fps_cpu_workers'],
+                'query_mean_quota_fraction': cfg['query_mean_quota_fraction'],
+                'graph_query_trace_max_bytes': cfg['graph_query_trace_max_bytes'],
                 'query_history':cfg['query_history'],'query_history_decay':cfg['query_history_decay'],
                 'guided_query_tokens':cfg['guided_query_tokens'],
                 **{key:cfg[key] for key in ('action_attention','action_scope','action_layers',

@@ -6,9 +6,12 @@ const textOf = content => typeof content === 'string' ? content :
   (content || []).filter(b => b.type === 'text').map(b => b.text).join('');
 
 export function kvmemQueryEpochPayload(provider, model, options) {
-  if (provider !== 'kvmem-main-dflash2-continuation' ||
-      model.id !== 'kvmem-dsh-dflash2' ||
-      model.baseUrl?.replace(/\/$/, '') !== 'http://127.0.0.1:18385/v1') return undefined;
+  const routes = [
+    ['kvmem-main-dflash2-continuation', 'kvmem-dsh-dflash2', 'http://127.0.0.1:18385/v1'],
+    ['kvmem-hybrid-5050', 'kvmem-dsh-hybrid-mtp4', 'http://127.0.0.1:18386/v1'],
+  ];
+  if (!routes.some(([p, m, url]) => provider === p && model.id === m &&
+      model.baseUrl?.replace(/\/$/, '') === url)) return undefined;
   const users = [];
   let query = null;
   for (const message of options.messages) {

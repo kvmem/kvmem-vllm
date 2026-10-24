@@ -154,7 +154,7 @@ def validate_graph_options(values, *, context_mode='meank', request_planning=Fal
 def validate_query_score_mode(mode, cache_bytes, *, block_tokens, graph_mode,
                               graph_scoring_version, graph_aggregation, graph_alpha,
                               query_history=False, guided_query_tokens=0,
-                              context_mode='meank'):
+                              context_mode='meank', mean_quota_fraction=0.):
     """Keep experimental block scorers separate from graph aggregation."""
     if not isinstance(mode, str) or mode not in ('mean_k', 'overlap_16_8', 'key_fps_4'):
         raise ValueError('query_score_mode must be mean_k, overlap_16_8 or key_fps_4')
@@ -164,8 +164,9 @@ def validate_query_score_mode(mode, cache_bytes, *, block_tokens, graph_mode,
         return
     if context_mode != 'meank' or block_tokens != 32:
         raise ValueError(f'query_score_mode={mode} requires MeanK context management and block_tokens=32')
-    alphas = (0,) if mode == 'key_fps_4' else (0, .2)
-    alpha_description = '0' if mode == 'key_fps_4' else '0 or 0.2'
+    hybrid = type(mean_quota_fraction) in (int, float) and 0 < mean_quota_fraction <= 1
+    alphas = (0,) if mode == 'key_fps_4' and not hybrid else (0, .2)
+    alpha_description = '0' if len(alphas) == 1 else '0 or 0.2'
     if (graph_mode != 'multi' or graph_scoring_version != 'v2' or
             graph_aggregation != 'sum' or type(graph_alpha) not in (int, float) or
             graph_alpha not in alphas):
@@ -175,13 +176,43 @@ def validate_query_score_mode(mode, cache_bytes, *, block_tokens, graph_mode,
         raise ValueError(f'query_score_mode={mode} requires query_history=false and guided_query_tokens=0')
 
 
-def validate_query_fps_experiments(mode, halo_blocks, optimized):
+def validate_query_fps_experiments(mode, halo_blocks, optimized, prebuild=False, prebuild_device='cpu',
+                                   cpu_backend='torch', cpu_workers=8, mean_quota_fraction=0.0):
+    import math
+
     if type(halo_blocks) is not int or halo_blocks not in (0, 1):
         raise ValueError('query_fps_halo_blocks must be 0 or 1')
     if type(optimized) is not bool:
         raise ValueError('query_fps_optimized must be boolean')
+    if type(prebuild) is not bool:
+        raise ValueError('query_fps_prebuild must be boolean')
+    if not isinstance(prebuild_device, str) or prebuild_device not in ('cpu', 'cuda'):
+        raise ValueError('query_fps_prebuild_device must be cpu or cuda')
+    if not isinstance(cpu_backend, str) or cpu_backend not in ('torch', 'native'):
+        raise ValueError('query_fps_cpu_backend must be torch or native')
+    if type(cpu_workers) is not int or not 1 <= cpu_workers <= 32:
+        raise ValueError('query_fps_cpu_workers must be an integer in 1..32')
+    if (type(mean_quota_fraction) not in (int, float) or
+            not math.isfinite(mean_quota_fraction) or not 0 <= mean_quota_fraction <= 1):
+        raise ValueError('query_mean_quota_fraction must be a finite number in [0, 1]')
+    if mean_quota_fraction > 0 and (mode != 'key_fps_4' or halo_blocks != 1):
+        raise ValueError('query_mean_quota_fraction requires query_score_mode=key_fps_4 '
+                         'and query_fps_halo_blocks=1')
+    if cpu_backend == 'native' and (mode != 'key_fps_4' or not optimized or
+                                   not prebuild or prebuild_device != 'cpu'):
+        raise ValueError('query_fps_cpu_backend=native requires query_score_mode=key_fps_4, '
+                         'query_fps_optimized=true, query_fps_prebuild=true and '
+                         'query_fps_prebuild_device=cpu')
+    if prebuild and (mode != 'key_fps_4' or not optimized):
+        raise ValueError('query_fps_prebuild requires query_score_mode=key_fps_4 '
+                         'and query_fps_optimized=true')
     if (halo_blocks or optimized) and mode != 'key_fps_4':
         raise ValueError('FPS halo/optimization require query_score_mode=key_fps_4')
+
+
+def validate_graph_query_trace_bytes(value):
+    if type(value) is not int or not 0 < value <= 1024**3:
+        raise ValueError('graph_query_trace_max_bytes must be a positive integer at most 1 GiB')
 
 
 @dataclass(frozen=True)
@@ -328,6 +359,12 @@ class RuntimeOptions:
     query_window_cache_bytes: int = 2147483648
     query_fps_halo_blocks: int = 0
     query_fps_optimized: bool = False
+    query_fps_prebuild: bool = False
+    query_fps_prebuild_device: str = 'cpu'
+    graph_query_trace_max_bytes: int = 16777216
+    query_fps_cpu_backend: str = 'torch'
+    query_fps_cpu_workers: int = 8
+    query_mean_quota_fraction: float = 0.0
 
     @property
     def active_residency_enabled(self):
@@ -381,9 +418,13 @@ class RuntimeOptions:
             block_tokens=self.memory.block_tokens, graph_mode=self.graph_mode,
             graph_scoring_version=self.graph_scoring_version,
             graph_aggregation=self.graph_aggregation, graph_alpha=self.graph_alpha,
-            query_history=self.query_history, guided_query_tokens=self.guided_query_tokens)
+            query_history=self.query_history, guided_query_tokens=self.guided_query_tokens,
+            mean_quota_fraction=self.query_mean_quota_fraction)
         validate_query_fps_experiments(self.query_score_mode,
-            self.query_fps_halo_blocks, self.query_fps_optimized)
+            self.query_fps_halo_blocks, self.query_fps_optimized, self.query_fps_prebuild,
+            self.query_fps_prebuild_device, self.query_fps_cpu_backend, self.query_fps_cpu_workers,
+            mean_quota_fraction=self.query_mean_quota_fraction)
+        validate_graph_query_trace_bytes(self.graph_query_trace_max_bytes)
         if self.query_score_mode in ('overlap_16_8', 'key_fps_4'):
             from .query_window_budget import split_cpu_history_budget
             split_cpu_history_budget(self)
@@ -814,6 +855,11 @@ class RuntimeOptions:
         action = {name: payload.pop(name, default) for name, default in (
             ('query_score_mode', 'mean_k'), ('query_window_cache_bytes', 2147483648),
             ('query_fps_halo_blocks', 0), ('query_fps_optimized', False),
+            ('query_fps_prebuild', False),
+            ('query_fps_prebuild_device', 'cpu'),
+            ('graph_query_trace_max_bytes', 16777216),
+            ('query_fps_cpu_backend', 'torch'), ('query_fps_cpu_workers', 8),
+            ('query_mean_quota_fraction', 0.0),
             ('assembly_chunk_blocks', 32),
             ('guided_query_backend', 'eager'),
             ('query_replay_backend', 'eager'), ('query_replay_cobatch', False),

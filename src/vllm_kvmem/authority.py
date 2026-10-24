@@ -177,6 +177,7 @@ class RequestAuthority:
         if self.gc is not None:
             self._drain_gc()
         remaining = []
+        newly_archived = []
         completed = 0
         for job, keys in self.writes:
             if not job.done():
@@ -193,6 +194,7 @@ class RequestAuthority:
                 if not record.archived:
                     self._resident_count -= 1
                     self._return_record_buffers(record)
+                    newly_archived.append(record)
                 record.archived = True
                 # Publish only after durable write completion, never on CPU
                 # cache admission or asynchronous I/O submission.
@@ -201,6 +203,9 @@ class RequestAuthority:
                     self.memory._store.gc_flags(record.handle, flags, flags)
             completed += 1
         self.writes = remaining
+        prebuild = getattr(self, 'fps_prebuild', None)
+        if prebuild is not None and newly_archived and not self.closing and self._rewind_position is None:
+            prebuild.offer([r for r in newly_archived if r.count == self.shape[1]])
         for key, record in list(self.discarded_records.items()):
             if getattr(self.gc, 'native_history', False):
                 break  # The native worker owns reclamation of these generations.
@@ -606,6 +611,7 @@ class RequestAuthority:
                 score_mask = frame.score_mask
                 transport_mask = frame.transport_mask
                 eligible = torch.tensor(score_mask, dtype=torch.bool, device=queries.device)
+                mean_scores = None
                 if self.query_score_mode == 'overlap_16_8':
                     from .query_window_scoring import score_authority_windows
                     if guided_pressure:
@@ -620,6 +626,10 @@ class RequestAuthority:
                     values, stats = score_authority_fps(self, records, queries, means, score_mask)
                     self.query_key_fps_stats = stats
                     scores = values.cpu().tolist()
+                    if getattr(self.graph_options, 'query_mean_quota_fraction', 0):
+                        mean_started = time.perf_counter()
+                        mean_scores = mean_key_scores(queries, means.to(queries.device), eligible).cpu().tolist()
+                        stats['mean_quota_scoring_seconds'] = time.perf_counter()-mean_started
                 else:
                     scores = mean_key_scores(queries, means.to(queries.device), eligible).cpu().tolist()
             # index_snapshot retains the same generation-qualified records
@@ -644,7 +654,7 @@ class RequestAuthority:
                     graph_snapshot, tuple(slot for slot, _ in mandatory), max_tokens)
             if graph_snapshot is not None and graph_options.graph_mode in ('locality', 'attention', 'multi'):
                 return score_and_select(self, records, scores, transport_mask,
-                    graph_snapshot, tuple(slot for slot, _ in mandatory), max_tokens)
+                    graph_snapshot, tuple(slot for slot, _ in mandatory), max_tokens, mean_scores=mean_scores)
             action = getattr(self,'action_history',None)
             if action is not None:
                 # A verified M-prefix continuation may replay from an older P.
@@ -693,6 +703,11 @@ class RequestAuthority:
             raise ValueError('Rewind requires a sealed-record boundary')
         if not self.flush() or self.writes:
             return None
+        prebuild = getattr(self, 'fps_prebuild', None)
+        preserve_prefix = (self.query_score_mode == 'key_fps_4' and
+            bool(getattr(getattr(self, 'graph_options', None), 'query_mean_quota_fraction', 0)))
+        if prebuild is not None:
+            prebuild.cancel(history_end=checkpoint.position) if preserve_prefix else prebuild.cancel()
         spans = self.memory.begin_rewind(checkpoint)
         graph = getattr(self, 'block_graph', None)
         if graph is not None:
@@ -700,7 +715,11 @@ class RequestAuthority:
         self._rewind_position = checkpoint.position
         self._rewind_committed = False
         if self.query_window_cache is not None:
-            self.query_window_cache.clear()
+            if preserve_prefix:
+                if prebuild is None:
+                    self.query_window_cache.rewind(checkpoint.position)
+            else:
+                self.query_window_cache.clear()
         return spans
 
     def attach_rewind_completion(self, fence):
@@ -737,6 +756,9 @@ class RequestAuthority:
 
     def close(self):
         self.closing = True
+        prebuild = getattr(self, 'fps_prebuild', None)
+        if prebuild is not None:
+            prebuild.cancel(permanent=True)
         if self.query_window_cache is not None:
             self.query_window_cache.clear()
         self.guided_seed = None

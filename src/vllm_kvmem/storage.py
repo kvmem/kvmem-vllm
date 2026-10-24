@@ -453,6 +453,22 @@ class AsyncArchive:
                 self._complete(size)
                 raise
 
+    def borrow_read_sources(self, namespace, leases):
+        """Retain immutable payload read rights for a bounded deferred reader.
+
+        Metadata leases alone do not fence native CPU payload retirement. This
+        admission is short and copies no data; the caller releases every source
+        after cancellation or after its independently admitted I/O completes.
+        """
+        if not leases or len(leases) > 32:
+            raise ValueError('Deferred archive readers require one to 32 leases')
+        keys = [self.key(namespace, lease) for lease in leases]
+        with self._lock:
+            entries = [self._entries.get(key) for key in keys]
+            if any(entry is None or not entry.ready for entry in entries):
+                raise KeyError('Deferred archive record missing, stale or unpublished')
+            return self._admit_read_sources(entries)
+
     def _admit_read_sources(self, entries):
         return None
 

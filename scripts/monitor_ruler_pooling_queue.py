@@ -167,7 +167,7 @@ async def wake(thread, socket, message, submission_key):
         return dict(queued_submission_id=queued_id, started=started, thread_status=state)
 
 
-def run(args):
+def run(args, *, inspector=inspect, event_finder=findings):
     args.state_dir.mkdir(parents=True, exist_ok=True)
     with (args.state_dir / ".lock").open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -183,11 +183,11 @@ def run(args):
         pending = read(args.state_dir / "pending.json")
         while not stopped and not (args.state_dir / "STOP").exists():
             try:
-                snapshot = inspect(args.root)
+                snapshot = inspector(args.root)
             except Exception as error:
                 snapshot = dict(at=time.time(), issues=["Monitor inspection failed: " + repr(error)],
                                 arms={}, complete=False, queue_status="inspection_error")
-            events = findings(snapshot, previous)
+            events = event_finder(snapshot, previous)
             if events and pending is None:
                 pending = dict(key=str(uuid.uuid4()), events=events,
                                message=args.instructions.read_text() + "\n\n本次巡检发现：\n" +

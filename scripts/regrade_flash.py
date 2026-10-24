@@ -171,7 +171,9 @@ class Flash:
             return raw, ident
 
 
-def lme(root, plan, flash):
+def lme(root, plan, flash, *, case_count=102):
+    if type(case_count) is not int or not 1 <= case_count <= 102:
+        raise ValueError('LME grading requires 1..102 explicitly frozen cases')
     judge = flash.judge
     check = judge.prompt_function()
     parameters = {**judge.PARAMETERS, 'model': MODEL}
@@ -191,7 +193,7 @@ def lme(root, plan, flash):
     jobs = []
     expected = None
     for arm, cases in plan['lme'].items():
-        records, bindings = bind_cases(Path(cases), 102)
+        records, bindings = bind_cases(Path(cases), case_count)
         metadata = {k:{f:r[f] for f in ('question_id','question_type','question','gold_answer')}
                     for k,r in records.items()}
         if expected is None:
@@ -225,18 +227,22 @@ def lme(root, plan, flash):
             arm, row = future.result()
             values[arm][row['id']] = row
             save(root/'lme-progress.json', dict(completed=i, expected=len(jobs), by_arm={k:len(v) for k,v in values.items()}))
-    report = dict(status='completed', judge=MODEL, returned_model=flash.returned_model,
+    report = dict(status='partial' if case_count < 102 else 'completed', judge=MODEL, returned_model=flash.returned_model,
                   prompt_sha256=sha(judge.OFFICIAL), arms={}, pairs={})
+    if case_count < 102:
+        report.update(partial=True, full_cohort_cases=102, graded_cases=case_count)
     for arm, rows in values.items():
-        assert len(rows) == 102
+        assert len(rows) == case_count
         correct = sum(x['correct'] for x in rows.values())
         by_type = defaultdict(list)
         for row in rows.values():
             by_type[row['question_type']].append(row['correct'])
-        report['arms'][arm] = dict(correct=correct, count=102, accuracy=correct/102,
+        report['arms'][arm] = dict(correct=correct, count=case_count, accuracy=correct/case_count,
                                   by_type={k:statistics.fmean(v) for k,v in by_type.items()})
+        if case_count < 102:
+            report['arms'][arm]['by_type_counts'] = {k:len(v) for k,v in by_type.items()}
     for arm in values:
-        if arm == 'all_off':
+        if arm == 'all_off' or 'all_off' not in values:
             continue
         delta = {k:int(v['correct'])-int(values[arm][k]['correct']) for k,v in values['all_off'].items()}
         report['pairs']['all_off_vs_'+arm] = dict(improved=sum(x>0 for x in delta.values()),
@@ -246,9 +252,30 @@ def lme(root, plan, flash):
     return report
 
 
-def mab_arm(root, plan, arm, answers, flash):
+def prefetch_mab_longmem(root, records, module, flash, *, workers):
+    """Warm exact official requests; the unmodified judge still parses verdicts."""
+    targets = [r for r in records.values() if r['source'].startswith('longmemeval_')]
+
+    def request(row):
+        prompt = module.longmem_prompt(row.get('question_type') or '', row['raw_question'],
+            row['gold_answer'], row['answer'], '_abs' in (row.get('qa_pair_id') or ''))
+        return complete_mab_call(flash, dict(model=MODEL, messages=[dict(role='user',content=prompt)],
+            temperature=0, max_tokens=1024, stream=False, thinking=dict(type='enabled')))
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(request, row) for row in targets]
+        for i, future in enumerate(as_completed(futures), 1):
+            future.result()
+            save(root/'mab-prefetch-progress.json', dict(completed=i, expected=len(targets)))
+
+
+def mab_arm(root, plan, arm, answers, flash, *, case_count=1116, judge_workers=1):
+    if type(case_count) is not int or not 1 <= case_count <= 1116:
+        raise ValueError('MAB grading requires 1..1116 explicitly frozen cases')
+    if type(judge_workers) is not int or not 1 <= judge_workers <= 4:
+        raise ValueError('MAB judge workers must be 1..4')
     output = root/'mab'/arm
-    records, bindings = bind_cases(answers/'cases', 1116)
+    records, bindings = bind_cases(answers/'cases', case_count)
     snapshot = output/'bindings.json'
     if snapshot.exists():
         assert read(snapshot) == bindings
@@ -279,9 +306,16 @@ def mab_arm(root, plan, arm, answers, flash):
     # The original evaluator checks this variable before invoking the injected
     # transport. The actual credential remains only in Flash.client.
     assert os.environ.get('DEEPSEEK_API_KEY') == 'transport-managed'
+    if judge_workers > 1:
+        prefetch_mab_longmem(root, records, module, flash, workers=judge_workers)
     assert module.main() == 0
-    special = {r['key']:r for r in lines(output/'special_judgments.jsonl')}
-    assert len(special)==316
+    special_file = output/'special_judgments.jsonl'
+    special = {r['key']:r for r in lines(special_file)} if special_file.exists() else {}
+    expected_special = {module.key(r) for r in records.values()
+                        if r['source'].startswith(('longmemeval_', 'infbench_'))}
+    assert set(special) == expected_special
+    if case_count == 1116:
+        assert len(special) == 316
     by_source = defaultdict(list)
     source_category = {}
     values = {}
@@ -294,11 +328,21 @@ def mab_arm(root, plan, arm, answers, flash):
     categories = defaultdict(list)
     for source, vals in by_source.items():
         categories[source_category[source]].append(statistics.fmean(vals))
-    assert len(categories)==3 and len(values)==1116
-    report = dict(complete=True, count=1116, judge=MODEL, response_model=flash.returned_model,
-                  three_category_macro=statistics.fmean(statistics.fmean(v) for v in categories.values()),
+    assert len(values) == case_count
+    if case_count == 1116:
+        assert len(categories) == 3
+    report = dict(complete=case_count == 1116, count=case_count, judge=MODEL, response_model=flash.returned_model,
+                  three_category_macro=(statistics.fmean(statistics.fmean(v) for v in categories.values())
+                                        if len(categories) == 3 else None),
                   by_source={k:dict(count=len(v),score=statistics.fmean(v)) for k,v in by_source.items()},
                   by_category={k:statistics.fmean(v) for k,v in categories.items()}, values=values)
+    if case_count < 1116:
+        report.update(partial=True, full_cohort_cases=1116,
+            by_category_counts={k:sum(len(by_source[s]) for s in by_source if source_category[s] == k)
+                                for k in categories},
+            limitation='Completion-order subset; incomplete categories are not full-cohort scores.')
+    for binding in bindings.values():
+        unchanged(binding)
     save(output/'summary.json',report)
     return report
 

@@ -44,3 +44,12 @@ test('scope is the owned local route and each callback owns its source identity'
   assert.equal(x.kvmem_query_provenance.query_message_id,'u1');
   assert.equal(y.kvmem_query_provenance.query_message_id,'other-id');
 });
+
+test('isolated hybrid route retains manual Query identity with strict endpoint scoping',()=>{
+  const hybrid={id:'kvmem-dsh-hybrid-mtp4',baseUrl:'http://127.0.0.1:18386/v1/'};
+  const b=wire();
+  kvmemQueryEpochPayload('kvmem-hybrid-5050',hybrid,options())(b);
+  assert.equal(b.kvmem_query_provenance.query_message_id,'u1');
+  assert.equal(kvmemQueryEpochPayload('kvmem-hybrid-5050',model,options()),undefined);
+  assert.equal(kvmemQueryEpochPayload('kvmem-main-dflash2-continuation',hybrid,options()),undefined);
+});

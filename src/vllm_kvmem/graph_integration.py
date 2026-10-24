@@ -47,15 +47,15 @@ def query_snapshot(authority):
 
 
 def score_and_select(authority, records, raw_scores, eligible, snapshot,
-                     mandatory_slots, max_tokens):
+                     mandatory_slots, max_tokens, *, mean_scores=None):
     """Called only for scoring modes, while the current index is pinned."""
     with ExitStack() as results:
         return _score_and_select(authority, records, raw_scores, eligible, snapshot,
-            mandatory_slots, max_tokens, results)
+            mandatory_slots, max_tokens, results, mean_scores=mean_scores)
 
 
 def _score_and_select(authority, records, raw_scores, eligible, snapshot,
-                      mandatory_slots, max_tokens, results):
+                      mandatory_slots, max_tokens, results, *, mean_scores=None):
     from .graph_scoring import score_graph
     graph = authority.block_graph
     options = authority.graph_options
@@ -82,7 +82,38 @@ def _score_and_select(authority, records, raw_scores, eligible, snapshot,
     positions = {record.handle.slot: record.history_begin for record in records}
     halo = getattr(options, 'query_fps_halo_blocks', 0)
     group_evidence = None
-    if halo:
+    quota_evidence = None
+    quota_propagation = None
+    picker_pins = mandatory_slots
+    fraction = getattr(options, 'query_mean_quota_fraction', 0)
+    if fraction:
+        from .query_hybrid_recall import preview_hybrid_selection, quota_summary
+        from .query_group_recall import halo_summary
+        if (not halo or getattr(authority, 'query_score_mode', 'mean_k') != 'key_fps_4'
+                or mean_scores is None):
+            raise ValueError('Hybrid quota requires independent MeanK and FPS seeds')
+        # Both seeds use the same immutable owner/revision and original
+        # transport mask, before the MeanK quota turns its choices into pins.
+        # Do not blend seeds or propagate again after reserving that quota.
+        mean_result = results.enter_context(score_graph(mean_scores, starts, eligible, snapshot,
+            **propagation_options(options),
+            block_tokens=authority.memory.config.block_tokens, trace=False))
+        graph.validate_binding(binding)
+        if getattr(options, 'graph_alpha', 0):
+            quota_propagation = dict(order='independent_graph_then_quota',
+                mean_k=dict(mean_result.diagnostics), key_fps_4=dict(result.diagnostics))
+        preview = preview_hybrid_selection(authority.memory, records, result.scores, mean_result.scores,
+            mandatory_slots, max_tokens=max_tokens, mean_fraction=fraction,
+            message_spans=snapshot.message_spans)
+        groups, group_scores = preview['groups'], preview['group_scores']
+        picker_pins = preview['mandatory_slots']
+        selected = set(preview['selected_slots'])
+        group_evidence, quota_evidence = preview['group_selection'], preview['quota_selection']
+        record_query_inputs(authority, records, raw_scores, eligible, snapshot,
+            mandatory_slots, max_tokens, group_selection=group_evidence, mean_scores=mean_scores,
+            quota_propagated_scores=(dict(mean_k=mean_result.scores, key_fps_4=result.scores)
+                if quota_propagation is not None else None))
+    elif halo:
         from .query_group_recall import build_halo_groups, describe_halo_selection, halo_summary
         if (getattr(authority, 'query_score_mode', 'mean_k') != 'key_fps_4'
                 or not result.diagnostics['identity'] or list(result.scores) != list(raw_scores)):
@@ -131,6 +162,14 @@ def _score_and_select(authority, records, raw_scores, eligible, snapshot,
         displaced_blocks=len(old-selected), graph_selection_seconds=time.perf_counter()-started)
     if group_evidence is not None:
         report['query_group_selection'] = halo_summary(group_evidence)
+        if quota_evidence is not None:
+            report['query_group_selection']['quota_selection'] = quota_summary(quota_evidence)
+            if not options.graph_trace:
+                report['query_group_selection'] = {key:value for key,value in report['query_group_selection'].items()
+                    if not key.endswith('_starts')}
+            report['query_quota_selection'] = quota_summary(quota_evidence)
+    if quota_propagation is not None:
+        report['query_quota_propagation'] = quota_propagation
     if options.graph_trace:
         report['selected_starts'] = sorted(positions[slot] for slot in selected)[:256]
         report['baseline_starts'] = sorted(positions[slot] for slot in old)[:256]
@@ -143,9 +182,12 @@ def _score_and_select(authority, records, raw_scores, eligible, snapshot,
     emit_graph_report(authority, report)
     graph.validate_binding(binding)
     if group_evidence is not None:
-        plan = authority.memory.select_groups(groups, group_scores, mandatory_slots,
+        plan = authority.memory.select_groups(groups, group_scores, picker_pins,
             max_tokens=max_tokens, expected_slots=selected)
-        authority.query_group_selection = halo_summary(group_evidence)
+        authority.query_group_selection = report['query_group_selection']
+        if quota_evidence is not None:
+            authority.query_quota_selection = quota_summary(quota_evidence)
+            authority.query_quota_propagation = quota_propagation
     else:
         plan = authority.memory.select(propagated, mandatory_slots,
             action=False, prefill_scores=None, max_tokens=max_tokens)
@@ -315,7 +357,7 @@ def record_pressure_inputs(authority, candidates, raw, mask, snapshot, mandatory
 
 
 def record_query_inputs(authority, records, scores, eligible, snapshot, mandatory_slots, max_tokens,
-                        *, group_selection=None):
+                        *, group_selection=None, mean_scores=None, quota_propagated_scores=None):
     """Opt-in bounded replay evidence, never a per-decode graph dump."""
     options = getattr(authority, 'graph_options', None)
     if getattr(options, 'query_fps_halo_blocks', 0) and group_selection is None:
@@ -327,7 +369,9 @@ def record_query_inputs(authority, records, scores, eligible, snapshot, mandator
     if (snapshot is None or options is None or not options.graph_trace or path is None or
             getattr(authority, counter, 0) >= 8):
         return
-    if len(records) > _MAX_REPLAY_NODES:
+    hybrid = bool(getattr(options, 'query_mean_quota_fraction', 0))
+    node_limit = 32768 if hybrid else _MAX_REPLAY_NODES
+    if len(records) > node_limit:
         if overlap:
             raise BufferError('Overlap Query trace exceeds its bounded node capacity')
         return
@@ -363,6 +407,11 @@ def record_query_inputs(authority, records, scores, eligible, snapshot, mandator
             revision=snapshot.revision),
         legacy_action_scores=getattr(action, 'scores', {}),
         prefill_scores=prefill.scores() if prefill is not None and not action.samples else None)
+    if mean_scores is not None:
+        row['mean_scores'] = mean_scores
+        row['query_mean_quota_fraction'] = options.query_mean_quota_fraction
+    if quota_propagated_scores is not None:
+        row['quota_propagated_scores'] = quota_propagated_scores
     if group_selection is not None:
         row['query_group_selection'] = group_selection
     if options.graph_mode in ('locality','attention','multi'):
@@ -374,13 +423,16 @@ def record_query_inputs(authority, records, scores, eligible, snapshot, mandator
     # each, plus original seeds and masks. Its public Query has a separate
     # counter so pressure diagnostics cannot consume this evidence quota.
     limit = (3 if group_selection is not None else 2) * _MAX_REPLAY_RECORD_BYTES if overlap else _MAX_REPLAY_RECORD_BYTES
+    if hybrid:
+        limit = 24*1024**2
     if len(encoded.encode()) > limit:
         if overlap:
             raise BufferError('Overlap Query trace exceeds its bounded record byte capacity')
         return
     path = path.with_name('block_graph_inputs.jsonl')
+    log_limit = getattr(options, 'graph_query_trace_max_bytes', _MAX_LOG_BYTES)
     with _LOG_LOCK:
-        if path.exists() and path.stat().st_size + len(encoded.encode()) + 1 > _MAX_LOG_BYTES:
+        if (path.stat().st_size if path.exists() else 0) + len(encoded.encode()) + 1 > log_limit:
             if overlap:
                 raise BufferError('Overlap Query trace exceeds its bounded log byte capacity')
             return

@@ -613,6 +613,10 @@ class AsyncRefresh:
                 row['query_key_fps_scoring'] = dict(authority.query_key_fps_stats)
                 if getattr(self.options, 'query_fps_halo_blocks', 0):
                     row['query_group_selection'] = dict(authority.query_group_selection)
+                if getattr(self.options, 'query_mean_quota_fraction', 0):
+                    row['query_quota_selection'] = dict(authority.query_quota_selection)
+                    if getattr(authority, 'query_quota_propagation', None) is not None:
+                        row['query_quota_propagation'] = authority.query_quota_propagation
         if job.guided_pressure:
             row.update(guided_scope='prefill-pressure', guided_context_end=job.guided_base,
                 public_input_replayed_for_guidance=0, guided_state_verified=job.guided_state_verified)

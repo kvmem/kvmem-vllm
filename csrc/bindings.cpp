@@ -19,6 +19,7 @@
 #include "action_download_buffer.hpp"
 #include "restore_frame.hpp"
 #include "action_window_segments.hpp"
+#include "query_key_fps_cpu.hpp"
 #include <filesystem>
 #include <cstring>
 #include <limits>
@@ -278,6 +279,7 @@ KVMEM_AVX2 static void add_decode_mean(const py::buffer_info &raw,
 }
 
 PYBIND11_MODULE(_native, m) {
+    kvmem_fps_cpu::bind(m);
     py::register_exception<KvMemAdmissionRetry>(m, "HistoryAdmissionRetry");
     kvmem_prefill::bind(m);
     kvmem_graph::bind(m);
