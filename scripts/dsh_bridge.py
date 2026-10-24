@@ -111,9 +111,10 @@ class QwenStream:
     """
     markers=('</think>','<tool_call>','<|im_end|>','<|endoftext|>')
 
-    def __init__(self,protocol,tools):
+    def __init__(self,protocol,tools, *, cache_parse=False):
         self.protocol=protocol;self.tools=tools;self.raw=''
         self.sent={'reasoning_content':'','content':''};self.tool=None
+        self.cache_parse=cache_parse;self._parse_input=None;self._parsed=None
 
     def _delta(self,message):
         delta={}
@@ -137,7 +138,11 @@ class QwenStream:
         parse_text=safe[:tool_start] if tool_start>=0 else safe
         for ending in ('<|endoftext|>','<|im_end|>'):
             parse_text=parse_text.removesuffix(ending)
-        parsed=self.protocol(op='parse',text=parse_text,tools=self.tools)
+        if self.cache_parse and parse_text == self._parse_input:
+            parsed=self._parsed
+        else:
+            parsed=self.protocol(op='parse',text=parse_text,tools=self.tools)
+            if self.cache_parse:self._parse_input,self._parsed=parse_text,parsed
         reasoning=parsed['reasoning']
         if close<0:reasoning=reasoning.removesuffix('\n')
         delta=self._delta(dict(reasoning_content=reasoning,content=parsed['content']))
@@ -217,8 +222,41 @@ def restore_trajectory(planner,owner,directories):
     return state
 
 
+async def bounded_host_work(slots,function,*values,**kwargs):
+    """Keep the caller's owner lock until even a cancelled producer is done."""
+    async with slots:
+        job=asyncio.create_task(asyncio.to_thread(function,*values,**kwargs))
+        cancelled=False
+        while True:
+            try:
+                result=await asyncio.shield(job)
+                break
+            except asyncio.CancelledError:
+                cancelled=True
+                if job.done():break
+            except BaseException:
+                if cancelled:raise asyncio.CancelledError()
+                raise
+        if cancelled:
+            # Retrieve any producer exception while propagating cancellation.
+            if not job.cancelled():job.exception()
+            raise asyncio.CancelledError()
+        return result
+
+
 def create_app(args,tokenizer):
     app=FastAPI();planner=Planner(Protocol(args.protocol),tokenizer,args.gen_budget)
+    optimized=getattr(args,'optimized_handoff',False)
+    planner.optimized_handoff=optimized
+    host_slots=asyncio.Semaphore(8)
+    async def host_work(function,*values,**kwargs):
+        # Bounded host work with a cancellation fence: never release a session
+        # lock while its producer can still commit state or write a journal.
+        return await bounded_host_work(host_slots,function,*values,**kwargs)
+    async def record(path,value):
+        def write():path.write_text(json.dumps(value,ensure_ascii=False))
+        if optimized:await host_work(write)
+        else:write()
     client=httpx.AsyncClient(trust_env=False,timeout=3600)
     owners={};restored=set();args.output.mkdir(parents=True,exist_ok=True)
     def log(value):
@@ -242,7 +280,7 @@ def create_app(args,tokenizer):
             segments=getattr(args,'max_output_segments',1)
             if type(limit) is not int or not 1<=limit<=args.gen_budget*segments:
                 raise ValueError(f'Requested output must be between 1 and {args.gen_budget*segments} tokens')
-            payload=to_anthropic(body)
+            payload=await host_work(to_anthropic,body) if optimized else to_anthropic(body)
             owner=session_owner(key,payload,getattr(args,'owner_namespace','dsh'))
             if owner not in owners:
                 if len(owners)>=args.max_sessions:raise ValueError('Local DSH session capacity exhausted; restart/release before adding owners')
@@ -257,7 +295,8 @@ def create_app(args,tokenizer):
                     state=await asyncio.to_thread(restore_trajectory,planner,owner,sources)
                     owners[owner]=(lock,state);restored.add(owner)
                     if state.turns:log(dict(at=time.time(),owner=owner,restored_turns=state.turns))
-                started=time.time();prepared=await asyncio.to_thread(planner.prepare,payload,state)
+                started=time.time();prepared=await host_work(planner.prepare,payload,state)
+                handoff_timings={'prepare_seconds':time.time()-started}
                 tokens,plan,rendered,*_=prepared
                 query_source = apply_query_provenance(body, prepared,
                     required=getattr(args, 'require_query_provenance', False))
@@ -279,12 +318,12 @@ def create_app(args,tokenizer):
                 if directory.exists() and (directory/'request.json').exists():
                     directory.rename(directory.with_name(directory.name+'-attempt-'+uuid.uuid4().hex[:8]))
                 directory.mkdir(parents=True,exist_ok=True)
-                (directory/'request.json').write_text(json.dumps(body,ensure_ascii=False))
-                (directory/'plan.json').write_text(json.dumps({k:v for k,v in data.items() if k!='prompt'}|
+                await record(directory/'request.json',body)
+                await record(directory/'plan.json',{k:v for k,v in data.items() if k!='prompt'}|
                     dict(prompt_tokens=len(tokens),exact_output_prefix_reused=prepared[5],
-                         query_source=query_source),indent=2))
+                         query_source=query_source))
                 data.update(stream=True,stream_options=dict(include_usage=True))
-                wire=QwenStream(planner.protocol,rendered['tools']);output_ids=[];usage=None;finish=None
+                wire=QwenStream(planner.protocol,rendered['tools'],cache_parse=optimized);output_ids=[];usage=None;finish=None
                 decoder=AcceptedTextDecoder(tokenizer) if segments>1 else None
                 metrics=None;request_id=None;first_token=None;first_emitted=None;chunks=0
                 segment_reports=[]
@@ -295,7 +334,13 @@ def create_app(args,tokenizer):
                         segment_data.pop('thinking_token_budget',None)
                         # The unchanged auto Query is suppressed only after the
                         # native ledger proves this exact accepted prefix.
-                    async with client.stream('POST',args.backend+'/v1/completions',json=segment_data) as result:
+                    if optimized:
+                        encoded=await host_work(json.dumps,segment_data,ensure_ascii=False,
+                            separators=(',',':'),allow_nan=False)
+                        request_kwargs=dict(content=encoded.encode('utf-8'),headers={'Content-Type':'application/json'})
+                    else:request_kwargs=dict(json=segment_data)
+                    if segment==0:handoff_timings['before_native_submit_seconds']=time.time()-started
+                    async with client.stream('POST',args.backend+'/v1/completions',**request_kwargs) as result:
                         if result.status_code!=200:
                             raise ValueError('Model request failed: '+(await result.aread()).decode()[:2000])
                         async for native in native_events(result):
@@ -323,8 +368,7 @@ def create_app(args,tokenizer):
                     report=dict(index=segment,id=request_id,prompt_tokens=len(segment_data['prompt']),
                         output_tokens=len(output_ids)-begin,finish_reason=finish,metrics=segment_metrics)
                     segment_reports.append(report)
-                    (directory/f'segment-{segment:03d}.json').write_text(json.dumps(dict(**report,
-                        token_ids=output_ids[begin:]),ensure_ascii=False))
+                    await record(directory/f'segment-{segment:03d}.json',dict(**report,token_ids=output_ids[begin:]))
                     if finish!='length' or len(output_ids)>=output_limit:break
                     if len(output_ids)==begin:raise ValueError('Continuation made no progress')
                 if decoder is not None:
@@ -337,15 +381,18 @@ def create_app(args,tokenizer):
                 metrics=segment_reports[0]['metrics'] if len(segment_reports)==1 else dict(segments=segment_reports)
                 # Preserve a failed full-parser input too, so a long coding
                 # response can be diagnosed without repeating GPU generation.
-                (directory/'native.json').write_text(json.dumps(dict(id=request_id,text=wire.raw,
-                    token_ids=output_ids,usage=usage,finish_reason=finish,metrics=metrics),ensure_ascii=False))
-                response=planner.response(wire.raw,rendered['tools'],body['model'],usage,finish)
+                finishing=time.time()
+                await record(directory/'native.json',dict(id=request_id,text=wire.raw,
+                    token_ids=output_ids,usage=usage,finish_reason=finish,metrics=metrics))
+                response=(await host_work(planner.response,wire.raw,rendered['tools'],body['model'],usage,finish)
+                    if optimized else planner.response(wire.raw,rendered['tools'],body['model'],usage,finish))
                 if emit is not None:output,tail=wire.finish(response)
                 else:output=to_openai(response)
-                await asyncio.to_thread(planner.commit,state,prepared,payload,response,output_ids)
-                (directory/'response.json').write_text(json.dumps(output,ensure_ascii=False))
+                await host_work(planner.commit,state,prepared,payload,response,output_ids)
+                await record(directory/'response.json',output)
                 # Keep exact IDs for restart/recovery and independent streaming audits.
-                (directory/'accepted.json').write_text(json.dumps(dict(token_ids=output_ids,metrics=metrics)))
+                await record(directory/'accepted.json',dict(token_ids=output_ids,metrics=metrics))
+                handoff_timings['finalize_seconds']=time.time()-finishing
                 log(dict(at=time.time(),owner=owner,turn=state.turns,request_id=request_id,
                     prompt_tokens=len(tokens),output_tokens=len(output_ids),
                     query_span=plan.get('kvmem_query_span'),mandatory_spans=[],mandatory_parts='none',
@@ -353,6 +400,7 @@ def create_app(args,tokenizer):
                     tool_calls=len(output['choices'][0]['message'].get('tool_calls',[])),
                     transport='native_sse',native_chunks=chunks,metrics=metrics,
                     native_segments=len(segment_reports),segment_reports=segment_reports,
+                    optimized_handoff=optimized,handoff_timings=handoff_timings,
                     requested_output_cap=limit,effective_output_cap=output_limit,
                     first_native_token_seconds=None if first_token is None else first_token-started,
                     first_visible_delta_seconds=None if first_emitted is None else first_emitted-started))
@@ -405,6 +453,7 @@ if __name__=='__main__':
     p.add_argument('--owner-namespace',default='dsh')
     p.add_argument('--max-output-segments',type=int,choices=range(1,5),default=1)
     p.add_argument('--require-query-provenance',action='store_true')
+    p.add_argument('--optimized-handoff',action='store_true')
     p.add_argument('--restore-from',type=Path,action='append',default=[]);args=p.parse_args()
     from transformers import AutoTokenizer
     import uvicorn

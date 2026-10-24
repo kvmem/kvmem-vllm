@@ -74,6 +74,7 @@ class RefreshJob:
     steps: int = 0
     last_progress: float | None = None
     restore_context: object = None
+    restore_plan: object = None
     model_bytes: int = 0
     service_started: float = 0.0
     pressure_oracle: object = None

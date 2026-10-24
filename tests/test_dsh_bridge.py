@@ -133,7 +133,8 @@ def test_truncated_write_after_reasoning_preserves_length_finish_without_announc
 
 
 @pytest.mark.parametrize('failure',[None,'missing_done','bad_usage','disconnect'])
-def test_transport_forwards_before_completion_and_never_commits_partial_stream(protocol,tmp_path,monkeypatch,failure):
+@pytest.mark.parametrize('optimized',[False,True])
+def test_transport_forwards_before_completion_and_never_commits_partial_stream(protocol,tmp_path,monkeypatch,failure,optimized):
     import scripts.dsh_bridge as bridge
     async def check():
         gate=asyncio.Event();commits=[];closed=[]
@@ -165,7 +166,7 @@ def test_transport_forwards_before_completion_and_never_commits_partial_stream(p
         monkeypatch.setattr(bridge,'Protocol',lambda _:protocol)
         monkeypatch.setattr(bridge.httpx,'AsyncClient',lambda **_:client)
         args=SimpleNamespace(protocol=None,gen_budget=16384,output=tmp_path,backend='http://test',
-            model='local',max_model_len=262144,max_sessions=4)
+            model='local',max_model_len=262144,max_sessions=4,optimized_handoff=optimized)
         app=create_app(args,None)
         endpoint=next(r.endpoint for r in app.routes if r.path=='/v1/chat/completions')
         body=json.dumps(dict(model='local',prompt_cache_key='session',stream=True,
@@ -243,7 +244,8 @@ def test_utf8_decoder_keeps_split_characters_between_native_segments():
 
 
 @pytest.mark.parametrize('failed_segment',[False,True,'context_cap'])
-def test_continuation_reuses_exact_ids_and_executes_only_one_complete_tool(protocol,tmp_path,monkeypatch,failed_segment):
+@pytest.mark.parametrize('optimized',[False,True])
+def test_continuation_reuses_exact_ids_and_executes_only_one_complete_tool(protocol,tmp_path,monkeypatch,failed_segment,optimized):
     import scripts.dsh_bridge as bridge
     async def check():
         tools=[dict(type='function',function=dict(name='write',parameters=dict(type='object',properties={'content':dict(type='string')})))]
@@ -276,7 +278,7 @@ def test_continuation_reuses_exact_ids_and_executes_only_one_complete_tool(proto
         monkeypatch.setattr(bridge,'Planner',TestPlanner);monkeypatch.setattr(bridge,'Protocol',lambda _:protocol)
         monkeypatch.setattr(bridge.httpx,'AsyncClient',lambda **_:client)
         context=2+quota+1 if failed_segment=='context_cap' else 262144
-        args=SimpleNamespace(protocol=None,gen_budget=quota,max_output_segments=4,output=tmp_path,backend='http://test',model='local',max_model_len=context,max_sessions=4)
+        args=SimpleNamespace(protocol=None,gen_budget=quota,max_output_segments=4,output=tmp_path,backend='http://test',model='local',max_model_len=context,max_sessions=4,optimized_handoff=optimized)
         app=create_app(args,ByteTokenizer());endpoint=next(r.endpoint for r in app.routes if r.path=='/v1/chat/completions')
         body=json.dumps(dict(model='local',prompt_cache_key='continuation',stream=True,max_tokens=quota*4,messages=[dict(role='user',content='write')])).encode()
         async def receive():return dict(type='http.request',body=body,more_body=False)

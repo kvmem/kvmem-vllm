@@ -97,7 +97,8 @@ def summarize(root):
         for row in value['committed_refreshes']:
             if row.get('guided_query_tokens')!=0:invariants.append(dict(case=ident,error='Unexpected guided generation',row=row))
     report=dict(at=time.time(),counts=dict(counts),cases=reports,unexpected_policy=invariants,
-        unassigned_graph_rows=unassigned,expected_tasks=24,minimum_human_turns=96,
+        unassigned_graph_rows=unassigned,expected_tasks=len(plan['cases']),
+        minimum_human_turns=plan['minimum_turns']*len(plan['cases']),
         caveats=['Repeated identical tool calls are observations, not automatically errors.',
                  'Tool-result errors include recoverable command/edit failures; inspect their original events.',
                  'DSH can mark a Bash result isError=false despite a nonzero exit; report those separately. A failing development test is not by itself an inference/tool-parser failure.',

@@ -124,6 +124,17 @@ def message_identity(message):
     return canonical(message)
 
 
+def _identity_key(value):
+    """Immutable, type-exact JSON key; tool argument strings remain untouched."""
+    if isinstance(value, dict):
+        return ('object', tuple(sorted((k, _identity_key(v)) for k, v in value.items())))
+    if isinstance(value, list):
+        return ('array', tuple(_identity_key(v) for v in value))
+    if isinstance(value, float):
+        return ('float', value.hex())
+    return (type(value).__name__, value)
+
+
 @dataclass
 class Trajectory:
     messages: list = field(default_factory=list)
@@ -138,6 +149,7 @@ class Trajectory:
     locality_spans: tuple = ()
     locality_provenance: tuple = ()
     rendered_prefix: bytes | None = None
+    identity_keys: tuple = ()
 
 
 class Prepared(tuple):
@@ -203,8 +215,9 @@ class PrefixTokens:
 
 
 class Planner:
-    def __init__(self, protocol, tokenizer, gen_budget=16384):
+    def __init__(self, protocol, tokenizer, gen_budget=16384, *, optimized_handoff=False):
         self.protocol, self.tokenizer = protocol, tokenizer
+        self.optimized_handoff = optimized_handoff
         self.gen_budget = gen_budget
         self.end = tokenizer.convert_tokens_to_ids('<|im_end|>')
 
@@ -214,7 +227,12 @@ class Planner:
     def prepare(self, payload, state):
         rendered = self.protocol(request=payload)
         text = rendered['prompt'].encode()
-        messages = [message_identity(m) for m in rendered['messages']]
+        optimized = getattr(self, 'optimized_handoff', False)
+        keys = tuple(_identity_key(m) for m in rendered['messages']) if optimized else ()
+        old_keys = getattr(state, 'identity_keys', ())
+        messages = [(state.messages[i] if optimized and i < len(old_keys) and
+                     i < len(state.messages) and keys[i] == old_keys[i] else message_identity(m))
+                    for i, m in enumerate(rendered['messages'])]
         control = canonical({'prefix':text[:rendered['control_end']].decode(), 'tools':rendered['tools']})
         n = len(state.messages)
         reused = bool(state.output and control == state.control and len(messages) > n+1
@@ -314,8 +332,10 @@ class Planner:
         # Validate against the public API before launching model work.
         from vllm_kvmem.request_plan import RequestPlan
         RequestPlan.parse(plan, len(tokens), 32, self.gen_budget)
-        return Prepared((tokens, plan, rendered, messages, control, reused, locations),
-                        assistant_begin=assistant_begin)
+        result = Prepared((tokens, plan, rendered, messages, control, reused, locations),
+                          assistant_begin=assistant_begin)
+        result.identity_keys = keys
+        return result
 
     def response(self, raw, tools, model, usage, finish):
         clean = raw.removesuffix('<|im_end|>').removesuffix('<|endoftext|>')
@@ -337,8 +357,14 @@ class Planner:
     def commit(self, state, prepared, payload, response, output):
         tokens, plan, rendered, messages, control, reused, locations = prepared
         assistant = {'role':'assistant','content':response['content']}
-        converted = self.protocol(request={**payload,'messages':payload['messages']+[assistant]})
+        # Only the normalized final assistant is consumed here. In the frozen
+        # Qwen protocol its conversion depends on this message and tool schema,
+        # not on re-rendering all historical messages.
+        local = getattr(self, 'optimized_handoff', False)
+        converted = self.protocol(request={**payload,'messages':
+            [assistant] if local else payload['messages']+[assistant]})
         state.messages, state.control, state.tokens = messages, control, tokens
+        state.identity_keys = getattr(prepared, 'identity_keys', ())
         state.plan, state.output = plan, output
         state.locations = locations
         historical_end = max((s['end'] for s in rendered['spans']), default=rendered['control_end'])

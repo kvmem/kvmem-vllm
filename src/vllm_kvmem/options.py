@@ -302,6 +302,8 @@ class RuntimeOptions:
     native_restore_frame: bool = False
     native_action_metadata: bool = False
     resident_restore_slots: int = 1
+    session_gpu_checkpoint_bytes: int = 0
+    restore_prepare_split: bool = False
     async_action_metadata: bool = False
     rolling_active_window: bool = False
     early_capture_slot_release: bool = False
@@ -556,6 +558,14 @@ class RuntimeOptions:
                 self.cpu_history_coordination and self.session_capture_terminal):
             raise ValueError('Rolling active window requires planned CPU history sessions, '
                              'terminal capture and matching refresh/restore modes')
+        if type(self.restore_prepare_split) is not bool or (self.restore_prepare_split and not self.async_restore):
+            raise ValueError('restore_prepare_split requires asynchronous restore')
+        if (type(self.session_gpu_checkpoint_bytes) is not int or
+                not 0 <= self.session_gpu_checkpoint_bytes <= 16 * 1024**3):
+            raise ValueError('session_gpu_checkpoint_bytes must be an integer in [0, 16 GiB]')
+        if self.session_gpu_checkpoint_bytes and (not self.async_restore or
+                not self.session_capture_terminal or not self.session_capacity):
+            raise ValueError('GPU model checkpoints require asynchronous terminal sessions')
         if (type(self.resident_restore_slots) is not int or
                 not 1 <= self.resident_restore_slots <= 32 or
                 (self.resident_restore_slots > 1 and not self.async_restore)):
@@ -899,6 +909,8 @@ class RuntimeOptions:
             ('native_prefill_commit', True), ('async_checkpoint_capture', True),
             ('restore_stage_timing', False), ('native_restore_frame', False),
             ('native_action_metadata', False), ('resident_restore_slots', 1),
+            ('session_gpu_checkpoint_bytes', 0),
+            ('restore_prepare_split', False),
             ('async_action_metadata', False),
             ('rolling_active_window', False), ('early_capture_slot_release', False),
             ('prefill_publication_pipeline', False),

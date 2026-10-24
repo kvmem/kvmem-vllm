@@ -81,9 +81,9 @@ def run(root,wait):
                 if state.exists() and json.loads(state.read_text()).get('status')=='completed':check(browser,root,row)
             reports={row['id']:json.loads((root/'cases'/row['id']/'browser/result.json').read_text())
                 for row in plan['cases'] if (root/'cases'/row['id']/'browser/result.json').exists()}
-            save(root/'browser-summary.json',dict(checked=len(reports),expected=24,reports=reports,at=time.time()))
+            save(root/'browser-summary.json',dict(checked=len(reports),expected=len(plan['cases']),reports=reports,at=time.time()))
             state=json.loads((root/'status.json').read_text()).get('status')
-            if not wait or state=='needs_attention' or len(reports)==24 or time.time()>deadline:break
+            if not wait or state=='needs_attention' or len(reports)==len(plan['cases']) or time.time()>deadline:break
             time.sleep(15)
         browser.close()
 
