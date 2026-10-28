@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-28",
+  "run_id": "deepswe-qps-256k-stream-20261028-r3-full-vram",
+  "scope": "One measured batch per backend using eight exact recorded DeepSWE histories from four tasks. Continuation generation throughput, not pure decode speed, saturation QPS or task-solving accuracy.",
+  "metric": {
+    "name": "generation_throughput",
+    "unit": "output tokens/second",
+    "definition": "32768 accepted output tokens divided by elapsed wall time from submission of the eight continuation requests until the final response; includes waits and recomputation; excludes initial history preparation.",
+    "ratio_kvmem_over_native": 3.700374591775138
+  },
+  "hardware": {
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "gpu_count": 1,
+    "driver": "580.159.03",
+    "gpu_memory_total_gib": 95.5927734375,
+    "memory_measurement": "NVML v2 device memory.used, 1 Hz; excludes driver-reserved bytes"
+  },
+  "software": {
+    "vllm": "0.30.0",
+    "torch": "2.13.0+cu130",
+    "flashinfer-python": "0.6.18.post1",
+    "transformers": "5.17.0"
+  },
+  "model": {
+    "repository": "nvidia/Qwen3.8-27B-NVFP4",
+    "revision": "482ca0f3832238542f8f5295dde86b5f22711d80",
+    "architecture": "Qwen3_5ForConditionalGeneration",
+    "weights": "ModelOpt mixed NVFP4/FP8",
+    "kv_dtype": "fp8_e4m3",
+    "activation_dtype": "bfloat16",
+    "tokenizer": {
+      "repository": "Qwen/Qwen3.8-27B",
+      "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "note": "Existing BF16 model tokenizer used in both benchmark arms.",
+      "files_sha256": {
+        "tokenizer.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+        "tokenizer_config.json": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+        "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+        "vocab.json": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
+        "merges.txt": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d"
+      }
+    },
+    "weight_shards": [
+      {
+        "file": "model-00001-of-00003.safetensors",
+        "bytes": 9965652544,
+        "sha256": "7d0fd155118901373eb0fd13ed3aae68f95be747bc205be72ebc41739c25ee80",
+        "matches_upstream_lfs": true
+      },
+      {
+        "file": "model-00002-of-00003.safetensors",
+        "bytes": 9985757064,
+        "sha256": "98a7e9486baa860c792c9463a770cb9d017696bdd17606300a5b9334149f4c27",
+        "matches_upstream_lfs": true
+      },
+      {
+        "file": "model-00003-of-00003.safetensors",
+        "bytes": 1970287672,
+        "sha256": "0506ad35dc21469708e7813bd76c592cef08bd0317b4a1fe899745ebe2435271",
+        "matches_upstream_lfs": true
+      }
+    ]
+  },
+  "workload": {
+    "context_limit_tokens": 262144,
+    "concurrent_requests": 8,
+    "distinct_recorded_histories": 8,
+    "source_tasks": 4,
+    "input_tokens_per_request": [
+      229796,
+      230102,
+      228827,
+      229645,
+      229064,
+      229690,
+      229632,
+      229753
+    ],
+    "output_tokens_per_request": 4096,
+    "total_output_tokens_per_backend": 32768,
+    "ignore_eos": true,
+    "seed": 1000,
+    "input_token_sha256": [
+      "ecd2f6dec6a3e5e12b089d02c7a078a8f70de600d0675aa642c4a48108ed45cd",
+      "00b9b43df8282f08ad08a226494d880e397f89d0ca7d24d8b993e854425c140b",
+      "6ed64a663d7fddc1c064b9afb6be62bdd8c03da308e83176ebeedf2fdd8a593f",
+      "01e0c9b5700f223e126d3ab923cd42c8459a662d05ca7592d7448f9e4f972a74",
+      "c03f7dc6e1f203515f81a56e4d47fe1f01bc6f76bc679778e34c266fa9908bf6",
+      "7471e8490cc64259b247eaa0e3889b59f316c3c4b3ad8fa85e12538b7ddd30d8",
+      "b840a9d130da21594a77ed21c5ea73272fc47c67bdafad0b8e258c7b3296c157",
+      "c0a7cc574cb486529e791c2085739971d4ccc104d6f5ca40e37a3046197e398d"
+    ]
+  },
+  "common_configuration": {
+    "max_num_seqs": 8,
+    "effective_max_num_batched_tokens": 16424,
+    "ordinary_prefill_chunk_tokens": 2048,
+    "draft_method": "mtp",
+    "draft_tokens": 4,
+    "execution_mode": "compiled_graph"
+  },
+  "kvmem_configuration": {
+    "select_budget": 98304,
+    "gen_budget": 16384,
+    "archive_backend": "cpu",
+    "cpu_read_cache_bytes": 100000000000,
+    "query_score_mode": "key_fps_4",
+    "query_mean_quota_fraction": 0.5,
+    "graph_mode": "multi",
+    "graph_alpha": 0.0,
+    "historical_gc": null
+  },
+  "backends": {
+    "native": {
+      "generation_throughput": 126.16323544767542,
+      "generation_seconds": 259.72701067570597,
+      "configured_gpu_memory_utilization": 0.95,
+      "generation_vram_min_gib": 94.056396484375,
+      "generation_vram_max_gib": 94.060302734375,
+      "minimum_free_gib": 0.91033935546875,
+      "generation_preemptions": 1.0
+    },
+    "kvmem": {
+      "generation_throughput": 466.8512308667225,
+      "generation_seconds": 70.18938332702965,
+      "configured_gpu_memory_utilization": 0.9,
+      "generation_vram_min_gib": 93.525146484375,
+      "generation_vram_max_gib": 93.525146484375,
+      "minimum_free_gib": 1.44549560546875,
+      "generation_preemptions": 0.0
+    }
+  },
+  "validation": {
+    "stream_audit_passed": true,
+    "kvmem_observed_eight_request_decode_steps": 813,
+    "kvmem_maximum_active_tokens_per_request": 114656,
+    "kvmem_cpu_history_bytes_after_preparation": 63935545344,
+    "kv_disk_read_bytes": 0,
+    "kv_disk_write_bytes": 0
+  },
+  "evidence_sha256": {
+    "manifest.json": "722c24a92a5398583bf03af1904ccfaf80b4b0cb2dcaede55918358410b96135",
+    "comparison.json": "1168dff8278828fb7f4b7fb57f3eec8b8b3f6c02ba5872d6df8feeeb4cd96722",
+    "stream-audit.json": "07c8bf4a56c8f7bcb8c756d0fce0e55022b74429ddc1cb400fde5bb0dccc62fd"
+  },
+  "availability": "This portable summary excludes raw task histories, generated task text, GPU UUIDs and local machine paths. Original run artifacts and model weights are not bundled with this repository."
+}
