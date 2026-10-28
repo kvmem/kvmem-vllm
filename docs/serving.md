@@ -1,7 +1,5 @@
 # Serving and sessions
 
-> **Documentation preview.** This branch previews the README, GIF and guides. The runtime and benchmark-tooling updates described here are still pending publication. Installation commands and new profiles require that development runtime; they are not a validated installation path for this preview branch.
-
 Start with [installation](installation.md) and an explicit JSON profile. The
 `vllm-kvmem serve` entry starts native vLLM with the KVMem connector, scheduler
 and worker adapters. Merely installing the package does not enable KV offload.

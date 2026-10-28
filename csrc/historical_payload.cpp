@@ -215,7 +215,12 @@ HistoricalPayloadArena::retain_external(void *data, void (*release)(void *), siz
     } writer_exit{*shared_};
     auto count = shared_->external_owners.load(std::memory_order_acquire);
     while (true) {
-        if (shared_->closing.load(std::memory_order_acquire) || count >= shared_->config.capacity) {
+        // Each logical record may own separate transient FP32 sums and FP16
+        // means. This bounds descriptors, not bytes: the existing historical
+        // admission still reserves the same six index bytes per element.
+        // Widen before multiplication; Config::capacity is uint32_t.
+        if (shared_->closing.load(std::memory_order_acquire) ||
+                count >= uint64_t(shared_->config.capacity) * 2) {
             // Unadmitted owner must not enqueue unowned data.
             owner->node_.reset();
             throw std::runtime_error("External historical storage capacity exhausted or closing");

@@ -291,7 +291,7 @@ class RequestMemory:
     def checkpoint_valid(self, checkpoint):
         return self._store is not None and self._store.checkpoint_valid(checkpoint)
 
-    def checkpoint_window(self, *, allow_partial=False):
+    def checkpoint_window(self, *, allow_partial=False, native_validation=False):
         """Capture a sealed prompt boundary including its exact selected frame."""
         self._require(Phase.READY)
         if self.history_end == 0 or (self.history_end % self.config.block_tokens and not allow_partial):
@@ -301,7 +301,7 @@ class RequestMemory:
         prefix = self.checkpoint()
         checkpoint = WindowCheckpoint(self.request_id, prefix,
                                       records, policy_hold=hold)
-        self._validate_window_checkpoint(checkpoint)
+        self._validate_window_checkpoint(checkpoint, native=native_validation)
         return checkpoint
 
     def _protect_checkpoint(self, records):
@@ -313,11 +313,16 @@ class RequestMemory:
             raise BufferError('Historical checkpoint admission must retry before model capture')
         return hold
 
-    def _validate_window_checkpoint(self, checkpoint, *, timing=None):
+    def _validate_window_checkpoint(self, checkpoint, *, timing=None, native=False):
         with timing.stage('window_validate') if timing is not None else nullcontext():
             if (not isinstance(checkpoint, WindowCheckpoint) or checkpoint.request_id != self.request_id
                     or not self.checkpoint_valid(checkpoint.prefix)):
                 raise ValueError('Stale or foreign window checkpoint')
+            if type(native) is not bool:
+                raise ValueError('native_validation must be boolean')
+            if native:
+                self._store.validate_frame(checkpoint.prefix, checkpoint.records)
+                return
             dense, logical_end, seen = 0, 0, set()
             for slot, generation, begin, count, position in checkpoint.records:
                 if (position != dense or begin < logical_end or begin % self.config.block_tokens

@@ -1,7 +1,5 @@
 # Benchmarks
 
-> **Documentation preview.** This branch previews the README, GIF and guides. The runtime and benchmark-tooling updates described here are still pending publication. Installation commands and new profiles require that development runtime; they are not a validated installation path for this preview branch.
-
 ## Long-history generation throughput
 
 On one RTX PRO 6000 Blackwell Server Edition, KVMem delivered **3.70× the
@@ -94,8 +92,7 @@ replace this near-full-memory comparison.
 
 ## Reproducing and auditing a run
 
-The development snapshot includes the harness and validators; that tooling is
-not included in this documentation-preview branch. Exact reproduction also
+The repository includes the harness and validators. Exact reproduction also
 requires the original input-token exports, compatible model/tokenizer files and
 a prepared campaign containing a frozen runtime. Those experiment artifacts are
 not included in a source checkout. The portable JSON summary records their
@@ -108,6 +105,21 @@ preparing your own dataset and campaign:
 .venv/bin/python scripts/benchmark_deepswe_qps_replay.py --help
 .venv/bin/python scripts/audit_deepswe_stream.py --help
 ```
+
+The replay runner uses `httpx`, `psutil` and `nvidia-ml-py` (imported as
+`pynvml`) for streaming, process ownership and GPU telemetry. For a new campaign,
+install any missing helpers **before** freezing its environment:
+
+```sh
+uv pip install --python .venv/bin/python httpx psutil nvidia-ml-py
+```
+
+Use the same Python environment that created the campaign. The runner checks
+the recorded interpreter and dependency versions before starting either backend;
+calling another virtual environment, even one with the same Python version,
+does not satisfy that requirement. The commands below assume the campaign used
+`.venv/bin/python`. A frozen campaign also contains absolute model, runtime and
+source-data paths: copying its directory alone does not relocate those inputs.
 
 With a completed, compatible frozen campaign and an eight-history export already
 available, the experiment workflow is:

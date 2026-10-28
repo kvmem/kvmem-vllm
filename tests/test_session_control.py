@@ -411,6 +411,54 @@ def test_dsh_terminal_capacity_failure_keeps_native_lookahead_inside_allocation(
         history += count
 
 
+@pytest.mark.parametrize('history,window,pressure', [
+    (161467,111419,True),  # Actual r8 import: five tokens before a 4492-token Query.
+    (161472,111424,True),  # Already at the atomic replay boundary.
+    (161467,110139,False), # Exactly at the safe pre-Query pressure boundary.
+    (161467,110171,True),  # One page beyond that boundary.
+    (161472,110144,False), # Query and native lookahead fit without import selection.
+])
+@pytest.mark.parametrize('cancel', [False,True])
+def test_warm_new_query_reserves_atomic_replay_before_import(monkeypatch,history,window,pressure,cancel):
+    import json
+    from vllm_kvmem.prompt_checkpoints import token_bytes
+    from vllm_kvmem.request_plan import request_plan
+    monkeypatch.setenv('KVMEM_REQUEST_PLAN_CONFIG',json.dumps({'rolling_active_window':True}))
+    control, events, binding, entry = planned_idle_session()
+    control.block_tokens, control.select_budget, control.gen_budget = 32,98304,16384
+    entry.history, entry.window = history,window
+    entry.tokens = token_bytes(list(range(165971)),history)
+    entry.mandatory = ()
+    req = request('tb-query',tokens=list(range(165971)))
+    req.num_prompt_tokens, req.max_tokens = 165971,131072
+    req.kv_transfer_params = {'kvmem_request_plan':{'kvmem_query_span':[161472,165964],
+        'kvmem_mandatory_spans':[]}}
+    assert control.lookup(req,0) == history
+    expected = 98304 - (-history % 32) if pressure else window
+    assert entry.pressure_restore == pressure
+    assert events[-1] == ('prepare',('tb-query',history,expected))
+    assert (entry.history,entry.window) == (history,window)
+    plan = request_plan(req,32,16384)
+    assert plan.query == (161472,165964) and req.max_tokens == 131072
+    if cancel:
+        control.finished(req)
+        assert entry.phase == 'idle' and not entry.pressure_restore
+        assert (entry.history,entry.window) == (history,window)
+        return
+    offset = history - expected
+    if history < plan.replay_begin:
+        count = plan.admit(history,2048,req.num_prompt_tokens,offset,114688)
+        assert history+count == plan.replay_begin
+        assert history-offset+count+7 <= 114688
+        history += count
+    count = plan.admit(history,16424,req.num_prompt_tokens,offset,114688)
+    assert count == 4492 and plan.action(history,req.num_prompt_tokens,offset,114688) == 'query'
+    assert history-offset+count+7 <= 114688
+    control.allocated(req,entry.history)
+    new_binding = control.take_commands().bindings[-1]
+    assert new_binding.pressure_restore == pressure and new_binding.window == expected
+
+
 @pytest.mark.parametrize('session', ['s',None])
 @pytest.mark.parametrize('rolling,prompt,expected', [
     (False,80,'pressure'), (True,80,'keep_selected'), (True,93,'pressure')])

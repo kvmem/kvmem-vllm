@@ -26,13 +26,15 @@ def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
 
-def backend_request(*, model, tokens, session, max_tokens, plan, backend_kind):
+def backend_request(*, model, tokens, session, max_tokens, plan, backend_kind, seed=1000):
     """Keep token and sampling transport identical across the two engines."""
     if backend_kind not in ('native', 'kvmem'):
         raise ValueError('Unknown inference backend')
+    if type(seed) is not int or not 0 <= seed < 2**32:
+        raise ValueError('Benchmark seed must be an unsigned 32-bit integer')
     data = dict(model=model, prompt=tokens, cache_salt=session, max_tokens=max_tokens,
         thinking_token_budget=4096, temperature=.6, top_p=.95, top_k=20, min_p=0,
-        presence_penalty=0, repetition_penalty=1, seed=1000,
+        presence_penalty=0, repetition_penalty=1, seed=seed,
         return_token_ids=True, skip_special_tokens=False)
     if backend_kind == 'kvmem':
         data.update(session_id=session, **plan)
@@ -124,6 +126,17 @@ def message_identity(message):
     return canonical(message)
 
 
+def _identity_key(value):
+    """Immutable, type-exact JSON key; tool argument strings remain untouched."""
+    if isinstance(value, dict):
+        return ('object', tuple(sorted((k, _identity_key(v)) for k, v in value.items())))
+    if isinstance(value, list):
+        return ('array', tuple(_identity_key(v) for v in value))
+    if isinstance(value, float):
+        return ('float', value.hex())
+    return (type(value).__name__, value)
+
+
 @dataclass
 class Trajectory:
     messages: list = field(default_factory=list)
@@ -138,6 +151,7 @@ class Trajectory:
     locality_spans: tuple = ()
     locality_provenance: tuple = ()
     rendered_prefix: bytes | None = None
+    identity_keys: tuple = ()
 
 
 class Prepared(tuple):
@@ -203,8 +217,9 @@ class PrefixTokens:
 
 
 class Planner:
-    def __init__(self, protocol, tokenizer, gen_budget=16384):
+    def __init__(self, protocol, tokenizer, gen_budget=16384, *, optimized_handoff=False):
         self.protocol, self.tokenizer = protocol, tokenizer
+        self.optimized_handoff = optimized_handoff
         self.gen_budget = gen_budget
         self.end = tokenizer.convert_tokens_to_ids('<|im_end|>')
 
@@ -214,7 +229,12 @@ class Planner:
     def prepare(self, payload, state):
         rendered = self.protocol(request=payload)
         text = rendered['prompt'].encode()
-        messages = [message_identity(m) for m in rendered['messages']]
+        optimized = getattr(self, 'optimized_handoff', False)
+        keys = tuple(_identity_key(m) for m in rendered['messages']) if optimized else ()
+        old_keys = getattr(state, 'identity_keys', ())
+        messages = [(state.messages[i] if optimized and i < len(old_keys) and
+                     i < len(state.messages) and keys[i] == old_keys[i] else message_identity(m))
+                    for i, m in enumerate(rendered['messages'])]
         control = canonical({'prefix':text[:rendered['control_end']].decode(), 'tools':rendered['tools']})
         n = len(state.messages)
         reused = bool(state.output and control == state.control and len(messages) > n+1
@@ -277,9 +297,22 @@ class Planner:
         # suffix uses its actual encoding and exactly one history offset.
         shift = 1 - boundary if reused else 0
         local_text = suffix if reused else text.decode()
-        local_spans = [dict(begin=span['begin'] + shift, end=span['end'] + shift,
-                            role=span['role']) for span in rendered['spans']
-                       if not reused or span['begin'] >= boundary]
+        local_spans = []
+        for span in rendered['spans']:
+            if reused and span['begin'] < boundary:
+                continue
+            end = span['end']
+            # commit() closes an accepted assistant at EOS. The renderer also
+            # includes the following separator newline in its byte range;
+            # exclude that separator here so a later canonical fallback agrees
+            # with already-validated history. Tokens, Query/pin coordinates and
+            # the actual prompt remain untouched. Only recognize the exact
+            # frozen-protocol suffix, never whitespace inside message content.
+            if (span['role'] == 'assistant' and
+                    text[span['begin']:end].endswith(b'<|im_end|>\n')):
+                end -= 1
+            local_spans.append(dict(begin=span['begin'] + shift, end=end + shift,
+                                    role=span['role']))
         mapped = map_prompt_spans(local_text, local_spans, encoded.ids,
             offset_mapping=encoded.offset_mapping, encoded_ids=encoded.offset_ids,
             tokenizer=self.tokenizer, source='deepswe_protocol',
@@ -314,8 +347,10 @@ class Planner:
         # Validate against the public API before launching model work.
         from vllm_kvmem.request_plan import RequestPlan
         RequestPlan.parse(plan, len(tokens), 32, self.gen_budget)
-        return Prepared((tokens, plan, rendered, messages, control, reused, locations),
-                        assistant_begin=assistant_begin)
+        result = Prepared((tokens, plan, rendered, messages, control, reused, locations),
+                          assistant_begin=assistant_begin)
+        result.identity_keys = keys
+        return result
 
     def response(self, raw, tools, model, usage, finish):
         clean = raw.removesuffix('<|im_end|>').removesuffix('<|endoftext|>')
@@ -337,8 +372,14 @@ class Planner:
     def commit(self, state, prepared, payload, response, output):
         tokens, plan, rendered, messages, control, reused, locations = prepared
         assistant = {'role':'assistant','content':response['content']}
-        converted = self.protocol(request={**payload,'messages':payload['messages']+[assistant]})
+        # Only the normalized final assistant is consumed here. In the frozen
+        # Qwen protocol its conversion depends on this message and tool schema,
+        # not on re-rendering all historical messages.
+        local = getattr(self, 'optimized_handoff', False)
+        converted = self.protocol(request={**payload,'messages':
+            [assistant] if local else payload['messages']+[assistant]})
         state.messages, state.control, state.tokens = messages, control, tokens
+        state.identity_keys = getattr(prepared, 'identity_keys', ())
         state.plan, state.output = plan, output
         state.locations = locations
         historical_end = max((s['end'] for s in rendered['spans']), default=rendered['control_end'])
@@ -393,11 +434,17 @@ def create_app(args, tokenizer):
     gen_budget = getattr(args, 'gen_budget', 16384)
     if type(gen_budget) is not int or gen_budget <= 0:
         raise ValueError('Generation budget must be positive')
-    planner = Planner(Protocol(args.protocol), tokenizer, gen_budget)
+    output_cap = getattr(args, 'max_output_tokens', None)
+    if output_cap is None:
+        output_cap = gen_budget  # Preserve frozen benchmark defaults.
+    if type(output_cap) is not int or not 0 < output_cap < args.max_model_len:
+        raise ValueError('Output cap must be positive and below the logical context limit')
+    planner_options = {'optimized_handoff': True} if getattr(args, 'optimized_handoff', False) else {}
+    planner = Planner(Protocol(args.protocol), tokenizer, gen_budget, **planner_options)
     allowed = set(args.tasks.read_text().splitlines()) | {'preflight'}
     locks = {task:asyncio.Lock() for task in allowed}
     states = {task:Trajectory() for task in allowed}
-    client = httpx.AsyncClient(trust_env=False,timeout=max(3600, gen_budget / 10))
+    client = httpx.AsyncClient(trust_env=False,timeout=max(3600, output_cap / 10))
     inflight = 0
     credits = {}
     capacity = getattr(args, 'cpu_admission_bytes', None) or int(args.cpu_admission_gib*1024**3)
@@ -424,6 +471,8 @@ def create_app(args, tokenizer):
                     raise ValueError('Engine CPU admission/geometry does not match bridge budget')
                 engine_admission_verified = True
             return 0.  # Engine defers only requests which cannot acquire credits.
+        if amount > capacity:
+            raise ValueError('Requested history/output exceeds legacy CPU admission capacity')
         begin=time.monotonic()
         async with changed:
             reported=False
@@ -498,7 +547,10 @@ def create_app(args, tokenizer):
                 directory=args.output/task/f'{state.turns+1:05d}'
                 directory.mkdir(parents=True,exist_ok=True)
                 (directory/'request.json').write_text(json.dumps(payload,ensure_ascii=False))
-                max_tokens = min(payload.get('max_tokens', gen_budget), gen_budget)
+                requested = payload.get('max_tokens', output_cap)
+                if type(requested) is not int or requested <= 0:
+                    raise ValueError('max_tokens must be a positive integer')
+                max_tokens = min(requested, output_cap)
                 if len(tokens)+max_tokens>args.max_model_len:
                     log({'event':'context_limit','task':task,'turn':state.turns+1,'at':time.time(),
                          'prompt_tokens':len(tokens),'requested_output_tokens':max_tokens,
@@ -506,7 +558,8 @@ def create_app(args, tokenizer):
                     raise ValueError('Complete trajectory exceeds configured logical context; no truncation/compaction applied')
                 session=args.run_id+'-'+task
                 data=backend_request(model=args.model, tokens=tokens, session=session,
-                    max_tokens=max_tokens, plan=plan, backend_kind=backend_kind)
+                    max_tokens=max_tokens, plan=plan, backend_kind=backend_kind,
+                    seed=getattr(args, 'seed', 1000))
                 previous_tokens = len(state.tokens) + len(state.output) if reused else 0
                 amount=((len(tokens)+data['max_tokens']+31)//32)*32*17*4*256*3
                 cpu_queue_seconds=await reserve(task,amount)
@@ -576,12 +629,18 @@ if __name__=='__main__':
     p.add_argument('--host',required=True);p.add_argument('--port',type=int,default=18483)
     p.add_argument('--max-model-len',type=int,default=1048576)
     p.add_argument('--gen-budget',type=int,default=16384)
+    p.add_argument('--max-output-tokens',type=int,
+                   help='Independent reply cap; defaults to G. Values above G require rolling_active_window on the backend and stay in one native request')
+    p.add_argument('--seed',type=int,default=1000)
     p.add_argument('--backend-kind',choices=('native','kvmem'),default='kvmem')
     p.add_argument('--cpu-admission-gib',type=int,default=72)
     p.add_argument('--cpu-admission-bytes',type=int)
     p.add_argument('--cpu-admission-policy',choices=('legacy','engine'),default='legacy')
     p.add_argument('--cache-geometry',type=Path)
+    p.add_argument('--optimized-handoff',action='store_true',
+                   help='Reuse exact message identities and local spans across tool turns')
     args=p.parse_args()
+    if not 0 <= args.seed < 2**32:p.error('Seed must be an unsigned 32-bit integer')
     if args.backend_kind == 'kvmem' and args.cpu_admission_policy == 'engine' and args.cache_geometry is None:
         p.error('Engine admission requires --cache-geometry')
     from transformers import AutoTokenizer

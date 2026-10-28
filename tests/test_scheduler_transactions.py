@@ -159,8 +159,10 @@ def test_refresh_pages_cannot_be_preempted_before_ack():
     assert not scheduler._request_blocks_can_be_freed(request)
 
 
-def test_published_rows_include_blocks_allocated_in_resume_step(monkeypatch, tmp_path):
+@pytest.mark.parametrize('native_field', [False, True])
+def test_published_rows_include_blocks_allocated_in_resume_step(monkeypatch, tmp_path, native_field):
     from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm_kvmem.connector import ControlMetadata
     scheduler, request, _ = setup_scheduler()
     scheduler.begin_refresh(request, 32)
     command = scheduler.connector.commands[0]
@@ -171,11 +173,13 @@ def test_published_rows_include_blocks_allocated_in_resume_step(monkeypatch, tmp
     def allocate_on_resume(self, throttle):
         for manager in self.window_managers.values():
             manager.allocate_new_blocks("a", 80, 80)
-        return SimpleNamespace(block_table_updates=None)
+        return (SimpleNamespace(block_table_updates=None) if native_field else
+                SimpleNamespace(kv_connector_metadata=ControlMetadata()))
 
     monkeypatch.setattr(Scheduler, "schedule", allocate_on_resume)
     output = scheduler.schedule()
-    assert all(len(row) == 3 for row in output.block_table_updates["a"])
+    updates = output.block_table_updates if native_field else output.kv_connector_metadata.block_table_updates
+    assert all(len(row) == 3 for row in updates["a"])
     assert not scheduler.table_updates
 
 

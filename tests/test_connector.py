@@ -28,15 +28,18 @@ def pair(*, async_retirement=False):
     return scheduler, worker
 
 
-def test_async_retirement_requires_bounded_admission_and_the_pinned_native_idle_hook(monkeypatch):
+def test_async_retirement_requires_bounded_admission_and_native_idle_hook(monkeypatch):
     monkeypatch.delenv('KVMEM_BOUNDED_TARGET', raising=False)
     with pytest.raises(ValueError, match='bounded authority'):
         pair(async_retirement=True)
     monkeypatch.setenv('KVMEM_BOUNDED_TARGET', '1')
     scheduler, worker = pair(async_retirement=True)
     assert scheduler.async_retirement and worker.async_retirement
-    import vllm_kvmem.connector as connector
-    monkeypatch.setattr(connector, 'RETIREMENT_CONNECTOR_SHA256', 'unqualified')
+    import vllm_kvmem.engine_api as api
+    def missing(name):
+        assert name == 'retirement'
+        raise api.UnsupportedEngine('Missing idle-worker completion hook')
+    monkeypatch.setattr(api, 'require_contract', missing)
     with pytest.raises(ValueError, match='idle-worker'):
         pair(async_retirement=True)
 

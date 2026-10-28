@@ -30,7 +30,47 @@ def test_batch_credits_are_shared_fair_and_reset_without_delaying_idle_prefill()
     assert budget.available('second') is None
 
 
-def test_scheduler_shared_budget_keeps_decode_and_atomic_query_independent(monkeypatch):
+@pytest.mark.parametrize('contenders', [1, 2, 4, 7, 8])
+def test_per_request_cap_does_not_divide_a_single_chunks_credits_between_peers(contenders):
+    budget = BatchPrefillBudget(2048, 32, per_request_tokens=256)
+    budget.begin(decode_ready=True, contenders=contenders)
+    for index in range(contenders):
+        assert budget.available(str(index)) == 256
+        budget.charge(str(index), 256)
+        budget.charge(str(index), 256)
+    assert budget.remaining == 2048 - contenders*256
+    budget.begin(decode_ready=False, contenders=contenders)
+    assert budget.available('first') is None
+    budget.charge('first', 8192)
+
+
+def test_per_request_cap_never_increases_shared_budget_or_changes_zero_default():
+    capped = BatchPrefillBudget(512, 32, per_request_tokens=256)
+    original = BatchPrefillBudget(512, 32)
+    for budget in [capped, original]:
+        budget.begin(decode_ready=True, contenders=8)
+        for index in range(8):
+            assert budget.available(str(index)) == 64
+            budget.charge(str(index), 64)
+        assert budget.remaining == 0
+    for invalid in [True, -32, 17, 1024]:
+        with pytest.raises(ValueError):BatchPrefillBudget(512, 32, per_request_tokens=invalid)
+
+
+def test_per_request_limit_parses_and_requires_an_enabled_aligned_batch_budget():
+    from test_options import config
+    from vllm_kvmem.options import RuntimeOptions
+    values=dict(block_tokens=32,repository_blocks=8192,request_planning=True,prefill_batch_tokens=2048,prefill_request_tokens=256)
+    assert RuntimeOptions.from_vllm(config({'kvmem':values})).prefill_request_tokens==256
+    for invalid in [True,-32,17,4096]:
+        with pytest.raises(ValueError,match='Per-request'):
+            RuntimeOptions.from_vllm(config({'kvmem':values|dict(prefill_request_tokens=invalid)}))
+    with pytest.raises(ValueError,match='Per-request'):
+        RuntimeOptions.from_vllm(config({'kvmem':values|dict(prefill_batch_tokens=0)}))
+
+
+@pytest.mark.parametrize('per_request', [False, True])
+def test_scheduler_shared_budget_keeps_decode_and_atomic_query_independent(monkeypatch,per_request):
     from copy import copy
     from vllm.v1.core.sched.scheduler import Scheduler
     from vllm_kvmem.admission import QueryPolicy
@@ -41,7 +81,7 @@ def test_scheduler_shared_budget_keeps_decode_and_atomic_query_independent(monke
     first.num_prompt_tokens = 100000
     first.kv_transfer_params = {'kvmem_request_plan': {'kvmem_query_span': [19028, 23022]}}
     second = copy(first); second.request_id = 'b'
-    scheduler.prefill_batch = BatchPrefillBudget(512, 32)
+    scheduler.prefill_batch = BatchPrefillBudget(512, 32, per_request_tokens=256 if per_request else 0)
     scheduler.prefill_batch.begin(decode_ready=True, contenders=2)
     monkeypatch.setattr(Scheduler, '_reserve_prefill_lookahead', lambda self,r,h,n:n)
     assert scheduler._reserve_prefill_lookahead(first, 32768, 2048) == 256
@@ -290,7 +330,7 @@ def test_elastic_v2_controls_reach_native_options_without_changing_model(tmp_pat
         execution_mode='compiled_graph', request_planning=True, archive_backend='cpu',
         async_refresh=True, async_restore=True, maintenance_max_steps=8, session_checkpoint_policy='pm',
         adaptive_prefill=True, step_latency_interval=4, decode_step_target_ms=60.,
-        prefill_min_tokens=128, prefill_max_tokens=1024, prefill_batch_tokens=512,
+        prefill_min_tokens=128, prefill_max_tokens=1024, prefill_batch_tokens=512,prefill_request_tokens=256,
         max_num_seqs=4, max_inflight=4, active_resident_ttl_ms=5000., active_resident_max_fraction=.5,
         maintenance_transfer_bytes_per_second=8*1024**3, maintenance_transfer_burst_bytes=64*1024**2)
     cfg['active_resident_pressure_only'] = pressure_only
@@ -298,7 +338,7 @@ def test_elastic_v2_controls_reach_native_options_without_changing_model(tmp_pat
     resolved, _ = build_launch(cfg, tmp_path, tmp_path/'run')
     native = resolved['mean_k_backend_profile']
     for key in ('async_restore','adaptive_prefill','step_latency_interval','decode_step_target_ms',
-                'prefill_min_tokens','prefill_max_tokens','prefill_batch_tokens',
+                'prefill_min_tokens','prefill_max_tokens','prefill_batch_tokens','prefill_request_tokens',
                 'active_resident_ttl_ms','active_resident_pressure_only','active_resident_max_fraction',
                 'maintenance_transfer_bytes_per_second','maintenance_transfer_burst_bytes'):
         assert native['kvmem'][key] == cfg[key]

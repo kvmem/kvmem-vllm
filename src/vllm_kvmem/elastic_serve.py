@@ -13,7 +13,8 @@ import signal
 from .multi_user import _load_users
 from .serve import _validate_safetensors_config, _validate_profiler_config
 from .options import (GRAPH_DEFAULTS, canonical_policy_payload, resolve_graph_policy,
-                      validate_graph_options, validate_query_score_mode, validate_query_fps_experiments)
+                      validate_graph_options, validate_query_score_mode, validate_query_fps_experiments,
+                      validate_graph_query_trace_bytes)
 
 
 def build_launch(profile, base, run_dir):
@@ -45,6 +46,11 @@ def build_launch(profile, base, run_dir):
         'request_planning': False, 'mean_k_backend': 'torch_reference', 'session_checkpoint_policy':None,
         'query_score_mode': 'mean_k', 'query_window_cache_bytes': 2147483648,
         'query_fps_halo_blocks': 0, 'query_fps_optimized': False,
+        'query_fps_prebuild': False,
+        'query_fps_prebuild_device': 'cpu',
+        'query_fps_cpu_backend': 'torch', 'query_fps_cpu_workers': 8,
+        'query_mean_quota_fraction': 0.0,
+        'graph_query_trace_max_bytes': 16777216,
         'query_history':False,'query_history_decay':0.5,'guided_query_tokens':0,
         'action_attention':False,'action_scope':'tool-call','action_layers':'spread3',
         'action_interval':16,'action_fraction':.25,'action_decay':.5,'action_combine':'quota',
@@ -61,7 +67,7 @@ def build_launch(profile, base, run_dir):
         'maintenance_max_steps':0,'maintenance_busy_ms':2.0,'maintenance_idle_ms':8.0,
         'maintenance_aging_ms':250.0,'maintenance_inflight_bytes':0,'async_restore':False,
         'adaptive_prefill':False,'step_latency_interval':0,'decode_step_target_ms':50.0,
-        'prefill_min_tokens':128,'prefill_max_tokens':2048,'prefill_feedback_timeout_ms':5000.0,'prefill_batch_tokens':0,'active_resident_ttl_ms':0.0,'active_resident_max_fraction':0.5,
+        'prefill_min_tokens':128,'prefill_max_tokens':2048,'prefill_feedback_timeout_ms':5000.0,'prefill_batch_tokens':0,'prefill_request_tokens':0,'active_resident_ttl_ms':0.0,'active_resident_max_fraction':0.5,
         'active_resident_pressure_only':False,
         'maintenance_transfer_bytes_per_second':0,'maintenance_transfer_burst_bytes':67108864,'offline_agent_policy':False,
         'repository_gc':False, 'historical_gc':None, **GRAPH_DEFAULTS}
@@ -74,9 +80,13 @@ def build_launch(profile, base, run_dir):
         graph_scoring_version=cfg['graph_scoring_version'],
         graph_aggregation=cfg['graph_aggregation'], graph_alpha=cfg['graph_alpha'],
         query_history=cfg['query_history'], guided_query_tokens=cfg['guided_query_tokens'],
-        context_mode=cfg['context_mode'])
+        context_mode=cfg['context_mode'], mean_quota_fraction=cfg['query_mean_quota_fraction'],
+        historical_gc=cfg['historical_gc'])
     validate_query_fps_experiments(cfg['query_score_mode'],
-        cfg['query_fps_halo_blocks'], cfg['query_fps_optimized'])
+        cfg['query_fps_halo_blocks'], cfg['query_fps_optimized'], cfg['query_fps_prebuild'],
+        cfg['query_fps_prebuild_device'], cfg['query_fps_cpu_backend'], cfg['query_fps_cpu_workers'],
+        mean_quota_fraction=cfg['query_mean_quota_fraction'])
+    validate_graph_query_trace_bytes(cfg['graph_query_trace_max_bytes'])
     if type(cfg['repository_gc']) is not bool:
         raise ValueError('repository_gc must be boolean')
     if cfg['historical_gc'] is not None:
@@ -93,7 +103,7 @@ def build_launch(profile, base, run_dir):
         pressure_policy=cfg['pressure_policy'])
     if cfg['repository_gc'] and cfg['context_mode'] != 'meank':
         raise ValueError('repository_gc requires MeanK context management')
-    if (cfg['cpu_history_coordination'] or cfg['maintenance_max_steps'] or cfg['async_restore'] or cfg['adaptive_prefill'] or cfg['step_latency_interval'] or cfg['prefill_batch_tokens'] or cfg['active_resident_ttl_ms'] or cfg['active_resident_pressure_only'] or cfg['maintenance_transfer_bytes_per_second'] or cfg['offline_agent_policy']) and cfg['context_mode'] != 'meank':
+    if (cfg['cpu_history_coordination'] or cfg['maintenance_max_steps'] or cfg['async_restore'] or cfg['adaptive_prefill'] or cfg['step_latency_interval'] or cfg['prefill_batch_tokens'] or cfg['prefill_request_tokens'] or cfg['active_resident_ttl_ms'] or cfg['active_resident_pressure_only'] or cfg['maintenance_transfer_bytes_per_second'] or cfg['offline_agent_policy']) and cfg['context_mode'] != 'meank':
         raise ValueError('History/maintenance coordination requires MeanK context management')
     if cfg['archive_backend'] not in ('nvme','cpu'):
         raise ValueError('Archive backend must be nvme or cpu')
@@ -198,7 +208,9 @@ def build_launch(profile, base, run_dir):
                                'draft_quantization', 'profiler_config', 'async_seal', 'cpu_direct_record_seal', 'cpu_seal_serial_allocate', 'cpu_mean_index_simd', 'assembly_read_prefetch', 'assembly_fused_layers', 'draft_method',
                                'reuse_resident_v', 'gpu_raw_k_cache_bytes','async_cpu_scatter', 'execution_mode', 'batched_cpu_append',
                                'request_planning', 'mean_k_backend', 'query_score_mode', 'session_checkpoint_policy',
-                               'query_fps_halo_blocks', 'query_fps_optimized',
+                               'query_fps_halo_blocks', 'query_fps_optimized', 'query_fps_prebuild', 'query_fps_prebuild_device',
+                               'query_fps_cpu_backend', 'query_fps_cpu_workers',
+                               'query_mean_quota_fraction',
                                'query_history','query_history_decay','guided_query_tokens','repository_gc','historical_gc',
                                'query_replay_backend','query_replay_cobatch',
                                'action_attention','action_scope','action_layers','action_interval',
@@ -212,7 +224,7 @@ def build_launch(profile, base, run_dir):
                                'maintenance_max_steps','maintenance_busy_ms','maintenance_idle_ms',
                                'maintenance_aging_ms','maintenance_inflight_bytes','async_restore',
                                'adaptive_prefill','step_latency_interval','decode_step_target_ms',
-                               'prefill_min_tokens','prefill_max_tokens','prefill_feedback_timeout_ms','prefill_batch_tokens','active_resident_ttl_ms','active_resident_pressure_only','active_resident_max_fraction','maintenance_transfer_bytes_per_second','maintenance_transfer_burst_bytes','offline_agent_policy'}:
+                               'prefill_min_tokens','prefill_max_tokens','prefill_feedback_timeout_ms','prefill_batch_tokens','prefill_request_tokens','active_resident_ttl_ms','active_resident_pressure_only','active_resident_max_fraction','maintenance_transfer_bytes_per_second','maintenance_transfer_burst_bytes','offline_agent_policy'}:
         if type(cfg[name]) is not int or cfg[name] <= 0:
             raise ValueError(f'{name} must be a positive integer')
     if type(cfg['active_context_tokens']) is not int or not 0 <= cfg['active_context_tokens'] <= cfg['max_model_len']:
@@ -288,7 +300,7 @@ def build_launch(profile, base, run_dir):
                     'maintenance_max_steps','maintenance_busy_ms','maintenance_idle_ms',
                     'maintenance_aging_ms','maintenance_inflight_bytes','async_restore',
                     'adaptive_prefill','step_latency_interval','decode_step_target_ms',
-                    'prefill_min_tokens','prefill_max_tokens','prefill_feedback_timeout_ms','prefill_batch_tokens','active_resident_ttl_ms','active_resident_pressure_only','active_resident_max_fraction','maintenance_transfer_bytes_per_second','maintenance_transfer_burst_bytes','offline_agent_policy')},
+                    'prefill_min_tokens','prefill_max_tokens','prefill_feedback_timeout_ms','prefill_batch_tokens','prefill_request_tokens','active_resident_ttl_ms','active_resident_pressure_only','active_resident_max_fraction','maintenance_transfer_bytes_per_second','maintenance_transfer_burst_bytes','offline_agent_policy')},
                 # The archive clips this to its actual historical record
                 # geometry. MTP adds a layer; do not retain the target-only
                 # 12 GiB constant and leave global CPU capacity unused.
@@ -304,6 +316,12 @@ def build_launch(profile, base, run_dir):
                 'query_window_cache_bytes': cfg['query_window_cache_bytes'],
                 'query_fps_halo_blocks': cfg['query_fps_halo_blocks'],
                 'query_fps_optimized': cfg['query_fps_optimized'],
+                'query_fps_prebuild': cfg['query_fps_prebuild'],
+                'query_fps_prebuild_device': cfg['query_fps_prebuild_device'],
+                'query_fps_cpu_backend': cfg['query_fps_cpu_backend'],
+                'query_fps_cpu_workers': cfg['query_fps_cpu_workers'],
+                'query_mean_quota_fraction': cfg['query_mean_quota_fraction'],
+                'graph_query_trace_max_bytes': cfg['graph_query_trace_max_bytes'],
                 'query_history':cfg['query_history'],'query_history_decay':cfg['query_history_decay'],
                 'guided_query_tokens':cfg['guided_query_tokens'],
                 **{key:cfg[key] for key in ('action_attention','action_scope','action_layers',

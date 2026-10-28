@@ -9,6 +9,12 @@ def register_plugin() -> None:
     global _registered
     if _registered:
         return
+    if os.getenv('KVMEM_SERVING') == '1':
+        from .compat import enable_label_logprobs
+        enable_label_logprobs()
+        if os.getenv('KVMEM_LOGICAL_KV_CAPACITY') == '1':
+            from .logical_capacity import enable
+            enable()
     if os.getenv("KVMEM_DRAFT_LOAD_COMPAT") == "1":
         from .compat import enable_draft_load_config_fix
         enable_draft_load_config_fix()
@@ -22,12 +28,12 @@ def register_plugin() -> None:
         from .q8_adapter import enable_q8_tensorcore
         enable_q8_tensorcore()
     # Discovery alone changes nothing and initializes no CUDA. Explicit options
-    # above install version-checked import adapters in this worker process.
+    # above install capability-checked import adapters in this worker process.
     _registered = True
 
 
 def check_engine_version() -> str:
-    actual = version("vllm")
-    if actual != "0.30.0":
-        raise RuntimeError(f"Unqualified vLLM version {actual}; expected 0.30.0")
-    return actual
+    """Retain the public diagnostic entry, without an exact-version gate."""
+    from .engine_api import require_contract
+    require_contract('runner')
+    return version("vllm")

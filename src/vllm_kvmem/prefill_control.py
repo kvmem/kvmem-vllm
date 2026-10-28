@@ -21,10 +21,14 @@ class BatchPrefillBudget:
     This is an optional token cap, not a latency estimate. Offline ordering and
     aging choose the contenders; without ready decode the cap is disabled.
     """
-    def __init__(self, tokens, block_tokens):
+    def __init__(self, tokens, block_tokens, *, per_request_tokens=0):
         if type(tokens) is not int or tokens <= 0 or tokens % block_tokens:
             raise ValueError('Batch prefill budget must contain aligned blocks')
+        if (type(per_request_tokens) is not int or not 0 <= per_request_tokens <= tokens
+                or per_request_tokens % block_tokens):
+            raise ValueError('Per-request prefill cap must be aligned and within batch credits')
         self.tokens, self.block = tokens, block_tokens
+        self.per_request_tokens = per_request_tokens
         self.remaining = self.share = None
         self.contenders = 0
         self.reserved = {}
@@ -37,6 +41,8 @@ class BatchPrefillBudget:
         self.contenders = contenders
         count = max(1, contenders)
         self.share = max(self.block, self.tokens // count // self.block * self.block)
+        if self.per_request_tokens:
+            self.share = min(self.share, self.per_request_tokens)
         self.limited_steps += int(decode_ready)
 
     def available(self, request_id):
@@ -56,6 +62,7 @@ class BatchPrefillBudget:
 
     def snapshot(self):
         return dict(tokens=self.tokens, remaining=self.remaining, per_request_share=self.share,
+                    per_request_tokens=self.per_request_tokens,
                     contenders=self.contenders, decode_ready=self.remaining is not None,
                     steps=self.steps, limited_steps=self.limited_steps, deferrals=self.deferred)
 

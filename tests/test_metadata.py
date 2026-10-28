@@ -13,18 +13,20 @@ from vllm_kvmem.metadata_patch import patch_metadata_source
 
 
 def test_real_vllm_metadata_separates_working_set_from_recurrent_history():
-    path = Path(importlib.metadata.distribution("vllm").locate_file(
-        "vllm/v1/worker/gpu/attn_utils.py"))
+    from vllm_kvmem.engine_api import engine_root
+    path = engine_root() / 'v1/worker/gpu/attn_utils.py'
     source = patch_metadata_source(path.read_bytes())
     module = ModuleType("_kvmem_metadata_qualification")
     sys.modules[module.__name__] = module
     try:
         exec(compile(source, str(path), "exec"), module.__dict__)
         class Builder:
+            supports_update_block_table = False
             def build(self, common_prefix_len, common_attn_metadata, **kwargs):
                 return common_attn_metadata, kwargs
         builder = Builder()
-        groups = [[SimpleNamespace(layer_names=[name], get_metadata_builder=lambda _: builder)]
+        groups = [[SimpleNamespace(layer_names=[name], get_metadata_builder=lambda _: builder,
+                    build_metadata=lambda metadata, ubatch, **kwargs: builder.build(0, metadata, **kwargs))]
                   for name in ("attention", "recurrent")]
         original_lens = torch.tensor([100001, 250001], dtype=torch.int32)
         window_lens = torch.tensor([257, 513], dtype=torch.int32)

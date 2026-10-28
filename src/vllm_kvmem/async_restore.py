@@ -102,7 +102,7 @@ def step_restore(manager, job):
 def _step_restore(manager, job, *, timing=None):
     worker = manager.runner._kvmem_sessions
     rid, command = job.command.request_id, job.command
-    if job.stage == 'prepare':
+    if job.stage in ('prepare', 'restore_model_prepare'):
         if rid not in manager.runner.req_states.req_id_to_index:
             return False  # First control packet precedes native row initialization.
         binding = worker.bindings[rid]
@@ -128,21 +128,21 @@ def _step_restore(manager, job, *, timing=None):
                 raise ValueError('Resident import requires the exact terminal checkpoint')
             job.authority = job.checkpoint.authority
             job.model_bytes = job.checkpoint.model.bytes
-        with _stage(timing, 'prepare_claim_window'):
-            pressure_kwargs = {}
-            if pressure:
-                block = manager.options.memory.block_tokens
-                pressure_kwargs = dict(pressure=True,
-                    pressure_budget=(binding.window + block - 1) // block * block,
-                    mandatory_spans=binding.mandatory_spans)
-            plan = worker.pool.prepare_claim_window(job.checkpoint, wait=False,
-                metadata_binding=binding,
-                **pressure_kwargs,
-                **({'timing': timing} if timing is not None else {}))
-        if plan is None:
-            return False  # P rewind waits only this request, never the public batch.
-        if pressure and plan.total_window_tokens != binding.window:
-            raise ValueError('Pressure restore differs from its reserved window')
+        if job.stage == 'restore_model_prepare':
+            plan = job.restore_plan
+            if plan is None or job.checkpoint is None:
+                raise RuntimeError('Split restore lost its prepared frame')
+        else:
+            with _stage(timing, 'prepare_claim_window'):
+                plan = _prepare_window(manager, worker, job, binding, pressure, timing)
+            if plan is None:
+                return False  # P rewind waits only this request, never the public batch.
+            if pressure and plan.total_window_tokens != binding.window:
+                raise ValueError('Pressure restore differs from its reserved window')
+            if getattr(manager.options, 'restore_prepare_split', False):
+                job.restore_plan = plan
+                job.stage = 'restore_model_prepare'
+                return True  # Let the cooperative time budget yield to public work.
         from .session_state import PromptStateAdapter
         from .window_assembly import NativeWindowAssembler
         with _stage(timing, 'model_state_prepare'):
@@ -165,6 +165,7 @@ def _step_restore(manager, job, *, timing=None):
             if not manager.maintenance.acquire(job):
                 raise RuntimeError('Restore lane lost its transfer reservation')
         job.restore_context = RestoreContext(job.checkpoint, plan, assembler, model, ready, stream)
+        job.restore_plan = None
         job.stage = 'restore_copy'
         job.authority._refresh_background = True
         job.service_started = time.perf_counter()
@@ -174,6 +175,22 @@ def _step_restore(manager, job, *, timing=None):
         manager.emit(job, 'restore_submitted', model_bytes=job.model_bytes,
                      lane='resident' if resident else 'assembly')
         return True
+    return _finish_restore(manager, job, worker, rid, command, timing)
+
+
+def _prepare_window(manager, worker, job, binding, pressure, timing):
+    pressure_kwargs = {}
+    if pressure:
+        block = manager.options.memory.block_tokens
+        pressure_kwargs = dict(pressure=True,
+            pressure_budget=(binding.window + block - 1) // block * block,
+            mandatory_spans=binding.mandatory_spans)
+    return worker.pool.prepare_claim_window(job.checkpoint, wait=False,
+        metadata_binding=binding, **pressure_kwargs,
+        **({'timing': timing} if timing is not None else {}))
+
+
+def _finish_restore(manager, job, worker, rid, command, timing):
     if job.stage != 'restore_copy':
         raise RuntimeError('Unknown checkpoint restore phase')
     if not job.future.done():
@@ -205,7 +222,9 @@ def _step_restore(manager, job, *, timing=None):
     if context.assembler is not None and not context.assembler.close():
         raise RuntimeError('Completed restore still owns assembly scratch')
     manager.runner._kvmem_restore_allocations.pop(rid)
-    manager.maintenance.observe(job, assembly.uploaded_bytes + job.model_bytes)
+    cache_hit = getattr(context.model, 'cached_payload', None) is not None
+    model_uploaded = 0 if cache_hit else job.model_bytes
+    manager.maintenance.observe(job, assembly.uploaded_bytes + model_uploaded)
     manager.maintenance.release(job)
     if getattr(manager.maintenance, 'offline', False):
         manager.maintenance.restore_timings.append(dict(request_id=rid,
@@ -215,12 +234,16 @@ def _step_restore(manager, job, *, timing=None):
     row = dict(request_id=rid, history_tokens=command.history_end, active_tokens=command.window_tokens,
         started=job.started, finished=time.perf_counter(), uploaded_bytes=assembly.uploaded_bytes,
         model_bytes=job.model_bytes, host_prepare_seconds=assembly.host_prepare_seconds,
+        model_uploaded_bytes=model_uploaded, model_cache_hit=cache_hit,
+        model_snapshot_cache=(worker.model_adapter.snapshot_cache.stats()
+            if getattr(worker.model_adapter, 'snapshot_cache', None) is not None else None),
         resident_active_tokens=command.window_tokens if command.resident else 0,
         split_tokens=getattr(assembly, 'split_tokens', 0),
         partial_tokens=getattr(assembly, 'partial_tokens', 0),
         raw_cache_hit_tokens=getattr(assembly, 'raw_cache_hit_tokens', 0),
         resident_v_reused_tokens=getattr(assembly, 'resident_v_reused_tokens', 0),
         public_peer_count=len(job.peers), cancelled=job.cancelled,
+        completion_poll=getattr(job, 'restore_completion_poll', None) or 'pre_forward',
         lane='resident' if resident_lane(job) else 'assembly')
     with (manager.runner._kvmem_probe_output/'async_restore.jsonl').open('a') as f:
         f.write(json.dumps(row)+'\n')

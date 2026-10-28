@@ -11,11 +11,14 @@ license = "Apache-2.0"
 license-files = ["LICENSE", "third_party/qw3/LICENSE", "third_party/vllm/LICENSE"]
 
 [project.optional-dependencies]
-vllm = ["vllm==0.30.0", "ninja>=1.11,<2"]
+vllm = ["vllm>=0.30.0", "ninja>=1.11,<2"]
 test = ["pytest>=8,<10"]
 
 [project.entry-points."vllm.general_plugins"]
 kvmem = "vllm_kvmem:register"
+
+[project.entry-points."vllm.endpoint_plugins"]
+kvmem = "vllm_kvmem.systemone:SystemOnePlugin"
 
 [project.scripts]
 vllm-kvmem = "vllm_kvmem.__main__:main"

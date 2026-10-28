@@ -168,13 +168,14 @@ def empty_startup(*, install_journal=False):
 def test_runner_temporary_graph_cache_then_serving_cache_has_fresh_journal(monkeypatch, positional):
     """Exercise the real override in native graph profiling -> teardown -> init order."""
     import gc
-    import inspect
     import weakref
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm_kvmem.engine_api import engine_root, find_symbol
     from vllm_kvmem.runner import make_probe_runner
     monkeypatch.setenv('KVMEM_ASYNC_CHECKPOINT_CAPTURE', '1')
-    # The override accepts *args: keep positional forwarding tied to pinned native.
-    assert list(inspect.signature(GPUModelRunner.initialize_kv_cache).parameters)[:3] == [
+    # Check positional forwarding without importing unrelated GPU model kernels.
+    native = find_symbol((engine_root() / 'v1/worker/gpu/model_runner.py').read_text(),
+                         'GPUModelRunner.initialize_kv_cache')
+    assert [arg.arg for arg in native.args.args][:3] == [
         'self', 'kv_cache_config', 'is_profiling']
     calls = []
 
@@ -182,6 +183,8 @@ def test_runner_temporary_graph_cache_then_serving_cache_has_fresh_journal(monke
         def __init__(self):
             self.__dict__.update(vars(empty_startup()))
             self._kvmem_sessions.runner = self
+            self.vllm_config = SimpleNamespace(kv_transfer_config=None,
+                cache_config=SimpleNamespace(cache_dtype='fp8_e4m3'))
 
         def initialize_kv_cache(self, kv_cache_config, is_profiling=False,
                                 kv_cache_allocation_context=None):

@@ -27,7 +27,7 @@ class Record:
     count: int
     raw: torch.Tensor | None
     values: torch.Tensor | None
-    key_sum: torch.Tensor
+    key_sum: torch.Tensor | None
     archived: bool = False
     submitted: bool = False
     digest: str | None = None
@@ -88,7 +88,8 @@ class RequestAuthority:
                  raw_dtype=torch.bfloat16, resident_records=16, gc_config=None, gc_progress=None,
                  scoring_layers=None, mean_k_backend='torch_reference',
                  cpu_mean_index_simd=False, mean_index_stats=None,
-                 query_score_mode='mean_k', query_window_cache_bytes=2147483648):
+                 query_score_mode='mean_k', query_window_cache_bytes=2147483648,
+                 cpu_release_sealed_sums=False, query_fps_cache_fp8=False):
         if min(layers, heads, head_dim, resident_records) <= 0 or raw_dtype not in (
                 torch.bfloat16, torch.float16, torch.float8_e4m3fn):
             raise ValueError("Invalid authority geometry or staging budget")
@@ -102,6 +103,14 @@ class RequestAuthority:
         if mean_k_backend not in ('torch_reference','qw3_cuda'):
             raise ValueError('Invalid MeanK backend')
         self.mean_k_backend = mean_k_backend
+        if type(cpu_release_sealed_sums) is not bool or type(query_fps_cache_fp8) is not bool:
+            raise ValueError('Compact CPU index settings must be boolean')
+        if cpu_release_sealed_sums and mean_k_backend != 'qw3_cuda':
+            raise ValueError('Releasing sealed sums requires a stored native MeanK')
+        if query_fps_cache_fp8 and (raw_dtype != torch.float8_e4m3fn or
+                mean_k_backend != 'qw3_cuda' or query_score_mode != 'key_fps_4'):
+            raise ValueError('Compact FPS cache requires original FP8 Keys and native FPS scoring')
+        self.cpu_release_sealed_sums = cpu_release_sealed_sums
         if query_score_mode not in ('mean_k', 'overlap_16_8', 'key_fps_4') or (query_score_mode != 'mean_k' and config.block_tokens != 32):
             raise ValueError('Invalid Query window mode or physical block geometry')
         self.query_score_mode = query_score_mode
@@ -115,7 +124,7 @@ class RequestAuthority:
             from .query_key_fps import KeyFPSCache
             self.query_window_cache = KeyFPSCache(archive, self.scoring_layers, heads, head_dim,
                 dtype=torch.float16 if mean_k_backend == 'qw3_cuda' else torch.float32,
-                max_bytes=query_window_cache_bytes)
+                max_bytes=query_window_cache_bytes, compact_fp8=query_fps_cache_fp8)
         if type(cpu_mean_index_simd) is not bool:
             raise ValueError('cpu_mean_index_simd must be boolean')
         if cpu_mean_index_simd and mean_k_backend != 'qw3_cuda':
@@ -148,7 +157,12 @@ class RequestAuthority:
         self.discarded_records: dict[tuple[int, int], Record] = {}
         self._rewind_position = None
         self._rewind_committed = False
+        self._index_snapshot_depth = 0
+        self._pending_cache_retire = []
         self.gc = None
+        self.redundancy_history = None
+        from .pressure_query_capture import configured_method, PressureQueryWindow
+        self.pressure_query_window = PressureQueryWindow() if configured_method() is not None else None
         if getattr(archive, '_history_worker', None) is not None:
             if gc_config is not None:
                 raise ValueError('Historical KV management and legacy repository GC cannot share an authority')
@@ -168,15 +182,59 @@ class RequestAuthority:
         # proves that the temporary buffer no longer has any readers.
         staged = [(key, record) for key, record in self.discarded_records.items()
                   if record.staging_slot is not None]
-        self.gc.drain(self.records, self.discarded_records)
+        retired = []
+        if getattr(self.gc, 'native_history', False):
+            self.gc.drain(self.records, self.discarded_records, retired=retired)
+        else:
+            self.gc.drain(self.records, self.discarded_records)
+        if retired:
+            self._pending_cache_retire.extend(retired)
+            self._drain_cache_retirements()
+            self._prune_history_metadata()
         for key, record in staged:
             if key not in self.discarded_records:
                 self._return_record_buffers(record)
+
+    def _drain_cache_retirements(self):
+        if self._index_snapshot_depth or not self._pending_cache_retire:
+            return
+        retired, self._pending_cache_retire = self._pending_cache_retire, []
+        cache = self.query_window_cache
+        if cache is not None and hasattr(cache, 'retire_records'):
+            cache.retire_records(retired)
+
+    def _prune_history_metadata(self):
+        """Drop metadata only for permanently missing logical blocks.
+
+        Accepted live-window attention can still contain a retired CPU block
+        until the next GPU refresh. Those small rows remain until that refresh;
+        saved future feedback on a verified P/M replay remains valid too.
+        """
+        if self.closing:
+            return
+        live = {r.history_begin for r in self.records.values()}
+        if self.memory._store is not None:
+            live.update(row[2] for row in self.memory._store.working_records())
+        action = getattr(self, 'action_history', None)
+        if action is not None:
+            for name in ('scores', 'mass'):
+                values = getattr(action, name)
+                setattr(action, name, {k: v for k, v in values.items()
+                    if k in live or k >= self.history_end})
+            prefill = getattr(action, 'prefill', None)
+            if prefill is not None:
+                prefill.values = {k: v for k, v in prefill.values.items()
+                    if k in live or k >= self.history_end}
+        boundaries = getattr(self, 'query_boundaries', None)
+        if boundaries is not None:
+            boundaries.prune(sorted((r.history_begin, r.history_begin+r.count)
+                for r in self.records.values()), future_begin=self.history_end)
 
     def poll(self):
         if self.gc is not None:
             self._drain_gc()
         remaining = []
+        newly_archived = []
         completed = 0
         for job, keys in self.writes:
             if not job.done():
@@ -193,7 +251,11 @@ class RequestAuthority:
                 if not record.archived:
                     self._resident_count -= 1
                     self._return_record_buffers(record)
+                    newly_archived.append(record)
                 record.archived = True
+                redundancy = getattr(self, 'redundancy_history', None)
+                if redundancy is not None:
+                    redundancy.publish_key(record, self.memory.repository)
                 # Publish only after durable write completion, never on CPU
                 # cache admission or asynchronous I/O submission.
                 flags = _native.GC_RAW_BACKED | _native.GC_VALUE_BACKED | _native.GC_INDEXED
@@ -201,6 +263,9 @@ class RequestAuthority:
                     self.memory._store.gc_flags(record.handle, flags, flags)
             completed += 1
         self.writes = remaining
+        prebuild = getattr(self, 'fps_prebuild', None)
+        if prebuild is not None and newly_archived and not self.closing and self._rewind_position is None:
+            prebuild.offer([r for r in newly_archived if r.count == self.shape[1]])
         for key, record in list(self.discarded_records.items()):
             if getattr(self.gc, 'native_history', False):
                 break  # The native worker owns reclamation of these generations.
@@ -258,6 +323,8 @@ class RequestAuthority:
         records = list(self._unsubmitted.values())
         if not records:
             return True
+        if self.cpu_release_sealed_sums and any(r.mean_key is None for r in records):
+            raise RuntimeError('Cannot release an unfinished MeanK sum')
         leases = [self.memory.repository.pin(r.handle) for r in records]
         try:
             if not all(leases):
@@ -288,6 +355,12 @@ class RequestAuthority:
             record.submitted = True
             record.scatter_views = None
             record.raw = record.values = None
+            if self.cpu_release_sealed_sums:
+                # This sealed generation is immutable; reads use its finalized
+                # MeanK. A rewind rebuilds any new partial tail from original K.
+                record.key_sum = None
+                if record.index_owner is not None:
+                    record.index_owner.release_sums()
             key = record_key(record.handle)
             del self._unsubmitted[key]
             keys.append(key)
@@ -351,7 +424,8 @@ class RequestAuthority:
                 index_owner = None
                 if getattr(self.gc, 'native_history', False):
                     sums, index_owner = self.archive.allocate_index(index_shape,
-                        mean=self.mean_k_backend == 'qw3_cuda')
+                        mean=self.mean_k_backend == 'qw3_cuda',
+                        split_sums=self.cpu_release_sealed_sums)
                 else:
                     sums = torch.zeros(index_shape, dtype=torch.float32)
                 record_raw, record_values, slot = self._borrow_record_buffers()
@@ -404,14 +478,20 @@ class RequestAuthority:
                     if not batched_index:
                         finalize(record.raw.view(torch.uint8).numpy(), record.key_sum.numpy(), record.count)
                     if record.index_owner is not None:
-                        record.mean_key = torch.frombuffer(record.index_owner, dtype=torch.float16,
-                            count=record.key_sum.numel(), offset=record.key_sum.numel()*4).view(record.key_sum.shape)
+                        if self.cpu_release_sealed_sums:
+                            record.mean_key = record.index_owner.mean_view()
+                        else:
+                            record.mean_key = torch.frombuffer(record.index_owner, dtype=torch.float16,
+                                count=record.key_sum.numel(), offset=record.key_sum.numel()*4).view(record.key_sum.shape)
                         torch.div(record.key_sum, record.count, out=record.mean_key)
                     else:
                         record.mean_key = (record.key_sum / record.count).to(torch.float16)
                 self._unsubmitted[key] = record
         self.memory.attach_completion(_Ready())
         assert self.memory.commit_append(count)
+        boundaries = getattr(self, 'query_boundaries', None)
+        if boundaries is not None:
+            boundaries.advance(self.history_end-count, self.history_end)
         if getattr(self.gc, 'native_history', False):
             # One accepted public packet stamps the current GPU window. The
             # native observer does not scan historical records per decode.
@@ -449,9 +529,29 @@ class RequestAuthority:
         """Pin every scored generation until selection has acquired its leases."""
         self._require_open()
         self.poll()
-        leases, ordered = [], []
+        leases, holds, ordered = [], [], []
+        scope = getattr(self.memory, '_history_scope', None)
+        self._index_snapshot_depth += 1
         try:
             for record in sorted(self.records.values(), key=lambda r: r.history_begin):
+                # Ordinary pins retain metadata but do not prevent permanent
+                # CPU retirement. A policy hold protects FPS misses and the
+                # complete multi-stage picker without changing LRU heat.
+                if scope is not None:
+                    while True:
+                        hold = scope.protect([record.handle])
+                        if hold is not None:
+                            holds.append(hold)
+                            break
+                        check = self.memory.repository.pin(record.handle)
+                        if not check:
+                            break  # Retired before this snapshot admitted it.
+                        check.reset()
+                        # Only a concurrent policy gate can reject a still
+                        # live generation. Yield instead of spinning under GIL.
+                        time.sleep(0)
+                    if hold is None:
+                        continue
                 lease = self.memory.repository.pin(record.handle)
                 if lease:
                     leases.append(lease)
@@ -464,6 +564,13 @@ class RequestAuthority:
         finally:
             for lease in leases:
                 lease.reset()
+            holds.clear()
+            self._index_snapshot_depth -= 1
+            # An older retirement receipt can arrive during a Key read's
+            # poll(). Its block was excluded before scoring. Defer the cache
+            # epoch bump until the held Query views finish; it cannot invalidate
+            # the still-live rows being scored by this transaction.
+            self._drain_cache_retirements()
             if self.gc is not None and not getattr(self.gc, 'native_history', False):
                 self.gc.worker.notify_progress()
 
@@ -606,6 +713,7 @@ class RequestAuthority:
                 score_mask = frame.score_mask
                 transport_mask = frame.transport_mask
                 eligible = torch.tensor(score_mask, dtype=torch.bool, device=queries.device)
+                mean_scores = None
                 if self.query_score_mode == 'overlap_16_8':
                     from .query_window_scoring import score_authority_windows
                     if guided_pressure:
@@ -620,6 +728,10 @@ class RequestAuthority:
                     values, stats = score_authority_fps(self, records, queries, means, score_mask)
                     self.query_key_fps_stats = stats
                     scores = values.cpu().tolist()
+                    if getattr(getattr(self, 'graph_options', None), 'query_mean_quota_fraction', 0):
+                        mean_started = time.perf_counter()
+                        mean_scores = mean_key_scores(queries, means.to(queries.device), eligible).cpu().tolist()
+                        stats['mean_quota_scoring_seconds'] = time.perf_counter()-mean_started
                 else:
                     scores = mean_key_scores(queries, means.to(queries.device), eligible).cpu().tolist()
             # index_snapshot retains the same generation-qualified records
@@ -638,13 +750,18 @@ class RequestAuthority:
                 return select_guided_pressure(self, records, scores, graph_snapshot,
                     tuple(slot for slot, _ in mandatory), max_tokens)
             graph_options = getattr(self, 'graph_options', None)
+            if graph_snapshot is None and self.query_score_mode == 'key_fps_4' and (
+                    getattr(graph_options, 'graph_mode', None) == 'off'):
+                from .query_no_graph import select_without_graph
+                return select_without_graph(self, records, scores, transport_mask,
+                    tuple(slot for slot, _ in mandatory), max_tokens, mean_scores=mean_scores)
             if graph_snapshot is not None:
                 from .graph_integration import record_query_inputs
                 record_query_inputs(self, records, scores, transport_mask,
                     graph_snapshot, tuple(slot for slot, _ in mandatory), max_tokens)
             if graph_snapshot is not None and graph_options.graph_mode in ('locality', 'attention', 'multi'):
                 return score_and_select(self, records, scores, transport_mask,
-                    graph_snapshot, tuple(slot for slot, _ in mandatory), max_tokens)
+                    graph_snapshot, tuple(slot for slot, _ in mandatory), max_tokens, mean_scores=mean_scores)
             action = getattr(self,'action_history',None)
             if action is not None:
                 # A verified M-prefix continuation may replay from an older P.
@@ -693,14 +810,38 @@ class RequestAuthority:
             raise ValueError('Rewind requires a sealed-record boundary')
         if not self.flush() or self.writes:
             return None
+        prebuild = getattr(self, 'fps_prebuild', None)
+        preserve_prefix = (self.query_score_mode == 'key_fps_4' and
+            bool(getattr(getattr(self, 'graph_options', None), 'query_mean_quota_fraction', 0)))
+        if prebuild is not None:
+            prebuild.cancel(history_end=checkpoint.position) if preserve_prefix else prebuild.cancel()
+        redundancy = getattr(self, 'redundancy_history', None)
+        if redundancy is not None:
+            # Invalidate queued decisions before retiring a suffix that may
+            # contain their retained representative. Validation/drain above
+            # leaves rejected or deferred rewinds untouched.
+            redundancy.invalidate()
         spans = self.memory.begin_rewind(checkpoint)
+        recall_cache = getattr(self, '_recall_feature_cache', None)
+        if recall_cache is not None:
+            recall_cache.clear()
+        pressure_queries = getattr(self, 'pressure_query_window', None)
+        if pressure_queries is not None:
+            pressure_queries.rewind(checkpoint.position)
         graph = getattr(self, 'block_graph', None)
         if graph is not None:
             graph.invalidate()
+        boundaries = getattr(self, 'query_boundaries', None)
+        if boundaries is not None:
+            boundaries.invalidate()
         self._rewind_position = checkpoint.position
         self._rewind_committed = False
         if self.query_window_cache is not None:
-            self.query_window_cache.clear()
+            if preserve_prefix:
+                if prebuild is None:
+                    self.query_window_cache.rewind(checkpoint.position)
+            else:
+                self.query_window_cache.clear()
         return spans
 
     def attach_rewind_completion(self, fence):
@@ -716,6 +857,9 @@ class RequestAuthority:
             if not self.memory.commit_rewind():
                 return False
             self._rewind_committed = True
+            boundaries = getattr(self, 'query_boundaries', None)
+            if boundaries is not None:
+                boundaries.rewind(self._rewind_position)
             for key, record in list(self.records.items()):
                 if record.history_begin >= self._rewind_position:
                     self.discarded_records[key] = self.records.pop(key)
@@ -737,6 +881,18 @@ class RequestAuthority:
 
     def close(self):
         self.closing = True
+        recall_cache = getattr(self, '_recall_feature_cache', None)
+        if recall_cache is not None:
+            recall_cache.clear()
+        pressure_queries = getattr(self, 'pressure_query_window', None)
+        if pressure_queries is not None:
+            pressure_queries.close()
+        redundancy = getattr(self, 'redundancy_history', None)
+        if redundancy is not None:
+            redundancy.invalidate()
+        prebuild = getattr(self, 'fps_prebuild', None)
+        if prebuild is not None:
+            prebuild.cancel(permanent=True)
         if self.query_window_cache is not None:
             self.query_window_cache.clear()
         self.guided_seed = None
@@ -744,6 +900,9 @@ class RequestAuthority:
         graph = getattr(self, 'block_graph', None)
         if graph is not None:
             graph.close()
+        boundaries = getattr(self, 'query_boundaries', None)
+        if boundaries is not None:
+            boundaries.close()
         if not historical:
             self.stop_gc()
         self.poll()

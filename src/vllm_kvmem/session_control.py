@@ -315,10 +315,14 @@ class SessionLedger:
                 entry.history > effective.generation_checkpoint(len(prompt)) and
                 entry.window + len(prompt) - entry.history + effective.output_reserve >
                 capacity - self.block_tokens)
-            prefill_probe_overflow = (effective is not None and effective.query is None and
+            prefill_probe_overflow = (effective is not None and
                 effective.prefill_window == 'pressure' and
+                (effective.query is None or entry.history < effective.replay_begin) and
                 entry.window > effective.prefill_boundary(entry.history, capacity))
-            if terminal_reserve_overflow or prefill_probe_overflow:
+            query_replay_overflow = (effective is not None and effective.query is not None and
+                entry.history == effective.replay_begin and
+                entry.window + effective.replay_end - entry.history > capacity - self.block_tokens)
+            if terminal_reserve_overflow or prefill_probe_overflow or query_replay_overflow:
                 # A partial terminal M prefix can already lie past the last
                 # safe prefill pressure point. Native allocation reserves draft
                 # lookahead BEFORE connector metadata can compact the window;
@@ -326,6 +330,11 @@ class SessionLedger:
                 # Select during the fenced import, preserving the accepted tail
                 # and model state. A long tool suffix may use later ordinary
                 # pressure points; it does not need to fit in one reservation.
+                # A new atomic Query also needs its entire replay plus native
+                # lookahead in the OLD view, before semantic selection runs.
+                # A warm M import can have skipped that earlier pressure point.
+                # Compact the import first; preserve the Query and its later
+                # semantic selection instead of splitting or clipping it.
                 budget = self.select_budget
                 if terminal_reserve_overflow:
                     budget = min(budget,

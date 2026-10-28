@@ -14,6 +14,54 @@ from . import _native
 from .storage import AsyncArchive
 
 
+class SplitHistoricalIndexOwner:
+    """Independent sum/mean native buffers with a joint release completion.
+
+    Tensor views retain the respective native owner through the buffer
+    protocol. This wrapper stores no tensors, so releasing sums cannot create
+    a Python ownership cycle or move their deallocation onto the caller.
+    """
+    __slots__ = ('shape', '_elements', '_sum_owner', '_mean_owner', 'completion')
+
+    def __init__(self, arena, shape):
+        import math
+        import sys
+        from .historical_gc import IndexReleaseFence
+        self.shape = tuple(shape)
+        if not self.shape or any(type(n) is not int or n <= 0 for n in self.shape):
+            raise ValueError('Split historical index requires positive dimensions')
+        self._elements = math.prod(self.shape)
+        if self._elements > sys.maxsize // 6:
+            raise OverflowError('Split historical index allocation is too large')
+        self._sum_owner = self._mean_owner = None
+        try:
+            self._sum_owner = arena._allocate_index(self._elements * 4)
+            self._mean_owner = arena._allocate_index(self._elements * 2)
+            self.completion = IndexReleaseFence(
+                self._sum_owner.completion, self._mean_owner.completion)
+        except BaseException:
+            # Even an exception traceback retaining this wrapper must not
+            # strand a successful first allocation after the second failed.
+            self._sum_owner = self._mean_owner = None
+            raise
+
+    def sum_view(self):
+        import torch
+        if self._sum_owner is None:
+            raise RuntimeError('Historical index sums have been released')
+        return torch.frombuffer(self._sum_owner, dtype=torch.float32,
+            count=self._elements).view(self.shape)
+
+    def mean_view(self):
+        import torch
+        return torch.frombuffer(self._mean_owner, dtype=torch.float16,
+            count=self._elements).view(self.shape)
+
+    def release_sums(self):
+        """Drop our sum ownership; outstanding tensor aliases remain valid."""
+        self._sum_owner = None
+
+
 def gather_records_python(destination, sources, record_bytes, offset, length, begin, end):
     """Reference gather for immutable CPU records; also supports older extensions."""
     view = memoryview(destination)
@@ -580,16 +628,28 @@ class MemoryArchive(AsyncArchive):
             return None
         with self._lock:
             totals = self._history_totals.copy()
+            features = Counter()
             for scope in self._history_scopes.values():
                 totals.update(scope.stats)
+                if self._history_policy == 'redundancy':
+                    features.update(scope.feature_stats)
             scopes = len(self._history_scopes)
-        return dict(mode=self._history_mode, policy=self._history_policy,
+        result = dict(mode=self._history_mode, policy=self._history_policy,
                     policy_params=dict(self._history_policy_params), active_scopes=scopes, **dict(totals),
                     metadata=self._history_worker.storage_stats)
+        if self._history_policy == 'redundancy':
+            result['active_features'] = dict(features)
+            result['feature_reserved_bytes'] = getattr(self, '_historical_feature_reserved_bytes', 0)
+        return result
 
-    def allocate_index(self, shape, *, mean):
+    def allocate_index(self, shape, *, mean, split_sums=False):
         import math
         import torch
+        if type(split_sums) is not bool or split_sums and not mean:
+            raise ValueError('Split historical sums require a stored MeanK')
+        if split_sums:
+            owner = SplitHistoricalIndexOwner(self._native_payload_arena, shape)
+            return owner.sum_view(), owner
         elements = math.prod(shape)
         owner = self._native_payload_arena._allocate_index(elements*(6 if mean else 4))
         sums = torch.frombuffer(owner, dtype=torch.float32, count=elements).view(shape)

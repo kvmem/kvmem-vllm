@@ -356,8 +356,8 @@ class NativeWindowAssembler:
                 raise ValueError("Native assembly currently qualifies FP8 e4m3")
             group_id = groups[attn.layer_name]
             if group_id not in tables:
-                count = int(runner.block_tables.num_blocks.np[group_id, index])
-                tables[group_id] = runner.block_tables.block_tables[group_id].gpu[index, :count].clone()
+                from .native_pages import kernel_table
+                tables[group_id] = kernel_table(runner, group_id, index).clone()
             key, value = native_vllm_fp8_views(attn.kv_cache, module.num_kv_heads, module.head_dim)
             layers.append(LayerWindow(key, value, module.rotary_emb.cos_sin_cache,
                                       attn._k_scale, tables[group_id], group_id if lease is not None else None))

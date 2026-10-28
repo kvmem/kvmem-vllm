@@ -75,5 +75,5 @@ target/MTP KV and recurrent-state checks. Both exact-prefix resumes and EOS
 checks passed. All session payloads, active owners and owned GPU processes
 were released. The related offline checks passed 217 tests.
 The frozen inputs, responses, source hashes and
-final audit (local experiment artifact: `artifacts/rolling-long-output-20261026-r1/final-review.json`)
+`artifacts/rolling-long-output-20261026-r1/final-review.json`
 are retained in the experiment directory.

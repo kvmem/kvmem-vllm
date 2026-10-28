@@ -44,10 +44,11 @@ def test_tensor_alias_keeps_native_buffer_after_record_and_python_wrapper_drop()
 def test_capacity_rejection_keeps_original_storage_and_bytes_bound():
     arena = n.HistoricalPayloadArena(1, 32, background=False)
     owner = arena._allocate_index(32)
+    mean_owner = arena._allocate_index(16)
     with pytest.raises(RuntimeError, match='capacity'):
-        arena._allocate_index(16)
-    assert arena.stats['external_owners'] == 1 and arena.stats['external_bytes'] == 32
-    del owner
+        arena._allocate_index(1)
+    assert arena.stats['external_owners'] == 2 and arena.stats['external_bytes'] == 48
+    del owner, mean_owner
     arena.advance()
     close(arena)
 

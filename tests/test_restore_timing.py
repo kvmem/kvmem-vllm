@@ -107,6 +107,7 @@ def test_pool_claim_miss_and_prefix_comparison_are_optional_observation():
     assert pool.claim(('tenant', 'missing'), 'new', [1, 2, 3], timing=timing) is None
     assert timing.summary()['stages'] == []
     checkpoint = SimpleNamespace(phase=CheckpointPhase.IDLE, model=SimpleNamespace(query=lambda: True),
+                                 claim_graph_history=None, claim_graph_end=0,
                                  request_id='old', position=2, tokens=token_bytes([1, 2, 3], 2))
     pool.entries['session'] = checkpoint
     assert pool.claim('session', 'new', [1, 9, 3], timing=timing) is None

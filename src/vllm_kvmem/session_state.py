@@ -53,6 +53,7 @@ class PreparedModelRestore:
     draft: dict
     counter: torch.Tensor
     lease: object = None
+    cached_payload: object = None
 
 
 @dataclass
@@ -81,6 +82,8 @@ class PromptStateAdapter:
         self._identity = object()  # Snapshots never cross workers/model loads.
         options = RuntimeOptions.from_vllm(runner.vllm_config)
         self.capture_decode = options.session_capture_decode or options.session_checkpoint_policy=='pm'
+        from .model_snapshot_cache import ModelSnapshotCache
+        self.snapshot_cache = ModelSnapshotCache(options.session_gpu_checkpoint_bytes)
 
     def _prefill_index(self, request_id, position, *, terminal=False):
         index = self.runner.req_states.req_id_to_index[request_id]
@@ -128,9 +131,10 @@ class PromptStateAdapter:
                    if getattr(m, 'layer_name', None) is not None}
         result = {}
         for gid in groups:
-            block_size = self.runner.block_tables.kernel_block_sizes[gid]
-            count = int(self.runner.block_tables.num_blocks.np[gid, index])
-            table = self.runner.block_tables.block_tables[gid].gpu[index, :count]
+            from .native_pages import kernel_block_size, kernel_table
+            block_size = kernel_block_size(self.runner, gid)
+            table = kernel_table(self.runner, gid, index)
+            count = len(table)
             first, stop = begin // block_size, (end + block_size - 1) // block_size
             if not 0 <= first < stop <= count:
                 raise ValueError('Draft checkpoint context is outside its native page table')
@@ -246,6 +250,11 @@ class PromptStateAdapter:
                 with checkpoint_stage(self.runner, 'failed_submission_wait', sync=True):
                     stream.synchronize()
                 raise
+        cache = getattr(self, 'snapshot_cache', None)
+        if terminal and cache is not None and packed.device.type == 'cuda':
+            # Reuse the independent clone already required for D2H. Never
+            # retain borrowed native rows or skip durable CPU publication.
+            cache.put(snapshot, packed)
         return snapshot
 
     def restore(self, snapshot, request_id):
@@ -278,9 +287,14 @@ class PromptStateAdapter:
             shape = (snapshot.position - snapshot.draft_begin, cache.shape[2], cache.shape[3])
             if source.device.type != 'cpu' or tuple(source.shape) != shape or source.dtype != cache.dtype:
                 raise ValueError('Draft checkpoint schema changed')
+        cache = getattr(self, 'snapshot_cache', None)
+        cached = cache.get(snapshot) if cache is not None else None
+        if cached is not None and (cached.device != self.runner.model_state.num_accepted_tokens_gpu.device
+                                   or cached.numel() != snapshot.bytes):
+            raise ValueError('Cached model payload device or size changed')
         return PreparedModelRestore(snapshot, request_id, index,
             self.runner._kvmem_request_generations[request_id], recurrent, draft,
-            self.runner.model_state.num_accepted_tokens_gpu[index:index+1], lease)
+            self.runner.model_state.num_accepted_tokens_gpu[index:index+1], lease, cached)
 
     def validate_restore(self, prepared):
         if (self.runner._kvmem_request_generations.get(prepared.request_id) != prepared.generation or
@@ -304,7 +318,9 @@ class PromptStateAdapter:
             offset += source.numel() * source.element_size()
         if not packed:
             host = torch.cat([t.contiguous().view(torch.uint8).flatten() for t in sources])
-        payload = host.to(prepared.counter.device, non_blocking=True)
+        payload = prepared.cached_payload
+        if payload is None:
+            payload = host.to(prepared.counter.device, non_blocking=True)
         uploaded, offset = [], 0
         for source in sources:
             nbytes = source.numel() * source.element_size()

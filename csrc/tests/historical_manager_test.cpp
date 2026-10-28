@@ -1,8 +1,11 @@
 #include "historical_manager.hpp"
+#include "historical_redundancy.hpp"
 
 #include <array>
 #include <chrono>
 #include <iostream>
+#include <functional>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 
@@ -34,7 +37,7 @@ struct Fixture {
 
     Fixture(HistoricalGcMode mode = HistoricalGcMode::Delete, bool background = false,
             std::unique_ptr<HistoricalKvPolicy> policy = {}, uint32_t max_scopes = 1, bool preallocate = false,
-            HistoricalPolicyParameters params = {}) {
+            HistoricalPolicyParameters params = {}, std::string policy_name = "lru") {
         arena = std::make_shared<Payload>(Payload::Config{16, 16, 1, 16, 16, background});
         repo = std::make_shared<Repo>(Repo::Config{8, 4});
         HistoricalGcWorker::Config config;
@@ -46,6 +49,7 @@ struct Fixture {
         config.scan_blocks = 8;
         config.delete_blocks = 2;
         config.mode = mode;
+        config.policy = std::move(policy_name);
         config.policy_params = std::move(params);
         config.background = background;
         worker = std::make_unique<HistoricalGcWorker>(config, arena);
@@ -429,6 +433,190 @@ static void serving_metadata_is_preallocated_and_recycled_before_scope_ack(bool 
     }
 }
 
+class ScriptedDecisions final : public HistoricalKvPolicy {
+public:
+    std::function<void(const HistoricalSnapshot &, HistoricalDecisionBatch &)> prepare;
+    std::vector<HistoricalCommitCode> results;
+    std::shared_ptr<const HistoricalFeatureSource> features;
+    std::optional<HistoricalFeatureSource::CommitGuard> held_guard;
+    bool emitted = false, fail_after_emit = false, permit = true;
+    ScriptedDecisions() { results.reserve(8); }
+    void bind_features(std::shared_ptr<const HistoricalFeatureSource> source) override { features = std::move(source); }
+    bool wants_snapshot(const HistoricalPressure &) override { return !emitted; }
+    bool permits(const HistoricalBlockMeta &meta) const override { return permit && meta.live && !meta.mandatory; }
+    HistoricalPolicyResult step(const HistoricalSnapshot &snapshot, const HistoricalPressure &,
+                                HistoricalWorkBudget, HistoricalDecisionBatch &out) override {
+        emitted = true;
+        prepare(snapshot, out);
+        if (fail_after_emit) throw std::runtime_error("injected decision failure");
+        return {HistoricalPolicyStatus::Complete, snapshot.blocks.size(), out.values().size()};
+    }
+    void on_result(const HistoricalDeleteIntent &, HistoricalCommitCode code) noexcept override {
+        results.push_back(code);
+    }
+};
+
+static void terminal_feedback_is_exact_and_shadow_is_not_a_real_commit() {
+    for (const auto mode : {HistoricalGcMode::Delete, HistoricalGcMode::Shadow}) {
+        auto policy = std::make_unique<ScriptedDecisions>();
+        auto *script = policy.get();
+        script->prepare = [](const HistoricalSnapshot &s, HistoricalDecisionBatch &out) {
+            out.push({s.blocks[0].handle, s.incarnation, s.round});
+            out.push({s.blocks[0].handle, s.incarnation, s.round});
+        };
+        Fixture fixture(mode, false, std::move(policy));
+        fixture.append();
+        fixture.step(8);
+        check(script->results.size() == 2, "terminal intent was lost or acknowledged twice");
+        if (mode == HistoricalGcMode::Delete) {
+            check(script->results[0] == HistoricalCommitCode::Committed &&
+                  script->results[1] == HistoricalCommitCode::AlreadyRetired, "duplicate retirement feedback was incorrect");
+            check(fixture.scope->stats().retired == 1, "duplicate retirement double-counted bytes");
+        } else {
+            check(script->results[0] == HistoricalCommitCode::Shadow && script->results[1] == HistoricalCommitCode::Shadow,
+                  "shadow result manufactured a real commit");
+            check(fixture.scope->stats().retired == 0 && fixture.scope->stats().shadow_decisions == 1,
+                  "duplicate shadow feedback miscounted simulated retirement");
+        }
+    }
+}
+
+static void cancelled_stale_and_ineligible_decisions_have_feedback() {
+    for (unsigned kind = 0; kind < 3; ++kind) {
+        auto policy = std::make_unique<ScriptedDecisions>();
+        auto *script = policy.get();
+        script->fail_after_emit = kind == 0;
+        script->permit = kind != 2;
+        script->prepare = [kind](const HistoricalSnapshot &s, HistoricalDecisionBatch &out) {
+            auto handle = s.blocks[0].handle;
+            if (kind == 1) ++handle.generation;
+            out.push({handle, s.incarnation, s.round});
+        };
+        Fixture fixture(HistoricalGcMode::Delete, false, std::move(policy));
+        fixture.append();
+        fixture.step(8);
+        const HistoricalCommitCode expected[] = {HistoricalCommitCode::Cancelled, HistoricalCommitCode::Stale,
+                                                HistoricalCommitCode::Ineligible};
+        check(script->results.size() == 1 && script->results[0] == expected[kind], "rejected intent lacked terminal feedback");
+        check(fixture.scope->stats().retired == 0, "rejected intent retired CPU history");
+    }
+}
+
+static uint64_t prepare_feature_pair(Fixture &fixture) {
+    check(fixture.scope->configure_features(1, 1, 1, 2), "feature source was not configured");
+    fixture.append(); fixture.append();
+    const float key[] = {1.f, 0.f};
+    check(fixture.scope->publish_features(fixture.gpu[0], key, 2) &&
+          fixture.scope->publish_features(fixture.gpu[1], key, 2), "sealed features did not publish");
+    const auto epoch = fixture.scope->begin_question(1);
+    check(fixture.scope->append_question(epoch, 0, key, 2, 1), "complete question did not publish");
+    return epoch;
+}
+
+static HistoricalDeleteIntent witnessed(const HistoricalSnapshot &s, uint64_t epoch) {
+    return {s.blocks[0].handle, s.incarnation, s.round, HistoricalDeleteReason::Redundancy,
+            s.blocks[0].feature_version, epoch, s.blocks[1].handle, s.blocks[1].feature_version};
+}
+
+static void redundancy_commit_rechecks_question_witness_and_protection() {
+    for (unsigned kind = 0; kind < 6; ++kind) {
+        auto policy = std::make_unique<ScriptedDecisions>();
+        auto *script = policy.get();
+        Fixture fixture(HistoricalGcMode::Delete, false, std::move(policy), 1, false, {}, "redundancy");
+        const auto epoch = prepare_feature_pair(fixture);
+        std::shared_ptr<HistoricalFrameHold> protected_frame;
+        script->prepare = [&](const HistoricalSnapshot &s, HistoricalDecisionBatch &out) {
+            auto intent = witnessed(s, epoch);
+            if (kind == 1) fixture.scope->invalidate_question();
+            if (kind == 2) fixture.repo->retire_permanently(intent.witness);
+            if (kind == 3) protected_frame = fixture.scope->protect({intent.handle});
+            if (kind == 4) ++intent.witness_feature_version;
+            if (kind == 5) std::const_pointer_cast<HistoricalFeatureSource>(script->features)->erase_key(intent.handle);
+            out.push(intent);
+        };
+        fixture.step(8);
+        check(script->results.size() == 1, "witnessed intent did not finish exactly once");
+        check(script->results[0] == (kind ? HistoricalCommitCode::Ineligible : HistoricalCommitCode::Committed),
+              "question, witness, feature version or protection changed without rejecting intent");
+        check(bool(fixture.repo->try_pin(fixture.handles[0])) == (kind != 0), "invalid witness removed victim");
+        if (!kind) check(fixture.scope->stats().redundancy_retired == 1, "redundancy reason was not counted");
+        protected_frame.reset();
+    }
+}
+
+static void contended_feature_commit_retries_without_consuming_the_intent() {
+    auto policy = std::make_unique<ScriptedDecisions>();
+    auto *script = policy.get();
+    Fixture fixture(HistoricalGcMode::Delete, false, std::move(policy), 1, false, {}, "redundancy");
+    const auto epoch = prepare_feature_pair(fixture);
+    script->prepare = [&](const HistoricalSnapshot &s, HistoricalDecisionBatch &out) {
+        const auto intent = witnessed(s, epoch);
+        script->held_guard.emplace(script->features->try_commit_guard(intent));
+        check(script->held_guard->valid, "test feature identity was invalid");
+        out.push(intent);
+    };
+    fixture.step();
+    check(script->results.empty() && fixture.scope->stats().retired == 0, "Retry consumed an uncommitted intent");
+    script->held_guard.reset();
+    fixture.step(8);
+    check(script->results.size() == 1 && script->results[0] == HistoricalCommitCode::Committed,
+          "retry did not preserve exact witnessed intent");
+}
+
+static void features_require_live_sealed_backing_and_never_resurrect_history() {
+    Fixture fixture(HistoricalGcMode::Off, false, {}, 1, false, {}, "redundancy");
+    check(fixture.scope->configure_features(1, 1, 1, 2), "feature configuration failed");
+    fixture.append(HistoricalGpu);
+    const float key[] = {1.f, 0.f};
+    check(!fixture.scope->publish_features(fixture.gpu[0], key, 2), "unsealed features were published");
+    check(fixture.scope->update(fixture.gpu[0], HistoricalSealed | HistoricalGpu), "engine seal failed");
+    check(fixture.scope->publish_features(fixture.gpu[0], key, 2), "sealed feature publication failed");
+    check(fixture.scope->publish_features(fixture.gpu[0], key, 2), "idempotent sealed feature publication failed");
+    const float changed[] = {0.f, 1.f};
+    check(!fixture.scope->publish_features(fixture.gpu[0], changed, 2), "immutable generation accepted changed features");
+    fixture.repo->retire_permanently(fixture.handles[0]);
+    check(!fixture.scope->publish_features(fixture.gpu[0], key, 2), "retired feature publication resurrected history");
+    fixture.step(8);
+    check(fixture.scope->feature_stats().at("keys") == 0, "retired feature cache retained dead generations");
+}
+
+static void pooled_redundancy_scope_discards_features_question_and_carry_between_owners() {
+    Fixture fixture(HistoricalGcMode::Delete, false, {}, 1, true, {}, "redundancy");
+    uint64_t previous_epoch = 0;
+    const auto index_bytes = fixture.scope->feature_stats().at("feature_bytes");
+    for (unsigned owner = 0; owner < 3; ++owner) {
+        const auto fresh = fixture.scope->feature_stats();
+        check(fresh.at("keys") == 0 && fresh.at("question_ready") == 0 &&
+              fresh.at("feature_bytes") == index_bytes && fresh.at("query_bytes") == 0,
+              "scope pool retained charged features or an old owner's complete question");
+        check(fixture.scope->feature_geometry() == std::array<size_t, 4>{}, "scope reused old feature geometry");
+        check(fixture.scope->configure_features(1, 1, 1, 2), "pooled source configuration failed");
+        fixture.payload_epoch = uint64_t(owner) * 8;
+        const float key[] = {1.f, 0.f};
+        for (unsigned i = 0; i < 8; ++i) {
+            fixture.append();
+            check(fixture.scope->publish_features(fixture.gpu.back(), key, 2), "new owner feature publication failed");
+        }
+        fixture.step(16);
+        check(fixture.scope->stats().retired == 0, "new owner inherited a complete old query");
+        const auto epoch = fixture.scope->begin_question(1);
+        check(epoch > previous_epoch, "pooled source reused an old question epoch");
+        previous_epoch = epoch;
+        check(fixture.scope->append_question(epoch, 0, key, 2, 1), "new owner query publication failed");
+        fixture.step(64);
+        check(fixture.scope->stats().redundancy_retired == 4, "new owner retained old redundancy carry or pressure");
+        fixture.gpu.clear();
+        eventually([&] { fixture.worker->advance(); return fixture.scope->close(); }, "redundancy pool close did not finish");
+        const auto storage = fixture.worker->storage_stats();
+        check(storage.allocations == 1 && storage.recycles == owner + 1, "source pool storage was not recycled before close ACK");
+        fixture.scope.reset();
+        fixture.handles.clear();
+        fixture.repo = std::make_shared<Repo>(Repo::Config{8, 4});
+        fixture.scope = fixture.worker->register_scope(fixture.repo);
+        check(bool(fixture.scope), "recycled redundancy scope could not admit new owner");
+    }
+}
+
 int main() {
     try {
         lru_retirement_and_cpu_reclamation_do_not_wait_for_gpu();
@@ -449,6 +637,12 @@ int main() {
         scope_cpu_target_is_independent_of_global_free_bytes();
         serving_metadata_is_preallocated_and_recycled_before_scope_ack();
         serving_metadata_is_preallocated_and_recycled_before_scope_ack(false);
+        terminal_feedback_is_exact_and_shadow_is_not_a_real_commit();
+        cancelled_stale_and_ineligible_decisions_have_feedback();
+        redundancy_commit_rechecks_question_witness_and_protection();
+        contended_feature_commit_retries_without_consuming_the_intent();
+        features_require_live_sealed_backing_and_never_resurrect_history();
+        pooled_redundancy_scope_discards_features_question_and_carry_between_owners();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

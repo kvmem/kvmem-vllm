@@ -154,7 +154,7 @@ def validate_graph_options(values, *, context_mode='meank', request_planning=Fal
 def validate_query_score_mode(mode, cache_bytes, *, block_tokens, graph_mode,
                               graph_scoring_version, graph_aggregation, graph_alpha,
                               query_history=False, guided_query_tokens=0,
-                              context_mode='meank'):
+                              context_mode='meank', mean_quota_fraction=0., historical_gc=None):
     """Keep experimental block scorers separate from graph aggregation."""
     if not isinstance(mode, str) or mode not in ('mean_k', 'overlap_16_8', 'key_fps_4'):
         raise ValueError('query_score_mode must be mean_k, overlap_16_8 or key_fps_4')
@@ -164,9 +164,12 @@ def validate_query_score_mode(mode, cache_bytes, *, block_tokens, graph_mode,
         return
     if context_mode != 'meank' or block_tokens != 32:
         raise ValueError(f'query_score_mode={mode} requires MeanK context management and block_tokens=32')
-    alphas = (0,) if mode == 'key_fps_4' else (0, .2)
-    alpha_description = '0' if mode == 'key_fps_4' else '0 or 0.2'
-    if (graph_mode != 'multi' or graph_scoring_version != 'v2' or
+    hybrid = type(mean_quota_fraction) in (int, float) and 0 < mean_quota_fraction <= 1
+    alphas = (0,) if mode == 'key_fps_4' and not hybrid else (0, .2)
+    alpha_description = '0' if len(alphas) == 1 else '0 or 0.2'
+    graphless_history = (historical_gc is not None and mode == 'key_fps_4' and
+                         graph_mode == 'off' and graph_alpha == 0)
+    if ((graph_mode != 'multi' and not graphless_history) or graph_scoring_version != 'v2' or
             graph_aggregation != 'sum' or type(graph_alpha) not in (int, float) or
             graph_alpha not in alphas):
         raise ValueError(f'query_score_mode={mode} requires graph_mode=multi, '
@@ -175,13 +178,43 @@ def validate_query_score_mode(mode, cache_bytes, *, block_tokens, graph_mode,
         raise ValueError(f'query_score_mode={mode} requires query_history=false and guided_query_tokens=0')
 
 
-def validate_query_fps_experiments(mode, halo_blocks, optimized):
+def validate_query_fps_experiments(mode, halo_blocks, optimized, prebuild=False, prebuild_device='cpu',
+                                   cpu_backend='torch', cpu_workers=8, mean_quota_fraction=0.0):
+    import math
+
     if type(halo_blocks) is not int or halo_blocks not in (0, 1):
         raise ValueError('query_fps_halo_blocks must be 0 or 1')
     if type(optimized) is not bool:
         raise ValueError('query_fps_optimized must be boolean')
+    if type(prebuild) is not bool:
+        raise ValueError('query_fps_prebuild must be boolean')
+    if not isinstance(prebuild_device, str) or prebuild_device not in ('cpu', 'cuda'):
+        raise ValueError('query_fps_prebuild_device must be cpu or cuda')
+    if not isinstance(cpu_backend, str) or cpu_backend not in ('torch', 'native'):
+        raise ValueError('query_fps_cpu_backend must be torch or native')
+    if type(cpu_workers) is not int or not 1 <= cpu_workers <= 32:
+        raise ValueError('query_fps_cpu_workers must be an integer in 1..32')
+    if (type(mean_quota_fraction) not in (int, float) or
+            not math.isfinite(mean_quota_fraction) or not 0 <= mean_quota_fraction <= 1):
+        raise ValueError('query_mean_quota_fraction must be a finite number in [0, 1]')
+    if mean_quota_fraction > 0 and (mode != 'key_fps_4' or halo_blocks != 1):
+        raise ValueError('query_mean_quota_fraction requires query_score_mode=key_fps_4 '
+                         'and query_fps_halo_blocks=1')
+    if cpu_backend == 'native' and (mode != 'key_fps_4' or not optimized or
+                                   not prebuild or prebuild_device != 'cpu'):
+        raise ValueError('query_fps_cpu_backend=native requires query_score_mode=key_fps_4, '
+                         'query_fps_optimized=true, query_fps_prebuild=true and '
+                         'query_fps_prebuild_device=cpu')
+    if prebuild and (mode != 'key_fps_4' or not optimized):
+        raise ValueError('query_fps_prebuild requires query_score_mode=key_fps_4 '
+                         'and query_fps_optimized=true')
     if (halo_blocks or optimized) and mode != 'key_fps_4':
         raise ValueError('FPS halo/optimization require query_score_mode=key_fps_4')
+
+
+def validate_graph_query_trace_bytes(value):
+    if type(value) is not int or not 0 < value <= 1024**3:
+        raise ValueError('graph_query_trace_max_bytes must be a positive integer at most 1 GiB')
 
 
 @dataclass(frozen=True)
@@ -253,6 +286,7 @@ class RuntimeOptions:
     prefill_max_tokens: int = 2048
     prefill_feedback_timeout_ms: float = 5000.0
     prefill_batch_tokens: int = 0
+    prefill_request_tokens: int = 0
     active_resident_ttl_ms: float = 0.0
     active_resident_pressure_only: bool = False
     active_resident_max_fraction: float = 0.5
@@ -268,9 +302,15 @@ class RuntimeOptions:
     native_prefill_commit: bool = True
     async_checkpoint_capture: bool = True
     restore_stage_timing: bool = False
+    host_stage_timing: bool = False
+    native_checkpoint_capture: bool = False
+    checkpoint_pinned_prewarm_count: int = 0
     native_restore_frame: bool = False
     native_action_metadata: bool = False
     resident_restore_slots: int = 1
+    session_gpu_checkpoint_bytes: int = 0
+    restore_prepare_split: bool = False
+    restore_handoff_fastpath: bool = False
     async_action_metadata: bool = False
     rolling_active_window: bool = False
     early_capture_slot_release: bool = False
@@ -328,6 +368,14 @@ class RuntimeOptions:
     query_window_cache_bytes: int = 2147483648
     query_fps_halo_blocks: int = 0
     query_fps_optimized: bool = False
+    query_fps_prebuild: bool = False
+    query_fps_prebuild_device: str = 'cpu'
+    graph_query_trace_max_bytes: int = 16777216
+    query_fps_cpu_backend: str = 'torch'
+    query_fps_cpu_workers: int = 8
+    query_mean_quota_fraction: float = 0.0
+    cpu_release_sealed_sums: bool = False
+    query_fps_cache_fp8: bool = False
 
     @property
     def active_residency_enabled(self):
@@ -361,6 +409,17 @@ class RuntimeOptions:
                              'CPU history coordination and owned sessions; repository_gc and block graph must be disabled')
         if historical is not None and historical.ready_high > self.memory.repository_blocks:
             raise ValueError('historical_gc watermarks exceed repository capacity')
+        if historical is not None and historical.policy == 'redundancy':
+            incompatible = ('offline_prefill_coalescing', 'prefill_physical_coalescing',
+                            'prefill_publication_pipeline', 'early_capture_slot_release',
+                            'prefill_capture_ahead')
+            enabled = [name for name in incompatible if getattr(self, name)]
+            if enabled:
+                raise ValueError('historical_gc redundancy does not yet support accepted Query '
+                                 'publication with: '+', '.join(enabled))
+        if (historical is not None and self.query_score_mode == 'key_fps_4' and
+                not historical.policy_params['keep_mandatory']):
+            raise ValueError('Historical FPS retrieval requires keep_mandatory=true for Query and checkpoint holds')
         supplied = {name: getattr(self, name) for name in _POLICY_FIELDS
                     if getattr(self, name) is not _UNSET}
         explicit = (frozenset(supplied) if self._policy_explicit_fields is None
@@ -381,9 +440,21 @@ class RuntimeOptions:
             block_tokens=self.memory.block_tokens, graph_mode=self.graph_mode,
             graph_scoring_version=self.graph_scoring_version,
             graph_aggregation=self.graph_aggregation, graph_alpha=self.graph_alpha,
-            query_history=self.query_history, guided_query_tokens=self.guided_query_tokens)
+            query_history=self.query_history, guided_query_tokens=self.guided_query_tokens,
+            mean_quota_fraction=self.query_mean_quota_fraction, historical_gc=historical)
         validate_query_fps_experiments(self.query_score_mode,
-            self.query_fps_halo_blocks, self.query_fps_optimized)
+            self.query_fps_halo_blocks, self.query_fps_optimized, self.query_fps_prebuild,
+            self.query_fps_prebuild_device, self.query_fps_cpu_backend, self.query_fps_cpu_workers,
+            mean_quota_fraction=self.query_mean_quota_fraction)
+        validate_graph_query_trace_bytes(self.graph_query_trace_max_bytes)
+        for name in ('cpu_release_sealed_sums', 'query_fps_cache_fp8'):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(name+' must be boolean')
+        if (self.cpu_release_sealed_sums or self.query_fps_cache_fp8) and (
+                self.archive_backend != 'cpu' or self.mean_k_backend != 'qw3_cuda'):
+            raise ValueError('Compact CPU indices require CPU native MeanK')
+        if self.query_fps_cache_fp8 and self.query_score_mode != 'key_fps_4':
+            raise ValueError('query_fps_cache_fp8 requires key_fps_4')
         if self.query_score_mode in ('overlap_16_8', 'key_fps_4'):
             from .query_window_budget import split_cpu_history_budget
             split_cpu_history_budget(self)
@@ -515,12 +586,21 @@ class RuntimeOptions:
                 self.cpu_history_coordination and self.session_capture_terminal):
             raise ValueError('Rolling active window requires planned CPU history sessions, '
                              'terminal capture and matching refresh/restore modes')
+        if type(self.restore_prepare_split) is not bool or (self.restore_prepare_split and not self.async_restore):
+            raise ValueError('restore_prepare_split requires asynchronous restore')
+        if (type(self.session_gpu_checkpoint_bytes) is not int or
+                not 0 <= self.session_gpu_checkpoint_bytes <= 16 * 1024**3):
+            raise ValueError('session_gpu_checkpoint_bytes must be an integer in [0, 16 GiB]')
+        if self.session_gpu_checkpoint_bytes and (not self.async_restore or
+                not self.session_capture_terminal or not self.session_capacity):
+            raise ValueError('GPU model checkpoints require asynchronous terminal sessions')
         if (type(self.resident_restore_slots) is not int or
                 not 1 <= self.resident_restore_slots <= 32 or
                 (self.resident_restore_slots > 1 and not self.async_restore)):
             raise ValueError('Resident restore slots must be 1..32 and require async restore when greater than one')
         for name in ('split_capture_dma', 'native_prefill_commit', 'async_checkpoint_capture',
-                     'restore_stage_timing', 'native_restore_frame', 'native_action_metadata',
+                     'restore_stage_timing', 'host_stage_timing', 'native_checkpoint_capture',
+                     'native_restore_frame', 'native_action_metadata',
                      'action_profiling'):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f'{name} must be boolean')
@@ -581,6 +661,10 @@ class RuntimeOptions:
                 self.prefill_batch_tokens % self.memory.block_tokens or
                 (self.prefill_batch_tokens and not self.request_planning)):
             raise ValueError('Shared prefill budget requires explicit planning and aligned nonnegative tokens')
+        if (type(self.prefill_request_tokens) is not int or self.prefill_request_tokens < 0 or
+                self.prefill_request_tokens % self.memory.block_tokens or
+                self.prefill_request_tokens > self.prefill_batch_tokens):
+            raise ValueError('Per-request prefill cap requires aligned tokens within an enabled shared budget')
         if type(self.adaptive_prefill) is not bool or type(self.step_latency_interval) is not int or not 0 <= self.step_latency_interval <= 1024:
             raise ValueError('Invalid adaptive prefill/step timing settings')
         if any(type(v) not in (float, int) or not math.isfinite(v) or v <= 0 for v in
@@ -600,6 +684,9 @@ class RuntimeOptions:
                 self.repository_gc or self.archive_backend != 'cpu' or
                 (self.session_checkpoint_policy != 'pm' and not frozen_prompt))):
             raise ValueError('Asynchronous restore requires CPU P/M or frozen-P sessions, non-GC async refresh and maintenance budgets')
+        if type(self.restore_handoff_fastpath) is not bool or (self.restore_handoff_fastpath and (
+                not self.async_restore or not self.restore_prepare_split or self.offline_agent_policy)):
+            raise ValueError('Restore handoff fastpath requires split asynchronous restore without offline ordering')
         if type(self.cpu_history_coordination) is not bool or type(self.cpu_progress_reserve) is not bool:
             raise ValueError('CPU history coordination settings must be boolean')
         if self.cpu_history_coordination and (self.archive_backend != 'cpu' or self.repository_gc or
@@ -755,6 +842,10 @@ class RuntimeOptions:
             raise ValueError("Prefill cadence must be an integer in [1, 64]")
         if bool(self.session_capacity) != bool(self.session_checkpoint_bytes):
             raise ValueError('Prompt sessions require both entry and checkpoint-byte capacity')
+        if (type(self.checkpoint_pinned_prewarm_count) is not int or
+                not 0 <= self.checkpoint_pinned_prewarm_count <= 64 or
+                (self.checkpoint_pinned_prewarm_count and not self.session_capacity)):
+            raise ValueError('Pinned checkpoint prewarm needs 0..64 buffers and enabled sessions')
         if self.session_capacity and not self.async_archive_retirement:
             raise ValueError('Prompt sessions require fenced asynchronous authority retirement')
         if self.session_capture_decode and not self.session_capacity:
@@ -814,6 +905,12 @@ class RuntimeOptions:
         action = {name: payload.pop(name, default) for name, default in (
             ('query_score_mode', 'mean_k'), ('query_window_cache_bytes', 2147483648),
             ('query_fps_halo_blocks', 0), ('query_fps_optimized', False),
+            ('query_fps_prebuild', False),
+            ('query_fps_prebuild_device', 'cpu'),
+            ('graph_query_trace_max_bytes', 16777216),
+            ('query_fps_cpu_backend', 'torch'), ('query_fps_cpu_workers', 8),
+            ('query_mean_quota_fraction', 0.0),
+            ('cpu_release_sealed_sums', False), ('query_fps_cache_fp8', False),
             ('assembly_chunk_blocks', 32),
             ('guided_query_backend', 'eager'),
             ('query_replay_backend', 'eager'), ('query_replay_cobatch', False),
@@ -843,7 +940,7 @@ class RuntimeOptions:
             ('adaptive_prefill', False), ('step_latency_interval', 0),
             ('decode_step_target_ms', 50.0), ('prefill_min_tokens', 128),
             ('prefill_max_tokens', 2048), ('prefill_feedback_timeout_ms', 5000.0),
-            ('prefill_batch_tokens', 0), ('active_resident_ttl_ms', 0.0),
+            ('prefill_batch_tokens', 0), ('prefill_request_tokens', 0), ('active_resident_ttl_ms', 0.0),
             ('active_resident_pressure_only', False),
             ('active_resident_max_fraction', 0.5), ('maintenance_transfer_bytes_per_second', 0),
             ('maintenance_transfer_burst_bytes', 67108864), ('offline_agent_policy', False),
@@ -852,7 +949,12 @@ class RuntimeOptions:
             ('phase_max_wait_ms', 1000.0), ('split_capture_dma', True),
             ('native_prefill_commit', True), ('async_checkpoint_capture', True),
             ('restore_stage_timing', False), ('native_restore_frame', False),
+            ('host_stage_timing', False), ('native_checkpoint_capture', False),
+            ('checkpoint_pinned_prewarm_count', 0),
             ('native_action_metadata', False), ('resident_restore_slots', 1),
+            ('session_gpu_checkpoint_bytes', 0),
+            ('restore_prepare_split', False),
+            ('restore_handoff_fastpath', False),
             ('async_action_metadata', False),
             ('rolling_active_window', False), ('early_capture_slot_release', False),
             ('prefill_publication_pipeline', False),

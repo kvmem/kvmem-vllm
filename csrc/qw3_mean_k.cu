@@ -18,7 +18,11 @@ torch::Tensor score(torch::Tensor q, torch::Tensor k, double scale) {
     auto result=torch::zeros({B},q.options().dtype(at::kFloat));
     const auto stream=at::cuda::getCurrentCUDAStream();
     if (B<=8192) {
-        block_attn_score_softmax_pages_kernel<at::Half,at::Half><<<L*T,128,B*sizeof(float),stream>>>(
+        // NVCC 13 / sm_120 emits a 128-bit shared load for the scalar
+        // reduction's final 1-3 elements. Reserve its full tail access;
+        // n_blocks stays B, so padding never participates in the softmax.
+        const auto shared_bytes = ((B+3)/4)*4*sizeof(float);
+        block_attn_score_softmax_pages_kernel<at::Half,at::Half><<<L*T,128,shared_bytes,stream>>>(
             result.data_ptr<float>(),q.data_ptr<at::Half>(),k.data_ptr<at::Half>(),nullptr,nullptr,0,
             L,T,T,B,B,H,KH,D,static_cast<float>(scale),0,B,1,0);
         C10_CUDA_KERNEL_LAUNCH_CHECK();

@@ -21,6 +21,7 @@ DEFAULTS = {
     'model_format': 'gguf',
     'execution_mode': 'eager',
     'verify_session_restore': False,
+    'verify_session_restore_digest': False,
     'experimental_dflash_query_planning': False,
     'draft_tokens': 7,
     'draft_method': 'dflash',
@@ -33,6 +34,7 @@ DEFAULTS = {
     'query_replay_budget': None,
     'reasoning_end_str': None,
     'cuda_allocator_conf': None,
+    'recall_experiment': None,
 }
 PATHS = ('model', 'tokenizer', 'hf_config_path', 'draft_model', 'mm_proj')
 # Explicit experiment controls for NVFP4 and FP8 checkpoints.
@@ -109,6 +111,9 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
         raise ValueError('execution_mode must be eager, full_graph or compiled_graph')
     if type(cfg['verify_session_restore']) is not bool:
         raise ValueError('verify_session_restore must be boolean')
+    if (type(cfg['verify_session_restore_digest']) is not bool or
+            (cfg['verify_session_restore_digest'] and not cfg['verify_session_restore'])):
+        raise ValueError('Digest verification requires enabled session restore verification')
     if type(cfg['experimental_dflash_query_planning']) is not bool:
         raise ValueError('experimental_dflash_query_planning must be boolean')
     if cfg['draft_method'] not in ('dflash', 'mtp'):
@@ -167,7 +172,7 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
     # resolved profiles must remain valid inputs to the launcher.
     if type(cfg['long_prefill_token_threshold']) is not int or cfg['long_prefill_token_threshold'] < 0:
         raise ValueError('long_prefill_token_threshold must be a nonnegative integer')
-    if (cfg['port'] > 65535 or cfg['max_model_len'] > (1048576 if cfg['draft_method']=='mtp' else 262144)
+    if (cfg['port'] > 65535 or cfg['max_model_len'] > (10000000 if cfg['draft_method']=='mtp' else 262144)
             or cfg['max_num_batched_tokens'] < 8):
         raise ValueError('Port, draft logical-position range or verifier capacity is unsupported')
     utilization = cfg['gpu_memory_utilization']
@@ -192,6 +197,14 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
     options = RuntimeOptions.from_vllm(SimpleNamespace(
         kv_transfer_config=SimpleNamespace(kv_connector_extra_config=transfer['kv_connector_extra_config']),
         cache_config=SimpleNamespace(cache_dtype='fp8_e4m3')))
+    if cfg['max_model_len'] > 1048576:
+        gc = options.historical_gc
+        if (cfg['draft_method'] != 'mtp' or gc is None or gc.mode != 'delete' or
+                not options.request_planning or not options.rolling_active_window or
+                not options.cpu_history_coordination or not options.cpu_progress_reserve or
+                not options.session_capacity):
+            raise ValueError('Logical histories above 1M require bounded MTP, owned rolling sessions, '
+                             'deleting historical GC and physical CPU progress reservations')
     if (options.query_score_mode in ('overlap_16_8', 'key_fps_4') and
             os.environ.get('KVMEM_EXPERIMENTAL_QUERY_TOKEN_SCORES')):
         raise ValueError('Indexed Query scoring cannot be combined with experimental Query token scores')
@@ -305,6 +318,7 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
         '--generation-config', 'vllm',
         '--long-prefill-token-threshold', str(cfg['long_prefill_token_threshold']), '--no-async-scheduling',
         '--scheduler-cls', 'vllm_kvmem.scheduler.KVMemScheduler', '--kv-transfer-config', json.dumps(transfer),
+        '--worker-extension-cls', 'vllm_kvmem.systemone_worker.SystemOneWorker',
         '--speculative-config', json.dumps(speculation),
         '--enable-per-request-metrics', '--per-request-spec-decode-metrics', 'summary',
         '--middleware', 'vllm_kvmem.http_sessions.validate_prompt_session',
@@ -314,6 +328,10 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
         'KVMEM_BOUNDED_TARGET': '1', 'KVMEM_WINDOW_METADATA': '1',
         'KVMEM_DRAFT_LOAD_COMPAT': '1', 'VLLM_USE_V2_MODEL_RUNNER': '1',
         'VLLM_PLUGINS': 'gguf,kvmem' if is_gguf else 'kvmem'}
+    if cfg['recall_experiment'] is not None:
+        from .recall_experiment import launch_environment
+        env.update(launch_environment(cfg['recall_experiment'], options))
+        cfg['recall_experiment'] = dict(cfg['recall_experiment'])
     if cfg['cuda_allocator_conf'] is not None:
         settings = 'backend:native,' + ','.join(
             f'{name}:{value}' for name, value in cfg['cuda_allocator_conf'].items())
@@ -334,6 +352,8 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
         # Only scheduler/session logical coordinates grow beyond the HF limit;
         # do not alter the checkpoint's rotary frequencies or quantization.
         env['VLLM_ALLOW_LONG_MAX_MODEL_LEN'] = '1'
+    if cfg['max_model_len'] > 1048576:
+        env['KVMEM_LOGICAL_KV_CAPACITY'] = '1'
     if cfg['prefill_chunk_tokens']:
         env['KVMEM_PREFILL_CHUNK_TOKENS'] = str(cfg['prefill_chunk_tokens'])
     if cfg['reasoning_end_str'] is not None:
@@ -362,6 +382,8 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
             CAPTURE_COMPILE_KEY: capture_compile_fingerprint()})]
     if cfg['verify_session_restore']:
         env['KVMEM_VERIFY_SESSION_RESTORE'] = '1'
+        if cfg['verify_session_restore_digest']:
+            env['KVMEM_VERIFY_SESSION_RESTORE_DIGEST'] = '1'
     if not is_gguf:
         # Native vLLM resolves weight precision and kernels from the checkpoint.
         # Preserve all quantization metadata, including an unquantized config.

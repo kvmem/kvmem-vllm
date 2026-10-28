@@ -191,3 +191,19 @@ def test_resident_restore_fence_does_not_hold_unrelated_refresh_scratch():
     obj.executor = SimpleNamespace(submit=lambda *args: calls.append(args) or 'future')
     assert obj.step(refresh) and len(calls) == 1
     assert refresh.stage == 'assembly' and not hot.done and hot.future is not None
+
+
+def test_assembly_fence_covers_query_concatenation(monkeypatch):
+    import torch
+    obj=manager();obj.stream=object();obj._restore_state=lambda job: events.append('restore')
+    events=[]
+    job=SimpleNamespace(guided_rows=[],query_rows=[object()])
+    query=object()
+    def cat(rows,dim):
+        events.append('cat');return query
+    monkeypatch.setattr(torch,'cat',cat)
+    monkeypatch.setattr(torch.cuda,'Event',lambda:SimpleNamespace(record=lambda:events.append('fence')))
+    monkeypatch.delenv('KVMEM_RETRIEVAL_DIAGNOSTICS',raising=False)
+    obj._submit(job)
+    assert events==['restore','cat','fence']
+    assert job.assembly_inputs[0] is query

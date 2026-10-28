@@ -97,7 +97,9 @@ class SessionWorker:
         self.runner, self.options = runner, options
         self.pool = PromptCheckpointPool(options.session_capacity, options.session_checkpoint_bytes,
             retain_prompt=getattr(options,'session_checkpoint_policy','sealed')=='pm',
-            native_restore_frame=getattr(options, 'native_restore_frame', False))
+            native_restore_frame=getattr(options, 'native_restore_frame', False),
+            native_token_identity=getattr(options, 'restore_handoff_fastpath', False),
+            native_checkpoint_capture=getattr(options, 'native_checkpoint_capture', False))
         self.bindings = {}
         self.identities = {}
         self.imports = set()
@@ -300,6 +302,9 @@ class SessionWorker:
     def _verify_restored(self, request_id, checkpoint, resident=False):
         if not self.pool.model_ready(checkpoint):
             raise RuntimeError('Restore verification requires a completed model checkpoint')
+        if os.getenv('KVMEM_VERIFY_SESSION_RESTORE_DIGEST') == '1':
+            from .restore_digest import verify
+            return verify(self, request_id, checkpoint, resident)
         binding = self.bindings[request_id]
         working_tokens = binding.window if binding.pressure_restore else checkpoint.window.window_tokens
         # Verification-only: retain one bounded oracle per namespace until a
@@ -364,20 +369,21 @@ class SessionWorker:
 
     def prepare_restore_metadata(self, request_id, authority):
         binding = self.bindings[request_id]
-        graph = getattr(authority, 'block_graph', None)
+        from .prompt_spans import selection_metadata, install_selection_metadata
+        graph = selection_metadata(authority)
         if graph is not None:
             # The checkpoint claim has already compared exact token prefixes.
             # Omitted metadata inherits only this verified historical prefix;
             # conflicting boundaries are errors, never silently spliced.
-            from .prompt_spans import install_graph_metadata
-            install_graph_metadata(graph, binding,
+            install_selection_metadata(authority, binding,
                 validated_prefix=getattr(authority, '_graph_validated_prefix', binding.history))
 
     def publish_restore(self, request_id, authority, *, retained=False):
         from .cache_groups import full_attention_groups
         from .window_batch import WindowBatchAdapter
         binding, cfg = self.bindings[request_id], self.options.memory
-        if getattr(authority, 'block_graph', None) is not None:
+        from .prompt_spans import selection_metadata
+        if selection_metadata(authority) is not None:
             authority.graph_request_id = request_id
         if self.runner._kvmem_window_adapter is None:
             self.runner._kvmem_window_adapter = WindowBatchAdapter(
@@ -429,7 +435,12 @@ class SessionWorker:
         if checkpoint.request_id != request_id or checkpoint.authority is not authority:
             raise ValueError('Terminal request does not own the retained prompt snapshot')
         if command is not None and kind == 'captured' and os.getenv('KVMEM_VERIFY_SESSION_RESTORE') == '1':
-            self.restore_oracles[binding.namespace] = (checkpoint.position,self._target_bytes(request_id, checkpoint.window.window_tokens))
+            if os.getenv('KVMEM_VERIFY_SESSION_RESTORE_DIGEST') == '1':
+                from .restore_digest import target_digest
+                oracle = target_digest(self, request_id, checkpoint.window.window_tokens)
+            else:
+                oracle = self._target_bytes(request_id, checkpoint.window.window_tokens)
+            self.restore_oracles[binding.namespace] = (checkpoint.position, oracle)
         verified = verify_preserved_authority(authority) if self.options.verify_archive_on_finish else 0
         # Accepted KV capture has drained. The independent model snapshot can
         # still be downloading; pool.idle gates this request's retirement ack.

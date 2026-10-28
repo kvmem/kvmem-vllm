@@ -219,3 +219,37 @@ def test_incomplete_header_or_nonterminal_output_does_not_invent_assistant_end(b
         first = planner.prepare(payload, state)
         planner.commit(state, first, payload, dict(content='answer'), output)
         assert all(role != 'assistant' for _,_,role in state.locality_spans)
+
+
+def test_canonical_fallback_agrees_with_accepted_assistant_eos(boundary_tokenizer):
+    from vllm_kvmem.block_graph import _merge_spans
+    from vllm_kvmem.prompt_spans import normalize_spans
+    planner = bridge.Planner(renderer, boundary_tokenizer)
+    state = bridge.Trajectory()
+    payload = dict(messages=[dict(role='user', content='hello')],
+                   generation_header='<|im_start|>assistant\n')
+    first = planner.prepare(payload, state)
+    output = planner.encode('test<|im_end|>')
+    planner.commit(state, first, payload, dict(content='test'), output)
+    following = {**payload, 'messages': payload['messages'] + [
+        dict(role='assistant', content='test'), dict(role='user', content='help')]}
+    second = planner.prepare(following, state)
+    assert second[5]
+    old = normalize_spans(second[1]['kvmem_locality_spans'])
+    planner.commit(state, second, following, dict(content='hello'),
+                   planner.encode('hello<|im_end|>'))
+    # The newest returned text is edited by a client, forcing a canonical
+    # render. Earlier exact message boundaries and token prefix stay valid.
+    changed = {**following, 'messages': following['messages'] + [
+        dict(role='assistant', content='helping'), dict(role='user', content='test')]}
+    third = planner.prepare(changed, state)
+    assert not third[5]
+    assert third[0][:len(second[0])] == second[0]
+    incoming = normalize_spans(third[1]['kvmem_locality_spans'])
+    assert incoming[:len(old)] == old
+    _merge_spans(old, (True,) * len(old), incoming, len(second[0]) - 1)
+    # Keep the inter-message newline unclassified in both render paths;
+    # accepted history ends at EOS and does not contain that suffix token.
+    assistant = incoming[1]
+    assert third[0][assistant[1] - 1] == planner.end
+    assert third[0][assistant[1]:incoming[2][0]] == planner.encode('\n')

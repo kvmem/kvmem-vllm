@@ -65,7 +65,10 @@ def normalize_query_plan(payload, session_header=None):
         payload['max_tokens'] = max_tokens
     if type(max_tokens) is not int or max_tokens < 1:
         raise ValueError('max_tokens must be a positive integer')
-    if max_tokens > cfg['gen_budget']:
+    # G is physical decode headroom in rolling mode, not a response limit.
+    # Keep one native request (and its sampler/tool frame) across refreshes.
+    # Native serving still enforces prompt + output against max_model_len.
+    if max_tokens > cfg['gen_budget'] and not cfg.get('rolling_active_window', False):
         raise ValueError('Single-turn output must remain within G')
     extras = payload.get('vllm_xargs')
     session = payload.get('session_id') or session_header or (extras.get('session_id') if isinstance(extras,dict) else None)

@@ -1,7 +1,5 @@
 # Support and compatibility
 
-> **Documentation preview.** This branch previews the README, GIF and guides. The runtime and benchmark-tooling updates described here are still pending publication. Installation commands and new profiles require that development runtime; they are not a validated installation path for this preview branch.
-
 KVMem is an experimental integration. The package exposes checked adapters for
 specific vLLM interfaces and model-state layouts; the installation requirement
 `vllm>=0.30.0` is not a promise that every version, model or hardware combination

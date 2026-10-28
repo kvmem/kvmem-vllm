@@ -7,6 +7,8 @@ completed; the scheduler must not advertise a hit before idle() reports readines
 """
 from array import array
 from contextlib import nullcontext
+from .prompt_spans import selection_metadata
+
 from dataclasses import dataclass, replace
 from enum import Enum, auto
 import time
@@ -20,9 +22,12 @@ class CheckpointPhase(Enum):
     CLOSING = auto()    # Evicted; no new lookup may see it, readers still drain.
 
 
-def token_bytes(tokens, count):
+def token_bytes(tokens, count, *, native=False):
     if count <= 0 or len(tokens) <= count:
         raise ValueError('Prompt checkpoint must leave at least one token for native prefill')
+    if native and type(tokens) in (tuple, list):
+        from ._native import checkpoint_token_bytes
+        return checkpoint_token_bytes(tokens, count)
     prefix = tokens[:count]
     if any(type(token) is not int or not 0 <= token < 2**32 for token in prefix):
         raise ValueError('Prompt identity requires exact unsigned token IDs')
@@ -53,6 +58,7 @@ class PromptCheckpoint:
     claim_action_end: int = 0
     restore_deadline: float | None = None
     tail_rollback: object = None
+    # Includes boundary-only snapshots when historical LRU disables graph edges.
     graph_history: object = None
     claim_graph_history: object = None
     claim_graph_end: int = 0
@@ -74,17 +80,24 @@ class _TailRollback:
 
 
 class PromptCheckpointPool:
-    def __init__(self, capacity, max_payload_bytes, *, retain_prompt=False, native_restore_frame=False):
+    def __init__(self, capacity, max_payload_bytes, *, retain_prompt=False, native_restore_frame=False,
+                 native_token_identity=False, native_checkpoint_capture=False):
         if any(type(v) is not int or v <= 0 for v in (capacity, max_payload_bytes)):
             raise ValueError('Checkpoint pool needs positive entry and payload limits')
         if type(native_restore_frame) is not bool:
             raise ValueError('native_restore_frame must be boolean')
+        if type(native_token_identity) is not bool:
+            raise ValueError('native_token_identity must be boolean')
+        if type(native_checkpoint_capture) is not bool:
+            raise ValueError('native_checkpoint_capture must be boolean')
         self.capacity = capacity
         self.max_payload_bytes = max_payload_bytes
         self.entries = {}
         self.prompts = {}
         self.retain_prompt = retain_prompt
         self.native_restore_frame = native_restore_frame
+        self.native_token_identity = native_token_identity
+        self.native_checkpoint_capture = native_checkpoint_capture
         self.payload_bytes = 0
         self._discarded_captures = []
 
@@ -143,8 +156,9 @@ class PromptCheckpointPool:
         retained_bytes = self.payload_bytes - (previous.payload_bytes if reusable else 0)
         if token_size >= self.max_payload_bytes - retained_bytes:
             raise BufferError('Prompt checkpoint payload capacity is exhausted')
-        identity = token_bytes(tokens, position)
-        window = authority.memory.checkpoint_window(allow_partial=terminal)
+        identity = token_bytes(tokens, position, native=self.native_checkpoint_capture)
+        window = authority.memory.checkpoint_window(allow_partial=terminal,
+            **({'native_validation': True} if self.native_checkpoint_capture else {}))
         # Account for the serialized frame geometry as well as token/model data.
         # Python object overhead and authority/archive storage are separate quotas.
         fixed = len(identity) + len(window.records) * 5 * 8
@@ -161,7 +175,7 @@ class PromptCheckpointPool:
             fixed += len(action_snapshot[0])*16+8
             if len(action_snapshot)>2:
                 fixed += len(action_snapshot[2][0])*24+24
-        graph = getattr(authority, 'block_graph', None)
+        graph = selection_metadata(authority)
         graph_snapshot = graph.snapshot(position) if graph is not None else None
         try:
             if graph_snapshot is not None:
@@ -218,7 +232,8 @@ class PromptCheckpointPool:
         if (checkpoint.phase is not CheckpointPhase.LIVE or
                 checkpoint.authority.history_end != checkpoint.position):
             raise ValueError('Window update requires the exact live checkpoint boundary')
-        window = checkpoint.authority.memory.checkpoint_window()
+        window = checkpoint.authority.memory.checkpoint_window(
+            **({'native_validation': True} if self.native_checkpoint_capture else {}))
         delta = (len(window.records) - len(checkpoint.window.records)) * 5 * 8
         if self.payload_bytes + delta > self.max_payload_bytes:
             raise BufferError('Updated checkpoint window exceeds its payload budget')
@@ -352,7 +367,7 @@ class PromptCheckpointPool:
             if not self.model_ready(prompt):
                 return None
             with timing.stage('token_prefix_compare') if timing is not None else nullcontext():
-                if len(tokens)<=position or token_bytes(tokens,position)!=prompt.tokens:
+                if len(tokens)<=position or token_bytes(tokens,position,native=self.native_token_identity)!=prompt.tokens:
                     return None
             # A page-aligned new Query can require P model state even though
             # the complete previous M token prefix is unchanged. Preserve its
@@ -363,7 +378,7 @@ class PromptCheckpointPool:
             self._clear_claim_graph(prompt)
             with timing.stage('token_prefix_compare') if timing is not None else nullcontext():
                 full_prefix = (len(tokens)>checkpoint.position and
-                    token_bytes(tokens,checkpoint.position)==checkpoint.tokens)
+                    token_bytes(tokens,checkpoint.position,native=self.native_token_identity)==checkpoint.tokens)
             if full_prefix and checkpoint.graph_history is not None:
                 if self.payload_bytes + checkpoint.graph_history.bytes > self.max_payload_bytes:
                     raise BufferError('M graph preservation exceeds checkpoint payload capacity')
@@ -380,7 +395,8 @@ class PromptCheckpointPool:
             self.entries[namespace] = checkpoint = prompt
         # No hash-only equality and no reuse of reserialized generated suffixes.
         with timing.stage('token_prefix_compare') if timing is not None else nullcontext():
-            if len(tokens) <= checkpoint.position or token_bytes(tokens, checkpoint.position) != checkpoint.tokens:
+            if len(tokens) <= checkpoint.position or token_bytes(
+                    tokens, checkpoint.position, native=self.native_token_identity) != checkpoint.tokens:
                 return None
         if not request_id or request_id == checkpoint.request_id:
             raise ValueError('Checkpoint import requires a fresh native request identity')
@@ -435,7 +451,7 @@ class PromptCheckpointPool:
             raise ValueError('No unsubmitted checkpoint import')
         if not self.model_ready(checkpoint):
             raise RuntimeError('Claimed model checkpoint payload is not ready')
-        if metadata_binding is not None and getattr(checkpoint.authority, 'block_graph', None) is not None:
+        if metadata_binding is not None and selection_metadata(checkpoint.authority) is not None:
             from .prompt_spans import graph_metadata
             from .block_graph import _merge_spans
             spans, _ = graph_metadata(metadata_binding)
@@ -469,7 +485,7 @@ class PromptCheckpointPool:
                     return None
                 if not authority.archive.wait_for_idle(remaining):
                     raise TimeoutError('P checkpoint archive did not drain')
-        graph = getattr(checkpoint.authority, 'block_graph', None)
+        graph = selection_metadata(checkpoint.authority)
         if graph is not None:
             if checkpoint.graph_history is None:
                 raise ValueError('Graph session checkpoint has no matching graph snapshot')
@@ -480,6 +496,8 @@ class PromptCheckpointPool:
                 else:
                     graph.restore(checkpoint.graph_history)
             checkpoint.authority._graph_validated_prefix = max(checkpoint.position, checkpoint.claim_graph_end)
+            if getattr(graph, 'boundary_only', False) or getattr(checkpoint.authority, 'query_boundaries', None) is graph:
+                checkpoint.authority._query_boundary_validated_prefix = max(checkpoint.position, checkpoint.claim_graph_end)
         action = getattr(checkpoint.authority,'action_history',None)
         checkpoint.authority.guided_seed = checkpoint.guided_seed
         if action is not None:
@@ -492,8 +510,8 @@ class PromptCheckpointPool:
                 else:
                     action.restore(original,checkpoint.authority)
         if graph is not None and metadata_binding is not None:
-            from .prompt_spans import install_graph_metadata
-            install_graph_metadata(graph, metadata_binding,
+            from .prompt_spans import install_selection_metadata
+            install_selection_metadata(checkpoint.authority, metadata_binding,
                 validated_prefix=checkpoint.authority._graph_validated_prefix)
         if pressure:
             if timing is None:

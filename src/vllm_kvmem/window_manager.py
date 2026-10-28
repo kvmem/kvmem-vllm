@@ -67,7 +67,7 @@ class WorkingSetManager:
 
     def get_num_blocks_to_allocate(self, request_id, num_tokens, new_computed_blocks,
                                    total_computed_tokens, num_local_computed_tokens,
-                                   num_tokens_main_model, apply_admission_cap=False):
+                                   num_tokens_main_model, apply_admission_cap=False, **kwargs):
         if new_computed_blocks:
             raise ValueError("Working-set manager cannot consume ordinary prefix-cache hits")
         external = total_computed_tokens - num_local_computed_tokens
@@ -85,6 +85,7 @@ class WorkingSetManager:
             local_computed,
             self._local(request_id, num_tokens_main_model, admission=apply_admission_cap),
             apply_admission_cap=apply_admission_cap,
+            **kwargs,
         )
         return max(0, required - len(self.resident_imports.get(request_id, ())))
 
@@ -141,12 +142,12 @@ class WorkingSetManager:
         return result
 
     def allocate_external_computed_blocks(self, request_id, num_local_computed_tokens,
-                                          num_external_computed_tokens):
+                                          num_external_computed_tokens, **kwargs):
         external = (self._external_extent(request_id, num_local_computed_tokens,
                                          num_external_computed_tokens)
                     if num_external_computed_tokens else 0)
         return self.native.allocate_external_computed_blocks(request_id,
-                                                             num_local_computed_tokens, external)
+                                                             num_local_computed_tokens, external, **kwargs)
 
     def validate_import(self, request_id, history_end):
         checkpoint = self.imports.get(request_id)

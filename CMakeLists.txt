@@ -5,6 +5,7 @@ find_package(Threads REQUIRED)
 add_library(kvmem_core STATIC
   csrc/historical_manager.cpp
   csrc/historical_payload.cpp
+  csrc/historical_redundancy.cpp
   third_party/qw3/src/kvmem_store.cpp
   third_party/qw3/src/kvmem_repository.cpp
   third_party/qw3/src/kvmem_repository_gc.cpp
@@ -33,3 +34,8 @@ target_include_directories(historical_manager_test PRIVATE csrc)
 target_link_libraries(historical_manager_test PRIVATE kvmem_core)
 add_test(NAME historical_manager COMMAND historical_manager_test)
 set_tests_properties(historical_manager PROPERTIES TIMEOUT 120)
+add_executable(historical_redundancy_test csrc/tests/historical_redundancy_test.cpp)
+target_include_directories(historical_redundancy_test PRIVATE csrc)
+target_link_libraries(historical_redundancy_test PRIVATE kvmem_core)
+add_test(NAME historical_redundancy COMMAND historical_redundancy_test)
+set_tests_properties(historical_redundancy PROPERTIES TIMEOUT 120)

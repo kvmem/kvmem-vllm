@@ -78,6 +78,19 @@ def native_fixture(monkeypatch, tmp_path, *, cold_busy=lambda: False, max_seqs=8
     scheduler.connector, scheduler.ec_connector = connector, None
     scheduler.running = []
     scheduler.waiting, scheduler.skipped_waiting = FCFSRequestQueue(), FCFSRequestQueue()
+    scheduler.kv_holding_waiting = FCFSRequestQueue()
+    scheduler.can_skip_drafts = False
+    scheduler.deferred_waiting = set()
+    scheduler.local_prefill_interval = 1
+    scheduler.last_prefill_step = -1
+    scheduler.num_executed_steps = 0
+    scheduler.max_num_active_reqs = max_seqs
+    scheduler.adaptive_long_prefill_threshold = False
+    scheduler.aux_output_connector = None
+    scheduler.is_mm_encoder_only = False
+    scheduler.prefix_replay_tokens = 0
+    scheduler.prefix_replay_group_ids = ()
+    scheduler._kv_fetch_stages = None
     scheduler.requests, scheduler.transactions, scheduler.table_updates = {}, {}, {}
     scheduler.current_step = 0
     scheduler.max_num_scheduled_tokens = 512
@@ -160,7 +173,7 @@ def test_native_waiting_skips_busy_cold_then_admits_hot_and_fresh(monkeypatch, t
     output = s.schedule()
     assert set(output.num_scheduled_tokens) == {'hot', 'fresh'}
     assert [r.request_id for r in s.running] == ['hot', 'fresh']
-    assert list(s.skipped_waiting) == [cold]
+    assert s._waiting_requests() == [cold]
     assert cold.status == RequestStatus.WAITING and cold.num_computed_tokens == 0
     assert 'cold' not in s.kv_cache_manager.reservations and not window.req_to_blocks.get('cold')
     assert set(gate.permits) == {'hot'} and gate.permits['hot'].allocated
@@ -179,7 +192,7 @@ def test_eight_cold_waiters_cannot_fill_all_native_slots(monkeypatch, tmp_path):
     expected = {'cold-0', *(r.request_id for r in fresh)}
     assert set(output.num_scheduled_tokens) == expected
     assert {r.request_id for r in s.running} == expected and len(s.running) == 8
-    assert {r.request_id for r in s.skipped_waiting} == {r.request_id for r in cold[1:]}
+    assert {r.request_id for r in s._waiting_requests()} == {r.request_id for r in cold[1:]}
     assert set(gate.permits) == {'cold-0'}
     assert all(not window.req_to_blocks.get(r.request_id) and
                r.request_id not in s.kv_cache_manager.reservations for r in cold[1:])
@@ -193,7 +206,7 @@ def test_expired_hot_view_uses_busy_cold_lane_and_does_not_block_fresh(monkeypat
     enqueue(s, expired, fresh)
     output = s.schedule()
     assert set(output.num_scheduled_tokens) == {'fresh'}
-    assert list(s.skipped_waiting) == [expired]
+    assert s._waiting_requests() == [expired]
     assert not residency.entries and not window.resident_imports and not gate.permits
 
 

@@ -6,27 +6,12 @@ native proposer. This contract does not itself enable bounded speculation.
 """
 from dataclasses import dataclass
 from functools import lru_cache
-import hashlib
-from importlib.metadata import distribution
-
-
-DRAFT_SOURCES = {
-    'v1/worker/gpu/spec_decode/__init__.py': '1f1f84bfe6f4f5af3a7e21a7a8716ecf7b9013da1d03327668a3ee36afc24c32',
-    'v1/worker/gpu/spec_decode/dflash/speculator.py': 'f9c100f42f9326e48eb84e89281897e859ba761943f54d593523555ccd98dc63',
-    'v1/worker/gpu/spec_decode/dflash2/speculator.py': 'b70043550938a1df9aecc85d8c8224c38c929ca34f68834572f6e723854d2027',
-    'model_executor/models/qwen3_dflash.py': '4150292acb5934276e44bd0ce11927818174848c78b39d5223dd8fb1114e5640',
-    'model_executor/models/qwen3_dflash2.py': 'c141daa4b2059c0098224ac36471c2197b7052c100bef0a4dbc2ca79b627053f',
-}
 
 
 @lru_cache(maxsize=1)
 def verify_draft_sources():
-    from .integration import check_engine_version
-    check_engine_version()
-    package = distribution('vllm')
-    for relative, expected in DRAFT_SOURCES.items():
-        if hashlib.sha256(package.locate_file('vllm/' + relative).read_bytes()).hexdigest() != expected:
-            raise ValueError(f'Unqualified native draft lifecycle source: {relative}')
+    from .engine_api import require_contract
+    require_contract('draft')
 
 
 @dataclass(frozen=True)
@@ -120,18 +105,7 @@ class DraftContract:
         return groups
 
 
-MTP_SOURCES = {
-    'v1/worker/gpu/spec_decode/mtp/speculator.py': '926d6c9ffdb368c971647911a60493820d056ce236fcae9d94a42fa2e006255d',
-    'v1/worker/gpu/spec_decode/autoregressive/speculator.py': '5b97f54e20ddf65b98e939832d050745f67ef43cfa145786da300f1a8322e3c6',
-    'model_executor/models/qwen3_5_mtp.py': 'a7550c4954899b38cecc536633c0fffd04820ed802610fb28cd4d79971b4f1f1',
-}
-
-
 @lru_cache(maxsize=1)
 def verify_mtp_sources():
-    from .integration import check_engine_version
-    check_engine_version()
-    package = distribution('vllm')
-    for relative, expected in MTP_SOURCES.items():
-        if hashlib.sha256(package.locate_file('vllm/' + relative).read_bytes()).hexdigest() != expected:
-            raise ValueError(f'Unqualified native MTP lifecycle source: {relative}')
+    from .engine_api import require_contract
+    require_contract('mtp')

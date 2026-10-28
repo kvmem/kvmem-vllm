@@ -2,6 +2,7 @@
 import time
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm_kvmem import _native as n
@@ -25,7 +26,8 @@ def eventually(worker, predicate):
         time.sleep(.001)
 
 
-def test_pm_frames_survive_lru_and_cancelled_successor_rebases_only_its_partial_tail(tmp_path):
+@pytest.mark.parametrize("boundaries", [False, True])
+def test_pm_frames_survive_lru_and_cancelled_successor_rebases_only_its_partial_tail(tmp_path, boundaries):
     config = KVMemConfig(block_tokens=2, select_budget=4, gen_budget=4,
                         repository_blocks=16, sink_blocks=1, recent_blocks=0)
     archive = MemoryArchive(str(tmp_path), 24, 32, native_payloads=True)
@@ -34,6 +36,10 @@ def test_pm_frames_survive_lru_and_cancelled_successor_rebases_only_its_partial_
     settings.ready_low, settings.ready_high, settings.scan_blocks = 13, 14, 16
     worker = archive.enable_history_gc(settings)
     authority = RequestAuthority('a', config, archive, 2, 1, 2)
+    if boundaries:
+        from vllm_kvmem.query_boundary_history import QueryBoundaryHistory
+        authority.query_boundaries = QueryBoundaryHistory(('tenant', 's'), block_tokens=2)
+        authority.query_boundaries.update_message_spans([(0, 8, 'user'), (8, 20, 'assistant')])
     pool = PromptCheckpointPool(2, 8192, retain_prompt=True)
     adapter, conv, ssm, draft, _ = fixture()
 
@@ -63,6 +69,9 @@ def test_pm_frames_survive_lru_and_cancelled_successor_rebases_only_its_partial_
         plan.release_cpu_sources()
         del plan
         prompt = pool.capture(('tenant', 's'), 'a', authority, list(range(20)), adapter)
+        if boundaries:
+            assert prompt.graph_history.boundary_only
+            assert prompt.graph_history.accepted_through == 8
         for _ in range(16):
             worker.advance()
             authority.poll()
@@ -97,6 +106,10 @@ def test_pm_frames_survive_lru_and_cancelled_successor_rebases_only_its_partial_
             assert (new_tail[0], new_tail[1]) != (old_tail.slot, old_tail.generation)
             assert terminal.model is model and pool.prompts[prompt.namespace] is prompt
             assert authority.memory.checkpoint_valid(prompt.window.prefix)
+            if boundaries:
+                assert authority.query_boundaries.accepted_through == 11
+                assert terminal.graph_history.accepted_through == 11
+                assert prompt.graph_history.accepted_through == 8
             actual_state = (*model.recurrent.values(), *model.draft.values())
             assert all(torch.equal(actual, expected) for actual, expected in zip(actual_state, saved_state))
             assert verify_preserved_authority(authority) == 3

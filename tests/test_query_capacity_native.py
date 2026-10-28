@@ -78,7 +78,8 @@ def test_all_invalid_step_emits_error_with_zero_model_work(monkeypatch,tmp_path)
         _should_throttle_prefills=lambda:False,
         capture_iteration_details=lambda _:nullcontext(None),
         log_error_detail=lambda _:nullcontext(None),
-        _process_aborts_queue=lambda:None,_attach_iteration_details=lambda *_:None)
+        _process_aborts_queue=lambda:None,_attach_iteration_details=lambda *_:None,
+        _attach_weight_version=lambda *_:None)
     result,model_executed=EngineCore.step(core)
     assert calls==[0] and not model_executed
     assert result[0].outputs[0].request_id=='bad'

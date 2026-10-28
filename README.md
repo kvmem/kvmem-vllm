@@ -1,7 +1,5 @@
 # KVMem for vLLM
 
-> **Documentation preview.** This branch previews the README, GIF and guides. The runtime and benchmark-tooling updates described here are still pending publication. Installation commands and new profiles require that development runtime; they are not a validated installation path for this preview branch.
-
 **Serve long-context requests with CPU KV history and a bounded GPU working set.**
 
 KVMem for vLLM brings [KVMem](https://github.com/kvmem/kvmem)'s memory management to vLLM's batched inference engine. It archives historical KV on the CPU and restores selected history into GPU memory, leaving room for more concurrent long-context requests. vLLM continues to run the model, attention kernels, scheduling infrastructure, sampling and streaming API.
@@ -44,7 +42,7 @@ Prerequisites: Linux, Python 3.12+, a C++17 compiler, a compatible CUDA toolkit 
 ### 1. Install from source
 
 ```sh
-git clone https://github.com/Di-Chai/kvmem-vllm.git
+git clone https://github.com/kvmem/kvmem-vllm.git
 cd kvmem-vllm
 bash scripts/setup_gpu.sh --latest
 ```

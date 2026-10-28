@@ -70,8 +70,8 @@ def capture_native(refresh, job, query):
         attn = module.attn
         group = groups[attn.layer_name]
         if group not in tables:
-            n = int(runner.block_tables.num_blocks.np[group,index])
-            tables[group] = runner.block_tables.block_tables[group].gpu[index,:n].clone()
+            from .native_pages import kernel_table
+            tables[group] = kernel_table(runner, group, index).clone()
         key, _ = native_vllm_fp8_views(attn.kv_cache, module.num_kv_heads, module.head_dim)
         q_dtype = refresh.runtime.action.prefill_q_dtypes[attn.layer_name]
         masses.append(page_attention(query[layer_index], positions, key, tables[group],

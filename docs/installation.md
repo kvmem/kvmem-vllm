@@ -1,7 +1,5 @@
 # Installation and first request
 
-> **Documentation preview.** This branch previews the README, GIF and guides. The runtime and benchmark-tooling updates described here are still pending publication. Installation commands and new profiles require that development runtime; they are not a validated installation path for this preview branch.
-
 KVMem is an experimental vLLM integration for bounded GPU working contexts and
 CPU-backed KV history. Install it from source, supply model files separately, and
 launch it with an explicit configuration. Installing the package alone does not

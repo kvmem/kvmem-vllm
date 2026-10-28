@@ -30,8 +30,10 @@ def test_unarmed_native_warmup_does_not_access_temporarily_disabled_connector(mo
     from vllm_kvmem.runner import make_probe_runner
     import vllm.distributed.kv_transfer as transfer
 
+    native_calls = []
     class Base:
         def execute_model(self, *args, **kwargs):
+            native_calls.append(kwargs)
             return "native"
 
     runner = make_probe_runner(Base)()
@@ -47,7 +49,8 @@ def test_unarmed_native_warmup_does_not_access_temporarily_disabled_connector(mo
         raise AssertionError("Native warmup disables the global connector agent")
 
     monkeypatch.setattr(transfer, "get_kv_transfer_group", disabled)
-    assert runner.execute_model(batch) == "native"
+    assert runner.execute_model(batch, randomize_inputs=True) == "native"
+    assert native_calls[-1]['randomize_inputs'] is True
     connector = SimpleNamespace(runtime=None)
     monkeypatch.setattr(transfer, "get_kv_transfer_group", lambda: connector)
     (tmp_path / "armed").touch()
@@ -170,7 +173,8 @@ def test_terminal_clipping_precedes_both_deferrals_and_only_ready_owners_retire(
         defer_terminals=capture_defer, finish=finish,
         advance_publication=lambda *_: calls.append('advance'),
         retirement_done=lambda _: False, publication_blocked_requests=lambda: {'b'})
-    runner._kvmem_async_refresh = SimpleNamespace(defer_terminals=refresh_defer, maintenance=None)
+    runner._kvmem_async_refresh = SimpleNamespace(defer_terminals=refresh_defer, maintenance=None,
+                                                 options=SimpleNamespace())
     runner._kvmem_sessions = SimpleNamespace(receive=lambda _: calls.append('sessions'))
     runner._kvmem_window_adapter = SimpleNamespace(free=lambda rid: calls.append(('free', rid)))
     connector = SimpleNamespace()

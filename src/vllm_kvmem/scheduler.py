@@ -4,8 +4,6 @@ Experimental bounded target mode clips admission and schedules semantic refresh.
 Identity-refresh qualification remains separately available.
 """
 import os
-import hashlib
-import inspect
 import json
 import time
 from pathlib import Path
@@ -14,12 +12,10 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import RequestStatus
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
-from .connector import KVMemConnector, RefreshCommand, RestoreCommand
+from .connector import KVMemConnector, RefreshCommand, RestoreCommand, ControlMetadata
 from .options import RuntimeOptions
 from .window_manager import WorkingSetManager
 from .admission import QueryPolicy
-
-SCHEDULER_SHA256 = "c1db45f3bbad3a875dd8638331b8870c4380ac1ab4734265ba5c863833a82884"
 
 
 class _Complete:
@@ -28,6 +24,15 @@ class _Complete:
 
 
 class KVMemScheduler(Scheduler):
+    def _waiting_queues(self):
+        # Newer native schedulers keep KV holders in a separate priority queue.
+        return tuple(getattr(self, name) for name in
+                     ('kv_holding_waiting', 'waiting', 'skipped_waiting')
+                     if hasattr(self, name))
+
+    def _waiting_requests(self):
+        return [request for queue in self._waiting_queues() for request in queue]
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if not isinstance(self.connector, KVMemConnector):
@@ -44,8 +49,9 @@ class KVMemScheduler(Scheduler):
         self._bounded_target = os.getenv("KVMEM_BOUNDED_TARGET") == "1"
         if not self._bounded_target and os.getenv("KVMEM_SCHEDULED_REBUILD_PROBE") != "1":
             raise ValueError("Compressed runtime not yet enabled; scheduler currently exposes the explicit identity probe")
-        if self._bounded_target and hashlib.sha256(Path(inspect.getfile(Scheduler)).read_bytes()).hexdigest() != SCHEDULER_SHA256:
-            raise ValueError("Unqualified scheduler token-admission/connector-metadata hooks")
+        if self._bounded_target:
+            from .engine_api import require_contract
+            require_contract('scheduler')
         options = RuntimeOptions.from_vllm(self.vllm_config)
         self._deferred_prefill_validation = options.prefill_deferred_validation
         self.connector.request_plan_memory = options.memory if options.request_planning else None
@@ -85,7 +91,8 @@ class KVMemScheduler(Scheduler):
             from .prefill_control import BatchPrefillBudget
             if options.prefill_batch_tokens < config.block_tokens * self.scheduler_config.max_num_seqs:
                 raise ValueError('Shared prefill budget must fit one block per active request')
-            self.prefill_batch = BatchPrefillBudget(options.prefill_batch_tokens, config.block_tokens)
+            self.prefill_batch = BatchPrefillBudget(options.prefill_batch_tokens, config.block_tokens,
+                per_request_tokens=getattr(options, 'prefill_request_tokens', 0))
         if options.adaptive_prefill:
             from .prefill_control import PrefillController
             self.prefill_controller = PrefillController(options)
@@ -174,7 +181,10 @@ class KVMemScheduler(Scheduler):
             from .coordination import HistoryAdmission
             from .cache_manifest import archive_bytes_per_token
             from .query_window_budget import split_cpu_history_budget
+            from .historical_feature_budget import split_historical_feature_budget
             history_bytes, _ = split_cpu_history_budget(options)
+            history_bytes, _ = split_historical_feature_budget(options, history_bytes,
+                self.scheduler_config.max_num_seqs + options.session_capacity)
             row_bytes = archive_bytes_per_token(self.kv_cache_config)
             record_bytes = row_bytes * config.block_tokens
             capacity = min(history_bytes,
@@ -214,9 +224,12 @@ class KVMemScheduler(Scheduler):
         self.offline_policy = None
         self.prefill_coalescer = None
         if options.offline_agent_policy:
+            if not hasattr(Scheduler, '_select_waiting_queue_for_scheduling'):
+                raise ValueError('Offline agent ordering requires a native waiting-queue selection hook; '
+                                 'disable offline_agent_policy with this engine')
             from vllm.v1.core.sched.request_queue import SchedulingPolicy, FCFSRequestQueue
             from .offline_policy import OfflineAgentPolicy
-            if self.policy != SchedulingPolicy.FCFS or any(type(q) is not FCFSRequestQueue for q in (self.waiting, self.skipped_waiting)):
+            if self.policy != SchedulingPolicy.FCFS or any(type(q) is not FCFSRequestQueue for q in self._waiting_queues()):
                 raise ValueError('Offline agent ordering requires the qualified native FCFS queues')
             self.offline_policy = OfflineAgentPolicy(self, options,
                 Path(os.environ['KVMEM_RUNNER_PROBE_DIR']) / 'offline_decisions.jsonl')
@@ -262,7 +275,9 @@ class KVMemScheduler(Scheduler):
         command = RefreshCommand(request.request_id, groups[0][1].ticket_id, groups,query_span,selection,mandatory_spans,
                                  tuple(input_tokens), asynchronous, speculative_padding, tuple(message_spans),
                                  tuple(locality_spans), tuple(locality_provenance),
-                                 guided_reason, guided_private, guided_boundary)
+                                 guided_reason, guided_private, guided_boundary,
+                                 pressure_stage=('prefill' if request.num_computed_tokens < request.num_prompt_tokens
+                                                 else 'decode') if selection == 'pressure' else '')
         self.transactions[request.request_id] = (command, request.next_decode_eligible_step)
         request.next_decode_eligible_step = 2**62
         self.connector.queue(command)
@@ -748,7 +763,7 @@ class KVMemScheduler(Scheduler):
             return
         # The first qualification admits exactly one live request. Counting
         # blocked/waiting neighbours as well avoids guessing native composition.
-        requests = list(self.running) + list(self.waiting) + list(self.skipped_waiting)
+        requests = list(self.running) + list(self._waiting_requests())
         if len(requests) == 1:
             self._logical_prefill_owner = requests[0]
 
@@ -974,7 +989,7 @@ class KVMemScheduler(Scheduler):
             r.num_tokens_with_spec + getattr(r, 'num_output_placeholders', 0) > r.num_computed_tokens]
         # Only a fully known existing running composition is calibrated.
         # Fresh waiting admissions and maintenance fences retain baseline caps.
-        if self.waiting or self.skipped_waiting:
+        if any(self._waiting_queues()):
             self._coalescing_reason = 'baseline: waiting composition unknown'
             return
         decode, prefills = [], []
@@ -1119,7 +1134,7 @@ class KVMemScheduler(Scheduler):
                     getattr(self, 'num_waiting_for_streaming_input', 0))
         waiting = []
         sessions = self.connector.sessions
-        for request in sorted([*self.waiting, *self.skipped_waiting],
+        for request in sorted(self._waiting_requests(),
                               key=lambda r: self.offline_policy.ranks.get(r.request_id, 0)):
             if not slots:
                 break
@@ -1219,7 +1234,7 @@ class KVMemScheduler(Scheduler):
         policy = getattr(self, 'offline_policy', None)
         if policy is None:
             prefills = sum(ready(r) and r.num_computed_tokens < r.num_prompt_tokens for r in self.running)
-            waiting = len(self.waiting)
+            waiting = sum(len(q) for q in self._waiting_queues())
         else:
             from .request_plan import request_plan
             def ordinary(request, *, running):
@@ -1243,7 +1258,7 @@ class KVMemScheduler(Scheduler):
             # to compute a denominator. Real admission can still reject work;
             # those token reservations conservatively expire at the next step.
             prefills = sum(ordinary(r, running=True) for r in self.running)
-            waiting = sum(ordinary(r, running=False) for r in (*self.waiting, *self.skipped_waiting))
+            waiting = sum(ordinary(r, running=False) for r in self._waiting_requests())
         slots = max(0, self.scheduler_config.max_num_seqs - len(self.running))
         budget.begin(decode_ready=self._decode_ready(step=step),
                      contenders=prefills + min(waiting, slots))
@@ -1257,7 +1272,7 @@ class KVMemScheduler(Scheduler):
         """
         if not getattr(self, '_bounded_target', False) or getattr(self, 'prefill_cadence', 1) == 1:
             return False
-        mixed = (any(r.is_prefill_chunk for r in self.running) or bool(self.waiting)) and self._decode_ready()
+        mixed = (any(r.is_prefill_chunk for r in self.running) or any(self._waiting_queues())) and self._decode_ready()
         if not mixed or self.prefill_capacity_bound:
             self._mixed_steps = 0
             return False
@@ -1309,7 +1324,13 @@ class KVMemScheduler(Scheduler):
                            for manager in self.kv_cache_manager.coordinator.single_type_managers)
                 for key in self.table_updates
                 if key in self.requests and not self.requests[key].is_finished()}
-            output.block_table_updates = {**(output.block_table_updates or {}), **updates}
+            if hasattr(output, 'block_table_updates'):
+                output.block_table_updates = {**(output.block_table_updates or {}), **updates}
+            else:
+                control = output.kv_connector_metadata
+                if not isinstance(control, ControlMetadata):
+                    raise RuntimeError('Page publication requires KVMem connector metadata')
+                control.block_table_updates.update(updates)
             self.table_updates = {}
         if getattr(self, 'offline_policy', None) is not None:
             self.offline_policy.record(output)
@@ -1328,7 +1349,7 @@ class KVMemScheduler(Scheduler):
                 allowed = (self._phase_decision.phase == 'prefill' and rid in self._phase_prefills)
                 return (0 if rid in self._phase_maintenance else 1 if allowed else 2,
                         self.offline_policy.ranks.get(rid, 0))
-            queues = [q for q in (self.waiting, self.skipped_waiting) if q]
+            queues = [q for q in self._waiting_queues() if q]
             for pending in queues:
                 ordered = sorted(pending, key=rank)
                 pending.clear()

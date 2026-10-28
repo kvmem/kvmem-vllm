@@ -221,7 +221,8 @@ def test_action_parser_and_page_mapping_wait_only_for_its_owner(tmp_path, monkey
                 rotary_emb=NS(cos_sin_cache=None))
     action.layers = [(0, module)]
     runtime.runner.req_states = NS(req_id_to_index={'a': 0})
-    runtime.runner.block_tables = NS(block_tables=[NS(gpu=torch.zeros((1, 4), dtype=torch.int64))])
+    runtime.runner.block_tables = NS(block_tables=[NS(gpu=torch.zeros((1, 4), dtype=torch.int64))],
+        num_blocks=NS(np=torch.tensor([[4]])), kernel_block_sizes=(4,))
     runtime.action = action
     history = a.action_history = ActionHistory(runtime.options, ids)
     history.begin('a', [14, 12])

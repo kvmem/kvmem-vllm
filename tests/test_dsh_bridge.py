@@ -133,7 +133,8 @@ def test_truncated_write_after_reasoning_preserves_length_finish_without_announc
 
 
 @pytest.mark.parametrize('failure',[None,'missing_done','bad_usage','disconnect'])
-def test_transport_forwards_before_completion_and_never_commits_partial_stream(protocol,tmp_path,monkeypatch,failure):
+@pytest.mark.parametrize('optimized',[False,True])
+def test_transport_forwards_before_completion_and_never_commits_partial_stream(protocol,tmp_path,monkeypatch,failure,optimized):
     import scripts.dsh_bridge as bridge
     async def check():
         gate=asyncio.Event();commits=[];closed=[]
@@ -165,7 +166,7 @@ def test_transport_forwards_before_completion_and_never_commits_partial_stream(p
         monkeypatch.setattr(bridge,'Protocol',lambda _:protocol)
         monkeypatch.setattr(bridge.httpx,'AsyncClient',lambda **_:client)
         args=SimpleNamespace(protocol=None,gen_budget=16384,output=tmp_path,backend='http://test',
-            model='local',max_model_len=262144,max_sessions=4)
+            model='local',max_model_len=262144,max_sessions=4,optimized_handoff=optimized)
         app=create_app(args,None)
         endpoint=next(r.endpoint for r in app.routes if r.path=='/v1/chat/completions')
         body=json.dumps(dict(model='local',prompt_cache_key='session',stream=True,
@@ -242,8 +243,61 @@ def test_utf8_decoder_keeps_split_characters_between_native_segments():
     assert ''.join(decoder.feed([b]) for b in encoded)+decoder.finish()=='中文 "quoted" \\slash\n'
 
 
+@pytest.mark.parametrize('optimized',[False,True])
+@pytest.mark.parametrize('truncated',[False,True])
+def test_rolling_output_keeps_one_sampler_and_complete_tool_frame(protocol,tmp_path,monkeypatch,optimized,truncated):
+    import scripts.dsh_bridge as bridge
+    async def check():
+        content='x'*33000
+        raw='reason</think>\n<tool_call><function=write><parameter=content>'+content+'</parameter></function></tool_call><|im_end|>'
+        if truncated:raw=raw[:20000]
+        ids=list(raw.encode());sent=[];commits=[]
+        tools=[dict(type='function',function=dict(name='write',parameters=dict(type='object',properties={'content':dict(type='string')})))]
+        class Source(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                # One stream crosses G=16K twice inside an unfinished tool argument.
+                for begin in range(0,len(ids),8192):
+                    part=ids[begin:begin+8192];last=begin+len(part)==len(ids)
+                    item=dict(id='one-native-id',choices=[dict(index=0,text=bytes(part).decode(),token_ids=part,
+                        finish_reason=('length' if truncated else 'stop') if last else None)])
+                    yield ('data: '+json.dumps(item)+'\n\n').encode()
+                yield ('data: '+json.dumps(dict(choices=[],usage=dict(prompt_tokens=2,completion_tokens=len(ids))))+'\n\n').encode()
+                yield b'data: [DONE]\n\n'
+        async def handle(request):
+            sent.append(json.loads(request.content));return httpx.Response(200,stream=Source())
+        native=httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        class TestPlanner(Planner):
+            def __init__(self,*args):self.protocol=protocol
+            def prepare(self,payload,state):return ([1,2],dict(kvmem_reselect='off'),dict(tools=tools),[],None,False,{})
+            def commit(self,state,prepared,payload,response,output):commits.append(output);state.turns+=1
+        monkeypatch.setattr(bridge,'Planner',TestPlanner);monkeypatch.setattr(bridge,'Protocol',lambda _:protocol)
+        monkeypatch.setattr(bridge.httpx,'AsyncClient',lambda **_:native)
+        args=SimpleNamespace(protocol=None,gen_budget=16384,max_output_tokens=65536,
+            output=tmp_path,backend='http://test',model='local',max_model_len=262144,max_sessions=4,optimized_handoff=optimized)
+        app=create_app(args,ByteTokenizer());endpoint=next(r.endpoint for r in app.routes if r.path=='/v1/chat/completions')
+        body=json.dumps(dict(model='local',prompt_cache_key='rolling',stream=True,max_tokens=20000 if truncated else 49152,
+            seed=1004,temperature=.6,messages=[dict(role='user',content='write')])).encode()
+        async def receive():return dict(type='http.request',body=body,more_body=False)
+        response=await endpoint(Request(dict(type='http',method='POST',path='/v1/chat/completions',headers=[]),receive))
+        wire=''.join([piece async for piece in response.body_iterator])
+        assert 'data: [DONE]' in wire and len(sent)==1 and commits==[ids]
+        assert sent[0]['max_tokens']==(20000 if truncated else 49152)
+        assert sent[0]['prompt']==[1,2] and sent[0]['seed']==1004 and sent[0]['thinking_token_budget']==4096
+        chunks=[json.loads(line[6:]) for line in wire.splitlines() if line.startswith('data: {')]
+        message=assemble([c['choices'][0]['delta'] for c in chunks])
+        if truncated:
+            assert not message['tool_calls'] and chunks[-1]['choices'][0]['finish_reason']=='length'
+        else:
+            assert len(message['tool_calls'])==1
+            assert json.loads(message['tool_calls'][0]['function']['arguments'])=={'content':content}
+        assert chunks[-1]['usage']['completion_tokens']==len(ids)
+        await native.aclose()
+    asyncio.run(asyncio.wait_for(check(),10))
+
+
 @pytest.mark.parametrize('failed_segment',[False,True,'context_cap'])
-def test_continuation_reuses_exact_ids_and_executes_only_one_complete_tool(protocol,tmp_path,monkeypatch,failed_segment):
+@pytest.mark.parametrize('optimized',[False,True])
+def test_continuation_reuses_exact_ids_and_executes_only_one_complete_tool(protocol,tmp_path,monkeypatch,failed_segment,optimized):
     import scripts.dsh_bridge as bridge
     async def check():
         tools=[dict(type='function',function=dict(name='write',parameters=dict(type='object',properties={'content':dict(type='string')})))]
@@ -276,7 +330,7 @@ def test_continuation_reuses_exact_ids_and_executes_only_one_complete_tool(proto
         monkeypatch.setattr(bridge,'Planner',TestPlanner);monkeypatch.setattr(bridge,'Protocol',lambda _:protocol)
         monkeypatch.setattr(bridge.httpx,'AsyncClient',lambda **_:client)
         context=2+quota+1 if failed_segment=='context_cap' else 262144
-        args=SimpleNamespace(protocol=None,gen_budget=quota,max_output_segments=4,output=tmp_path,backend='http://test',model='local',max_model_len=context,max_sessions=4)
+        args=SimpleNamespace(protocol=None,gen_budget=quota,max_output_segments=4,output=tmp_path,backend='http://test',model='local',max_model_len=context,max_sessions=4,optimized_handoff=optimized)
         app=create_app(args,ByteTokenizer());endpoint=next(r.endpoint for r in app.routes if r.path=='/v1/chat/completions')
         body=json.dumps(dict(model='local',prompt_cache_key='continuation',stream=True,max_tokens=quota*4,messages=[dict(role='user',content='write')])).encode()
         async def receive():return dict(type='http.request',body=body,more_body=False)

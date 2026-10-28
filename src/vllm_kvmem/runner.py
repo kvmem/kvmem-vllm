@@ -149,6 +149,9 @@ def make_probe_runner(base):
                 raise ValueError("Rebuild probe needs target-only qualification before draft lifecycle integration")
             from .profile_scopes import install_profile_scopes
             install_profile_scopes(self)
+            if options.host_stage_timing:
+                from .host_trace import install_host_trace
+                install_host_trace(self, self._kvmem_probe_output)
 
         def add_requests(self, scheduler_output):
             result = super().add_requests(scheduler_output)
@@ -165,11 +168,25 @@ def make_probe_runner(base):
 
         def update_requests(self, scheduler_output):
             leased = getattr(self, '_kvmem_restore_allocations', {})
+            control = getattr(scheduler_output, 'kv_connector_metadata', None)
+            table_updates = getattr(control, 'block_table_updates', {})
             updated = (set(scheduler_output.num_scheduled_tokens) |
-                       set(scheduler_output.block_table_updates or {}) |
+                       set(getattr(scheduler_output, 'block_table_updates', None) or {}) |
+                       set(table_updates) |
                        set(scheduler_output.scheduled_cached_reqs.req_ids))
             if leased.keys() & updated:
                 raise RuntimeError('Suspended restore allocation received a public page/state update')
+            if table_updates:
+                for request_id, block_ids in table_updates.items():
+                    index = self.req_states.req_id_to_index.get(request_id)
+                    if index is not None:
+                        self.block_tables.append_block_ids(index, block_ids, overwrite=True)
+                # Full rows already include allocations made in this native step.
+                # Let native code update counters/zero pages, without appending twice.
+                cached = scheduler_output.scheduled_cached_reqs
+                scheduler_output = replace(scheduler_output, scheduled_cached_reqs=replace(
+                    cached, new_block_ids=[None if rid in table_updates else blocks
+                        for rid, blocks in zip(cached.req_ids, cached.new_block_ids, strict=True)]))
             return super().update_requests(scheduler_output)
 
         def initialize_kv_cache(self, *args, **kwargs):
@@ -185,6 +202,10 @@ def make_probe_runner(base):
                 initialize_graph_window(self)
             from .profile_scopes import install_profile_scopes
             install_profile_scopes(self)
+            if not is_profiling:
+                from .options import RuntimeOptions
+                from .checkpoint_prewarm import prewarm_checkpoint_payloads
+                prewarm_checkpoint_payloads(self, RuntimeOptions.from_vllm(self.vllm_config))
             return result
 
         def finish_requests(self, scheduler_output):
@@ -285,6 +306,9 @@ def make_probe_runner(base):
                 from .native_state import canonicalize_before_non_speculative_batch, initialize_cold_single_token_state
                 initialize_cold_single_token_state(self, input_batch)
                 canonicalize_before_non_speculative_batch(self, input_batch)
+            decisions = getattr(self, '_kvmem_active_decisions', None)
+            if decisions is not None and not projecting:
+                decisions.before_attention(public)
             self._kvmem_last_batch = input_batch
             self._kvmem_window_batch = None
             if self._kvmem_window_adapter is not None:
@@ -399,11 +423,11 @@ def make_probe_runner(base):
 
         def execute_model(self, scheduler_output, intermediate_tensors=None,
                           dummy_run=False, skip_attn_for_dummy_run=False,
-                          is_profile=False, context_len=0, valid_dummy_state_slots=False):
+                          is_profile=False, context_len=0, valid_dummy_state_slots=False, **kwargs):
             try:
                 return self._kvmem_execute_model(scheduler_output, intermediate_tensors,
                     dummy_run, skip_attn_for_dummy_run, is_profile, context_len,
-                    valid_dummy_state_slots)
+                    valid_dummy_state_slots, **kwargs)
             except BaseException as error:
                 runtime = getattr(self, '_kvmem_capture_runtime', None)
                 if runtime is not None and getattr(runtime, '_prefill_scatter_deferred', None) is not None:
@@ -412,11 +436,11 @@ def make_probe_runner(base):
 
         def _kvmem_execute_model(self, scheduler_output, intermediate_tensors=None,
                                 dummy_run=False, skip_attn_for_dummy_run=False,
-                                is_profile=False, context_len=0, valid_dummy_state_slots=False):
+                                is_profile=False, context_len=0, valid_dummy_state_slots=False, **native_kwargs):
             kwargs = dict(intermediate_tensors=intermediate_tensors, dummy_run=dummy_run,
                           skip_attn_for_dummy_run=skip_attn_for_dummy_run,
                           is_profile=is_profile, context_len=context_len,
-                          valid_dummy_state_slots=valid_dummy_state_slots)
+                          valid_dummy_state_slots=valid_dummy_state_slots, **native_kwargs)
             timing = getattr(self, '_kvmem_step_timing', None)
             if (timing is not None and not dummy_run and not is_profile and
                     scheduler_output.total_num_scheduled_tokens and
@@ -509,6 +533,9 @@ def make_probe_runner(base):
                 from vllm.distributed.kv_transfer import get_kv_transfer_group
                 connector = get_kv_transfer_group()
                 connector.session_worker = sessions
+                connector.restore_completion_poll = (
+                    refresh.poll_restore_completions if refresh is not None and
+                    getattr(refresh.options, 'restore_handoff_fastpath', False) else None)
                 if timing is not None:
                     connector.step_timings = timing.poll
                 if refresh is not None and refresh.maintenance is not None:

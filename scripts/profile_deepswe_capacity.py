@@ -5,7 +5,10 @@ import json
 from pathlib import Path
 import re
 
-from analyze_deepswe_capacity import distribution, metrics, records
+if __package__:
+    from .analyze_deepswe_capacity import distribution, metrics, records
+else:
+    from analyze_deepswe_capacity import distribution, metrics, records
 
 
 def native_geometry(body):

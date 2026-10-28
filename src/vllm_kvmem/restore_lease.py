@@ -1,31 +1,18 @@
 """CPU allocation witness for a fresh, suspended checkpoint import only.
 
 Native block tables have no persistent CPU mirror. This witness records the
-exact new-request allocation which the pinned native runner stages onto the GPU.
+exact new-request allocation which the native runner stages onto the GPU.
 It must be discarded before that request can receive any later table update.
 It is not a replacement for generic live-request page-table validation.
 """
 from dataclasses import dataclass
 from functools import lru_cache
-import hashlib
-from importlib.metadata import distribution
-
-
-RESTORE_ALLOCATION_SOURCES = {
-    'v1/worker/gpu/model_runner.py': '174c93db921c23cf0396eee4764be25b2bd2d4b6a06e9fa41ce3598b884ce8ce',
-    'v1/worker/gpu/block_table.py': '61c004315d5af7e7eae4e2a9e6be92ea82c520327690a7f55a73bb9ce95f520a',
-    'v1/worker/gpu/buffer_utils.py': '6597f701a30261bf250e9ad5a29737264624a1caa20527aeea0dad630325b093',
-}
 
 
 @lru_cache(maxsize=1)
 def verify_restore_allocation_sources():
-    from .integration import check_engine_version
-    check_engine_version()
-    package = distribution('vllm')
-    for relative, expected in RESTORE_ALLOCATION_SOURCES.items():
-        if hashlib.sha256(package.locate_file('vllm/' + relative).read_bytes()).hexdigest() != expected:
-            raise ValueError(f'Unqualified fresh restore allocation lifecycle: {relative}')
+    from .engine_api import require_contract
+    require_contract('restore')
 
 
 def _blocks(block_ids):
@@ -54,7 +41,8 @@ class FreshRestoreLease:
         """
         verify_restore_allocation_sources()
         blocks = _blocks(block_ids)
-        expansions = runner.block_tables.blocks_per_kv_block
+        from .native_pages import kernel_expansions
+        expansions = kernel_expansions(runner)
         if len(blocks) != len(expansions) or any(type(n) is not int or n <= 0 for n in expansions):
             raise ValueError('Restore allocation omitted native cache groups')
         rows = tuple(tuple(b * n + i for b in group for i in range(n))
@@ -76,8 +64,10 @@ class FreshRestoreLease:
             raise ValueError('Fresh restore allocation cache groups changed')
         for group, rows in enumerate(self.rows):
             table = tables.block_tables[group].gpu
-            if (int(tables.num_blocks.np[group, self.index]) != len(rows) or
-                    len(rows) > table.shape[1]):
+            from .native_pages import stored_expansions
+            stored_count = len(self.block_ids[group]) * stored_expansions(tables)[group]
+            if (int(tables.num_blocks.np[group, self.index]) != stored_count or
+                    stored_count > table.shape[1]):
                 raise ValueError('Fresh restore allocation page count changed')
 
     def validate(self, runner, *, expected_block_ids=None):

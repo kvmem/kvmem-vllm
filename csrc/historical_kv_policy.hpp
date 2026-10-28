@@ -6,11 +6,14 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <tuple>
 #include <vector>
 
 namespace vllm_kvmem {
+
+class HistoricalFeatureSource;
 
 struct HistoricalBlockMeta {
     qw3::KvMemBlockHandle handle;
@@ -19,6 +22,7 @@ struct HistoricalBlockMeta {
     // Observations, not mechanism-level deletion vetoes.
     bool gpu_resident = false;
     uint64_t references = 0;
+    uint64_t feature_version = 0;
 };
 
 struct HistoricalSnapshot {
@@ -39,9 +43,16 @@ struct HistoricalWorkBudget {
     size_t scan_blocks = 256, delete_blocks = 64;
 };
 
+enum class HistoricalDeleteReason { Lru, Redundancy, LossyPressure };
+enum class HistoricalCommitCode { Committed, AlreadyRetired, Shadow, Stale, Ineligible, Cancelled, Retry };
+
 struct HistoricalDeleteIntent {
     qw3::KvMemBlockHandle handle;
     uint64_t incarnation = 0, round = 0;
+    HistoricalDeleteReason reason = HistoricalDeleteReason::Lru;
+    uint64_t feature_version = 0, question_epoch = 0;
+    qw3::KvMemBlockHandle witness{};
+    uint64_t witness_feature_version = 0;
 };
 
 enum class HistoricalPolicyStatus { Yielded, Complete, NoCandidate, Backpressure };
@@ -78,6 +89,10 @@ public:
     // Called by the backend before a preallocated scope is reused. Stateful
     // factory policies must clear round/candidate state without reallocating.
     virtual void reset() {}
+    virtual void bind_features(std::shared_ptr<const HistoricalFeatureSource>) {}
+    // Once per consumed intent. Retry retains the intent and is not a commit.
+    // Called outside metadata/feature guards; implementations must not throw.
+    virtual void on_result(const HistoricalDeleteIntent &, HistoricalCommitCode) noexcept {}
     // Policy-owned trigger. Custom proactive policies default to requesting a
     // snapshot even without capacity pressure; the mechanism never vetoes it.
     virtual bool wants_snapshot(const HistoricalPressure &) { return true; }

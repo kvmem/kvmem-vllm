@@ -47,12 +47,29 @@ def _owned_stages():
     from . import async_restore
     from .maintenance import MaintenancePolicy
     from .prompt_checkpoints import PromptCheckpointPool
+    from . import prompt_checkpoints
+    from .memory import RequestMemory
+    from .session_worker import SessionWorker
+    from .action_attention import ActionHistory
+    from .prefill_attention import PrefillHistory
     from . import _native
     return (
         (AsyncRefresh, 'step', 'refresh.step'),
         (async_restore, '_step_restore', 'restore.step'),
         (MaintenancePolicy, 'pump', 'maintenance.pump'),
         (PromptCheckpointPool, 'prepare_claim_window', 'session.prepare_claim_window'),
+        (PromptCheckpointPool, 'capture', 'checkpoint.capture'),
+        (PromptCheckpointPool, '_remove', 'checkpoint.remove'),
+        (prompt_checkpoints, 'token_bytes', 'checkpoint.token_bytes'),
+        (RequestMemory, 'checkpoint_window', 'checkpoint.window'),
+        (RequestMemory, '_protect_checkpoint', 'checkpoint.protect'),
+        (RequestMemory, 'checkpoint', 'checkpoint.prefix'),
+        (RequestMemory, '_validate_window_checkpoint', 'checkpoint.validate'),
+        (SessionWorker, 'detach', 'session.detach'),
+        (SessionWorker, 'before_attention', 'session.before_attention'),
+        (ActionHistory, 'snapshot', 'action.snapshot'),
+        (ActionHistory, 'restore', 'action.restore'),
+        (PrefillHistory, 'restore', 'prefill.restore'),
         (_native, 'finalize_mean_fp8', 'append.seal_finalize_fp8'),
         (_native, 'finalize_mean_bf16', 'append.seal_finalize_bf16'),
         (_native, 'scatter_history_batch', 'append.scatter'),

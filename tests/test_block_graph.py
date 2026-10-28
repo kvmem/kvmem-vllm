@@ -371,3 +371,32 @@ def test_metadata_noop_still_validates_conflicts_prefix_and_pending_transaction(
     update.close()
     assert (graph.binding, graph.bytes) == before
     graph.close()
+
+
+def test_long_session_metadata_and_acceptance_fit_with_two_retained_snapshots():
+    """Regression: ~420K history previously reserved a nonexistent graph copy."""
+    graph = BlockGraph('long-agent', 32)
+    end = 430080
+    for begin in range(0, end, 2048):
+        stop = min(end, begin + 2048)
+        accept(graph, begin, stop, [row(p, (0, 32, 64, 96), (.25,) * 4)
+            for p in range(max(128, begin), stop, 32)])
+    snapshots = [graph.snapshot(), graph.snapshot()]
+    before = graph.binding, graph.bytes, graph.rows
+    spans = tuple((p, p + 560, 'tool') for p in range(0, end, 560))
+    spans = tuple((b, min(e, end), r) for b, e, r in spans)
+    update = graph.prepare(end, end, message_spans=spans, verified_prefix=end)
+    # Prove old accounting would reject this same candidate at unchanged caps.
+    assert graph.bytes <= graph.max_bytes_per_session
+    assert graph.bytes + graph.live_bytes > graph.max_bytes_per_session
+    update.abort()
+    assert (graph.binding, graph.bytes, graph.rows) == before
+    graph.update_message_spans(spans, validated_prefix=end)
+    assert graph.rows is before[2]
+    assert all(s.rows is graph.rows and s.message_spans == () for s in snapshots)
+    accept(graph, end, end + 32, [row(end, (0, 32, 64, 96), (.25,) * 4)])
+    assert len(graph.rows) == len(before[2]) + 1
+    for snapshot in snapshots:
+        snapshot.close()
+    graph.close()
+    assert graph.budget.used == 0

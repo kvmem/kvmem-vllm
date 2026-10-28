@@ -366,23 +366,31 @@ def _merge_spans(old, old_known, supplied, prefix):
         raise ValueError('Invalid validated message prefix')
     retained = [(begin, min(end, prefix), role, known and end <= prefix)
                 for (begin, end, role), known in zip(old, old_known) if begin < prefix]
+    # Both inputs are ordered, nonoverlapping message spans. Only intersecting
+    # spans can contradict the proven prefix; scanning all pairs made every
+    # long Agent handoff quadratic in its number of messages.
+    cursor = 0
     for begin, end, role, known in retained:
-        for new_begin, new_end, new_role in incoming:
+        while cursor < len(incoming) and incoming[cursor][1] <= begin:
+            cursor += 1
+        index = cursor
+        while index < len(incoming) and incoming[index][0] < end:
+            new_begin, new_end, new_role = incoming[index]
             if max(begin, new_begin) < min(end, new_end, prefix):
                 if (begin != new_begin or role != new_role or
                         new_end < end or (known and new_end != end)):
                     raise ValueError('Conflicting message boundaries in validated historical prefix')
+            index += 1
     # A newly supplied complete span can extend an inherited unknown end.
-    result = {(begin, end, role): known for begin, end, role, known in retained}
+    # A valid nonoverlapping list has at most one span for each (begin, role).
+    # Index that identity directly instead of repeatedly scanning the result.
+    result = {(begin, role): ((begin, end, role), known) for begin, end, role, known in retained}
     for span in incoming:
-        begin, end, role = span
-        for previous in tuple(result):
-            if previous[0] == begin and previous[2] == role:
-                del result[previous]
-        result[span] = True
-    ordered = tuple(sorted(result))
+        result[(span[0], span[2])] = (span, True)
+    merged = sorted(result.values())
+    ordered = tuple(span for span, _ in merged)
     _spans(ordered)
-    return ordered, tuple(result[item] for item in ordered)
+    return ordered, tuple(known for _, known in merged)
 
 
 class BlockGraph:
@@ -543,7 +551,12 @@ class BlockGraph:
                 if (spans == self.message_spans and ends_known == self.message_end_known and
                         provenance == self.locality_provenance):
                     return GraphUpdate(self)
-            upper = self.live_bytes * 2 + scratch
+            # The existing live revision already owns its reservation. Staging
+            # retains one new immutable graph (including a conservative charge
+            # for shared rows); scratch covers merge/row/output temporaries.
+            # Reserving two *additional* full graphs here charges a nonexistent
+            # copy and can reject long sessions with valid retained snapshots.
+            upper = self.live_bytes + scratch
             charge = self.budget.reserve(self._account, upper, self.max_bytes_per_session)
             seen = set()
             for row in (() if dense else rows):

@@ -1,4 +1,5 @@
 #include "historical_manager.hpp"
+#include "historical_redundancy.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -19,7 +20,8 @@ using Payload = HistoricalPayloadArena;
 #define HISTORY_STATS(X) \
     X(published) X(ticks) X(examined) X(decisions) X(retired) X(cpu_released) \
     X(slots_released) X(pending_slots) X(pending_cpu_bytes) X(retries) X(stale) \
-    X(policy_failures) X(shadow_decisions) X(admission_attempts) X(admission_retries)
+    X(policy_failures) X(shadow_decisions) X(admission_attempts) X(admission_retries) \
+    X(redundancy_retired) X(lossy_retired) X(rejected_ineligible) X(cancelled_decisions)
 
 struct AtomicStats {
 #define FIELD(name) std::atomic<uint64_t> name{0};
@@ -106,6 +108,7 @@ struct HistoricalScopeStorage {
         : capacity(capacity), records(new PublishedBlock[capacity]), jobs(capacity),
           completion_words((capacity+63)/64), completion_bits(new std::atomic<uint64_t>[completion_words]),
           shadow(capacity, 0),
+          features(make_historical_feature_source(config.policy, config.policy_params, capacity)),
           policy(make_historical_kv_policy(config.policy, config.policy_params, capacity, config.keep_mandatory)),
           batch(config.delete_blocks) {
         snapshot.blocks.reserve(capacity);
@@ -120,6 +123,7 @@ struct HistoricalScopeStorage {
         }
         for (size_t i = 0; i < completion_words; ++i) completion_bits[i].store(0, std::memory_order_relaxed);
         policy->reset();
+        if (features) features->reset();
         batch.clear_after_ack();
         snapshot.blocks.clear();
         snapshot.incarnation = snapshot.round = 0;
@@ -130,6 +134,7 @@ struct HistoricalScopeStorage {
     size_t completion_words;
     std::unique_ptr<std::atomic<uint64_t>[]> completion_bits;
     std::vector<uint64_t> shadow;
+    std::shared_ptr<HistoricalFeatureSource> features;
     std::unique_ptr<HistoricalKvPolicy> policy;
     HistoricalDecisionBatch batch;
     HistoricalSnapshot snapshot;
@@ -142,11 +147,12 @@ struct HistoricalScopeState {
         : repository(std::move(r)), arena(std::move(a)), config(c), incarnation(epoch),
           storage(std::move(buffers)), records(storage->records.get()), jobs(storage->jobs),
           completion_words(storage->completion_words), completion_bits(storage->completion_bits.get()),
-          shadow(storage->shadow), custom_policy(std::move(p)),
+          shadow(storage->shadow), features(storage->features), custom_policy(std::move(p)),
           policy(custom_policy ? custom_policy.get() : storage->policy.get()), batch(storage->batch), snapshot(storage->snapshot) {
         if (config.ready_high > repository->capacity())
             throw std::invalid_argument("Historical scope watermarks exceed repository capacity");
         snapshot.incarnation = incarnation;
+        policy->bind_features(features);
     }
     std::shared_ptr<Repo> repository;
     std::shared_ptr<Payload> arena;
@@ -158,6 +164,7 @@ struct HistoricalScopeState {
     const size_t completion_words;
     std::atomic<uint64_t> *completion_bits;
     std::vector<uint64_t> &shadow;
+    std::shared_ptr<HistoricalFeatureSource> features;
     std::unique_ptr<HistoricalKvPolicy> custom_policy;
     HistoricalKvPolicy *policy;
     HistoricalDecisionBatch &batch;
@@ -262,6 +269,9 @@ struct HistoricalScopeState {
         job = {};
         job.handle = handle;
         job.active = true;
+        // Feature ownership is independent of any already admitted raw-KV
+        // readers. Retired generations can never supply a new policy round.
+        if (features) features->erase_key(handle);
         BlockView view;
         if (sample(records[handle.slot], handle.slot, view) && view.meta.handle == handle)
             job.payload = view.payload;
@@ -384,60 +394,104 @@ struct HistoricalScopeState {
         return result;
     }
 
+    HistoricalCommitCode commit_one(const HistoricalDeleteIntent &intent, uint64_t &global_pending) {
+        using Code = HistoricalCommitCode;
+        if (intent.incarnation != incarnation || intent.handle.slot >= jobs.size() || !intent.handle.generation)
+            return Code::Stale;
+        auto &job = jobs[intent.handle.slot];
+        if (job.active && job.handle != intent.handle)
+            return Code::Retry; // Preserve an old unacknowledged completion.
+        const bool redundancy = intent.reason == HistoricalDeleteReason::Redundancy;
+        if (redundancy && (!features || !intent.witness.generation || intent.witness.slot >= jobs.size() ||
+                           intent.witness.slot == intent.handle.slot)) return Code::Ineligible;
+        auto first = intent.handle.slot, second = intent.handle.slot;
+        if (redundancy) {
+            first = std::min(first, intent.witness.slot);
+            second = std::max(second, intent.witness.slot);
+        }
+        struct PolicyUnlock {
+            PublishedBlock *first = nullptr, *second = nullptr;
+            ~PolicyUnlock() {
+                if (second) second->policy_gate.clear(std::memory_order_release);
+                if (first) first->policy_gate.clear(std::memory_order_release);
+            }
+        } gates;
+        if (records[first].policy_gate.test_and_set(std::memory_order_acquire)) return Code::Retry;
+        gates.first = &records[first];
+        if (second != first) {
+            if (records[second].policy_gate.test_and_set(std::memory_order_acquire)) return Code::Retry;
+            gates.second = &records[second];
+        }
+        BlockView current;
+        if (!sample(records[intent.handle.slot], intent.handle.slot, current)) return Code::Retry;
+        auto live = repository->try_pin(intent.handle);
+        if (!live) return repository->retired_at(intent.handle.slot) == intent.handle ? Code::AlreadyRetired : Code::Stale;
+        current.meta.live = true;
+        if (current.meta.handle != intent.handle) return Code::Stale;
+        // This is only the proposed version for the policy's carry check.
+        // The nonblocking source guard below must verify the actual version
+        // before retirement. It distinguishes contention from missing keys.
+        current.meta.feature_version = intent.feature_version;
+        if (!policy->permits(current.meta)) return Code::Ineligible;
+        Repo::Lease witness;
+        if (redundancy) {
+            BlockView other;
+            if (!sample(records[intent.witness.slot], intent.witness.slot, other)) return Code::Retry;
+            witness = repository->try_pin(intent.witness);
+            if (!witness || other.meta.handle != intent.witness || !other.meta.sealed ||
+                    shadow[intent.witness.slot] == intent.witness.generation) return Code::Ineligible;
+        }
+        // No scoring or feature copying occurs under these guards. The
+        // source guard freezes question/feature identity until retirement.
+        HistoricalFeatureSource::CommitGuard feature_guard;
+        if (intent.reason != HistoricalDeleteReason::Lru) {
+            if (!features) return Code::Ineligible;
+            feature_guard = features->try_commit_guard(intent);
+            if (!feature_guard.acquired) return Code::Retry;
+            if (!feature_guard.valid) return Code::Ineligible;
+        }
+        if (config.mode == HistoricalGcMode::Shadow) {
+            if (shadow[intent.handle.slot] != intent.handle.generation) {
+                shadow[intent.handle.slot] = intent.handle.generation;
+                ++shadow_slots;
+                shadow_bytes += arena->record_bytes();
+                global_pending += arena->record_bytes();
+                stats.shadow_decisions.fetch_add(1, std::memory_order_relaxed);
+            }
+            return Code::Shadow;
+        }
+        switch (repository->retire_permanently(intent.handle)) {
+            case Repo::RetireResult::Committed: return Code::Committed;
+            case Repo::RetireResult::AlreadyRetired: return Code::AlreadyRetired;
+            case Repo::RetireResult::Retry: return Code::Retry;
+            default: return Code::Stale;
+        }
+    }
+
     bool commit_batch(uint64_t &global_pending) {
+        using Code = HistoricalCommitCode;
         const auto &values = batch.values();
         while (batch_cursor < values.size()) {
             const auto &intent = values[batch_cursor];
-            if (intent.incarnation != incarnation || intent.handle.slot >= jobs.size()) {
-                stats.stale.fetch_add(1, std::memory_order_relaxed);
-                ++batch_cursor;
-                continue;
-            }
-            auto &job = jobs[intent.handle.slot];
-            if (job.active && job.handle != intent.handle) {
-                stats.retries.fetch_add(1, std::memory_order_relaxed);
-                return false; // Preserve an old unacknowledged completion.
-            }
-            auto &entry = records[intent.handle.slot];
-            if (entry.policy_gate.test_and_set(std::memory_order_acquire)) {
+            const auto code = commit_one(intent, global_pending);
+            if (code == Code::Retry) {
                 stats.retries.fetch_add(1, std::memory_order_relaxed);
                 return false;
             }
-            struct PolicyUnlock {
-                PublishedBlock &entry;
-                ~PolicyUnlock() { entry.policy_gate.clear(std::memory_order_release); }
-            } unlock{entry};
-            BlockView current;
-            if (!sample(entry, intent.handle.slot, current)) return false;
-            auto live = repository->try_pin(intent.handle);
-            current.meta.live = bool(live);
-            if (current.meta.handle != intent.handle || !policy->permits(current.meta)) {
-                ++batch_cursor;
-                continue;
-            }
-            if (config.mode == HistoricalGcMode::Shadow) {
-                if (shadow[intent.handle.slot] != intent.handle.generation) {
-                    auto lease = repository->try_pin(intent.handle);
-                    if (lease) {
-                        shadow[intent.handle.slot] = intent.handle.generation;
-                        ++shadow_slots;
-                        shadow_bytes += arena->record_bytes();
-                        global_pending += arena->record_bytes();
-                        stats.shadow_decisions.fetch_add(1, std::memory_order_relaxed);
-                    }
-                }
-                ++batch_cursor;
-                continue;
-            }
-            const auto result = repository->retire_permanently(intent.handle);
-            if (result == Repo::RetireResult::Retry) {
-                stats.retries.fetch_add(1, std::memory_order_relaxed);
-                return false;
-            }
-            if (result == Repo::RetireResult::Committed || result == Repo::RetireResult::AlreadyRetired) {
+            // Every consumed intent is reported exactly once, outside all
+            // gates. This updates witness carry before the next batch item.
+            policy->on_result(intent, code);
+            if (code == Code::Committed || code == Code::AlreadyRetired) {
                 start(intent.handle, global_pending);
-                if (result == Repo::RetireResult::Committed) stats.retired.fetch_add(1, std::memory_order_relaxed);
-            } else stats.stale.fetch_add(1, std::memory_order_relaxed);
+                if (code == Code::Committed) {
+                    stats.retired.fetch_add(1, std::memory_order_relaxed);
+                    if (intent.reason == HistoricalDeleteReason::Redundancy)
+                        stats.redundancy_retired.fetch_add(1, std::memory_order_relaxed);
+                    if (intent.reason == HistoricalDeleteReason::LossyPressure)
+                        stats.lossy_retired.fetch_add(1, std::memory_order_relaxed);
+                }
+            } else if (code == Code::Stale) stats.stale.fetch_add(1, std::memory_order_relaxed);
+            else if (code == Code::Ineligible) stats.rejected_ineligible.fetch_add(1, std::memory_order_relaxed);
             ++batch_cursor;
         }
         batch.clear_after_ack();
@@ -446,10 +500,20 @@ struct HistoricalScopeState {
         return true;
     }
 
+    void cancel_batch() noexcept {
+        for (; batch_cursor < batch.values().size(); ++batch_cursor) {
+            policy->on_result(batch.values()[batch_cursor], HistoricalCommitCode::Cancelled);
+            stats.cancelled_decisions.fetch_add(1, std::memory_order_relaxed);
+        }
+        batch.clear_after_ack();
+        batch_cursor = 0;
+    }
+
     bool tick(uint64_t &global_pending) {
         stats.ticks.fetch_add(1, std::memory_order_relaxed);
         bool progress = release(global_pending);
         if (closing.load(std::memory_order_acquire)) {
+            cancel_batch();
             const auto count = std::min<size_t>(config.scan_blocks, jobs.size());
             for (size_t i = 0; i < count; ++i) {
                 const auto slot = static_cast<uint32_t>(close_cursor);
@@ -469,9 +533,9 @@ struct HistoricalScopeState {
             pause_ack.store(pause_request.load(std::memory_order_acquire), std::memory_order_release);
             return progress;
         }
-        if (!batch.empty()) return commit_batch(global_pending) || progress;
-        if (config.mode == HistoricalGcMode::Off) return progress;
         try {
+            if (!batch.empty()) return commit_batch(global_pending) || progress;
+            if (config.mode == HistoricalGcMode::Off) return progress;
             const auto current_pressure = pressure(global_pending);
             if (!round_active) {
                 if (!policy->wants_snapshot(current_pressure)) return progress;
@@ -497,6 +561,7 @@ struct HistoricalScopeState {
                             lease.record().token_begin + lease.record().token_count > recent)
                         view.meta.mandatory = true;
                     view.meta.cpu_bytes = view.payload.generation ? arena->record_bytes() : 0;
+                    if (features) view.meta.feature_version = features->key_version(view.meta.handle);
                     if (view.meta.gpu_resident)
                         view.meta.last_use_seq = std::max(view.meta.last_use_seq, use_stamp.load(std::memory_order_acquire));
                     snapshot.blocks.push_back(view.meta);
@@ -515,8 +580,7 @@ struct HistoricalScopeState {
             return result.examined || result.emitted || progress;
         } catch (...) {
             // A failed strategy must not stop reclamation of earlier commits.
-            batch.clear_after_ack();
-            batch_cursor = 0;
+            cancel_batch();
             paused.store(true, std::memory_order_release);
             stats.policy_failures.fetch_add(1, std::memory_order_relaxed);
             return progress;
@@ -705,6 +769,59 @@ bool HistoricalGcScope::publish(const Repo::Lease &lease, const Payload::Read &c
 bool HistoricalGcScope::update(const Repo::Lease &lease, uint32_t flags, uint64_t use) {
     if (!state_) throw std::runtime_error("Historical scope is closed");
     return state_->publish(lease, nullptr, flags, use);
+}
+bool HistoricalGcScope::configure_features(uint32_t layers, uint32_t kv_heads, uint32_t q_heads, uint32_t dimension) {
+    if (!state_ || state_->closing.load(std::memory_order_acquire) || !state_->features) return false;
+    try { state_->features->configure(layers, kv_heads, q_heads, dimension); }
+    catch (const std::bad_alloc &) { return false; }
+    return true;
+}
+std::array<size_t, 4> HistoricalGcScope::feature_geometry() const {
+    return state_ && state_->features ? state_->features->geometry() : std::array<size_t, 4>{};
+}
+bool HistoricalGcScope::publish_features(const Repo::Lease &lease, const float *data, size_t elements) {
+    if (!state_ || state_->closing.load(std::memory_order_acquire) || !state_->features) return false;
+    if (!state_->repository->owns(lease)) throw std::invalid_argument("Historical features have a foreign repository lease");
+    const auto handle = lease.handle();
+    BlockView current;
+    auto live = state_->repository->try_pin(handle);
+    if (!live || !sample(state_->records[handle.slot], handle.slot, current) ||
+            current.meta.handle != handle || !current.meta.sealed) return false;
+    // The source makes a bounded native copy; it retains no Python buffer and
+    // the longer validation/copy is outside policy gates. A final fresh pin
+    // detects retirement that won while that independent copy was produced.
+    if (!state_->features->publish_key(handle, data, elements)) return false;
+    auto final = state_->repository->try_pin(handle);
+    if (!final || state_->closing.load(std::memory_order_acquire)) {
+        state_->features->erase_key(handle);
+        return false;
+    }
+    return true;
+}
+uint64_t HistoricalGcScope::begin_question(uint64_t expected_tokens) {
+    if (!state_ || state_->closing.load(std::memory_order_acquire) || !state_->features) return 0;
+    return state_->features->begin_question(expected_tokens);
+}
+bool HistoricalGcScope::append_question(uint64_t epoch, uint64_t offset, const float *data,
+                                       size_t elements, uint32_t tokens) {
+    if (!state_ || state_->closing.load(std::memory_order_acquire) || !state_->features) return false;
+    const auto width = state_->features->query_elements_per_token();
+    if (!width || !tokens || width > SIZE_MAX / tokens || elements != width * tokens)
+        throw std::invalid_argument("Historical question buffer has invalid geometry");
+    return state_->features->append_question(epoch, offset, data, tokens);
+}
+bool HistoricalGcScope::observe_query(uint64_t epoch, const float *data, size_t elements, uint32_t tokens) {
+    if (!state_ || state_->closing.load(std::memory_order_acquire) || !state_->features) return false;
+    const auto width = state_->features->query_elements_per_token();
+    if (!width || !tokens || width > SIZE_MAX / tokens || elements != width * tokens)
+        throw std::invalid_argument("Historical observation buffer has invalid geometry");
+    return state_->features->observe(epoch, data, tokens);
+}
+void HistoricalGcScope::invalidate_question() {
+    if (state_ && state_->features) state_->features->invalidate_question();
+}
+std::map<std::string, uint64_t> HistoricalGcScope::feature_stats() const {
+    return state_ && state_->features ? state_->features->stats() : std::map<std::string, uint64_t>{};
 }
 void HistoricalGcScope::used(uint64_t sequence) {
     if (state_) state_->use_stamp.store(sequence, std::memory_order_release);

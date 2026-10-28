@@ -6,23 +6,16 @@ that request's right to grow again. The optional qualified draft contract adds
 native SWA and speculative GDN credits.
 Execution remains synchronous, APC-off, TP=1.
 """
-import hashlib
-import inspect
-from pathlib import Path
-
 from .window_manager import WorkingSetManager
-
-KV_MANAGER_SHA256 = "58800535eda854580d84e1025bf32fe01b2a43ce0bba501b4f3d125e4f2c8afa"
 
 
 class ReservedKVCacheManager:
     def __init__(self, native, vllm_config, *, draft_contract=None, max_authorities=None):
-        from vllm.v1.core.kv_cache_manager import KVCacheManager
         from vllm.v1.core.single_type_kv_cache_manager import MambaManager, SlidingWindowManager
         from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 
-        if hashlib.sha256(Path(inspect.getfile(KVCacheManager)).read_bytes()).hexdigest() != KV_MANAGER_SHA256:
-            raise ValueError("Unqualified native page reservation/free hooks")
+        from .engine_api import require_contract
+        require_contract('capacity')
         if ((vllm_config.speculative_config is not None) != (draft_contract is not None) or
                 vllm_config.cache_config.enable_prefix_caching or
                 vllm_config.cache_config.mamba_cache_mode != "none" or

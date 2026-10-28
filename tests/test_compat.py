@@ -7,7 +7,7 @@ import pytest
 from vllm_kvmem.compat import OLD, NEW, patched_source
 
 
-def test_pinned_loader_patch_changes_only_load_config():
+def test_loader_patch_changes_only_load_config_and_accepts_unrelated_edits():
     try:
         root = Path(metadata.distribution("vllm").locate_file("vllm"))
     except metadata.PackageNotFoundError:
@@ -15,6 +15,7 @@ def test_pinned_loader_patch_changes_only_load_config():
     source = (root / "v1/worker/gpu/spec_decode/dflash/utils.py").read_bytes()
     patched = patched_source(source)
     ast.parse(patched)
-    assert patched.replace(NEW, OLD) == source.decode()
+    assert patched == source.decode() or patched.replace(NEW, OLD) == source.decode()
+    assert patched_source(source + b'\n# upstream comment') == patched + '\n# upstream comment'
     with pytest.raises(ImportError, match="Unrecognized"):
-        patched_source(source + b"\n# changed")
+        patched_source(source.replace(b'load_config=', b'unknown_config='))

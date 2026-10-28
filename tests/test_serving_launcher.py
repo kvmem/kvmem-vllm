@@ -38,6 +38,15 @@ def test_cuda_cache_policy_is_opt_in_and_explicit_profile_survives_relaunch(tmp_
     assert replay['environment']['PYTORCH_ALLOC_CONF'] == settings
 
 
+def test_systemone_worker_extension_uses_native_qualified_name(tmp_path):
+    plan = build_launch(profile(tmp_path), tmp_path, tmp_path/'run')
+    argv = plan['vllm_argv']
+    path = argv[argv.index('--worker-extension-cls') + 1]
+    from importlib import import_module
+    module, name = path.rsplit('.', 1)
+    assert callable(getattr(import_module(module), name).kvmem_systemone_active)
+
+
 @pytest.mark.parametrize('value', [False, 'garbage_collection_threshold:0.9', {},
     {'garbage_collection_threshold':.9},
     {'garbage_collection_threshold':.9,'per_process_memory_fraction':1.},

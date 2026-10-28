@@ -20,7 +20,9 @@ def run(args):
     cfg=json.loads(args.config.read_text());kv=cfg['kvmem']
     graph_v2 = kv.get('graph_scoring_version', 'v1') == 'v2'
     if graph_v2:
-        if getattr(args, 'guided_comparison', False):
+        if kv.get('query_mean_quota_fraction', 0):
+            import hybrid_memory_protocol as graph_protocol
+        elif getattr(args, 'guided_comparison', False):
             import guided_benchmark_protocol as graph_protocol
         else:
             import graph_v2_protocol as graph_protocol
@@ -83,7 +85,7 @@ def run(args):
             print(json.dumps({'event':'start','id':row['id'],'input_tokens':len(tokens)}),flush=True)
             http=urllib.request.build_opener(urllib.request.ProxyHandler({}))
             req=urllib.request.Request(f"http://127.0.0.1:{cfg['port']}/v1/completions",data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
-            capture_slice=CaptureSlice(args.capture/name for name in ('bounded_refresh.jsonl','block_graph.jsonl','action_attention.jsonl'))
+            capture_slice=CaptureSlice(args.capture/name for name in ('bounded_refresh.jsonl','block_graph.jsonl','action_attention.jsonl','block_graph_inputs.jsonl'))
             sent=time.monotonic()
             with http.open(req,timeout=args.timeout) as stream:response=json.load(stream)
             seconds=time.monotonic()-sent;save(directory/'response.json',response)
@@ -113,7 +115,9 @@ def run(args):
             if graph_v2:
                 import qualify_graph_niah as graph_client
                 record['graph_v2'] = graph_protocol.audit_case(args.capture, rid, cfg,
-                    [row['query_begin'], row['query_end']], require_pressure=True,event_reader=capture_slice.read)
+                    [row['query_begin'], row['query_end']], require_pressure=True,event_reader=capture_slice.read,
+                    **(dict(prompt_tokens=len(tokens),output_tokens=payload['max_tokens'])
+                       if kv.get('query_mean_quota_fraction',0) else {}))
                 record['release'] = graph_client.wait_owner_released(args.capture, session,
                     {'response_id': rid}, terminal)
             save(directory/'events.json',events);save(directory/'terminal.json',terminal)

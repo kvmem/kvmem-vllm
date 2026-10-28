@@ -1,7 +1,5 @@
 # vLLM compatibility and native SystemOne
 
-> **Documentation preview.** This branch previews the README, GIF and guides. The runtime and benchmark-tooling updates described here are still pending publication. Installation commands and new profiles require that development runtime; they are not a validated installation path for this preview branch.
-
 KVMem follows upstream vLLM through capability checks, a small set of native
 adapters, and regression tests. The package requires `vllm>=0.30.0`; it does not
 reject a release or development build because its version string changed.

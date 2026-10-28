@@ -28,6 +28,39 @@ ROOT = Path(__file__).resolve().parents[1]
 PREFLIGHT_CONCURRENCY = 8
 
 
+def preflight_completion(http, cfg, payload, *, namespace, release_token, output, timeout):
+    """Give cold synthetic probes temporary owners required by graph runtimes.
+
+    Explicit continuation owners are retained for the caller. Temporary owners
+    are released after their response; this does not change any formal request.
+    """
+    data={'model':cfg['served_model_name'],**payload}
+    temporary=not data.get('session_id')
+    if temporary:
+        sid=namespace+'-probe-'+secrets.token_hex(6)
+        data.update(session_id=sid,cache_salt=sid)
+    records=output/'preflight-requests';records.mkdir(exist_ok=True)
+    def post(body,phase):
+        path=records/(secrets.token_hex(12)+'.json')
+        row={'phase':phase,'request':body,'at':time.time()}
+        request=urllib.request.Request(f"http://127.0.0.1:{cfg['port']}/v1/completions",
+            data=json.dumps(body).encode(),headers={'Content-Type':'application/json'})
+        try:
+            with http.open(request,timeout=timeout) as response:result=json.load(response)
+        except urllib.error.HTTPError as error:
+            row.update(error_status=error.code,error_body=error.read().decode(errors='replace'))
+            save(path,row)
+            raise RuntimeError(f"Preflight HTTP {error.code}: {row['error_body']}") from error
+        row['response']=result;save(path,row)
+        return result
+    result=post(data,'probe')
+    if temporary:
+        post(dict(model=cfg['served_model_name'],prompt=[release_token],session_id=sid,cache_salt=sid,
+            max_tokens=1,temperature=0,kvmem_reselect='off',kvmem_mandatory_spans=[],
+            kv_transfer_params={'kvmem_release_session':True}),'temporary-owner-release')
+    return result
+
+
 def wait_backend_ready(http, endpoint, server, bridge, timeout_seconds=1800):
     """Allow cold kernel compilation equally for full-task and timed runs."""
     deadline = time.monotonic() + timeout_seconds
@@ -44,6 +77,19 @@ def wait_backend_ready(http, endpoint, server, bridge, timeout_seconds=1800):
     raise TimeoutError('Backend readiness timeout')
 
 
+def preserve_incomplete_suite(out, children, manifest, state):
+    if not manifest.get('seed_suite_qualification') or state.get('status')=='completed':
+        return
+    try:
+        from scripts.deepswe_window_snapshot import snapshot, release_supervisors
+        preserved=snapshot(out,children)
+        save(out/'failure-workspace-preservation.json',dict(status='preserved',
+            source='window-workspaces.json',scoring_unchanged=True))
+        release_supervisors(preserved)
+    except BaseException as snapshot_error:
+        state['window_snapshot_error']=repr(snapshot_error)
+
+
 def bounded_warmup(a, cfg, out, http):
     """Initialize the model and MeanK without including JIT in the window."""
     raw = a.warmup_tokens.read_bytes()
@@ -52,7 +98,8 @@ def bounded_warmup(a, cfg, out, http):
     if sys.byteorder != 'little':
         values.byteswap()
     tokens = values.tolist()
-    assert len(tokens) == 67584 and all(t >= 0 for t in tokens)
+    expected_tokens=max(67584,cfg['kvmem']['select_budget']+2048)
+    assert len(tokens) == expected_tokens and all(t >= 0 for t in tokens)
     native = a.backend_kind == 'native'
     sid = 'deepswe-initialization-' + out.name
     def complete(prompt, *, cleanup=False):
@@ -200,6 +247,48 @@ def read_context_limits(path, cursor, limited):
                 limited.add(event['task'])
 
 
+def read_client_context_limit(path, model, context_tokens):
+    """Recognize the pinned CLI's local ceiling after it exits, without an API call.
+
+    Tool/assistant text is not termination evidence. Require the final complete
+    record to be the structured blocking-limit result for this model/profile;
+    malformed or incomplete logs retain the infrastructure-failure policy.
+    """
+    if not path.exists():
+        return None
+    final = None
+    with path.open('rb') as stream:
+        for line_number, line in enumerate(stream, 1):
+            if not line.endswith(b'\n'):
+                return None
+            try:
+                row = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                return None
+            if not isinstance(row, dict):
+                return None
+            final = (line_number, line, row)
+    if final is None:
+        return None
+    line_number, line, row = final
+    if (row.get('type') != 'result' or row.get('is_error') is not True
+            or row.get('terminal_reason') != 'blocking_limit'
+            or row.get('result') != 'Prompt is too long'
+            or row.get('api_error_status') is not None):
+        return None
+    usage = row.get('modelUsage')
+    usage = usage.get(model) if isinstance(usage, dict) else None
+    if (not isinstance(usage, dict)
+            or type(usage.get('contextWindow')) is not int
+            or usage['contextWindow'] != context_tokens):
+        return None
+    return dict(source='client_local_guard', path=str(path), line=line_number,
+                record_sha256=hashlib.sha256(line).hexdigest(),
+                terminal_reason=row['terminal_reason'], session_id=row.get('session_id'),
+                model=model, context_tokens=context_tokens,
+                reported_max_output_tokens=usage.get('maxOutputTokens'))
+
+
 def prepare(a):
     m=json.loads((a.reference/'manifest.json').read_text())
     assert len(m['tasks'])==16
@@ -221,7 +310,7 @@ def prepare(a):
             assert actual==expected,('image mismatch',name)
     manifest={'reference':str(a.reference),'reference_sha256':digest(a.reference/'manifest.json'),
         'tasks':m['tasks'],'claude_sha256':m['claude_sha256'],'workers':a.workers,
-        'sampling':m['sampling'],'seed':1000,'attempts_per_task':1,
+        'sampling':m['sampling'],'seed':getattr(a, 'seed', 1000),'attempts_per_task':1,
         'setup_sha256':{p.name:digest(p) for p in setup.iterdir()},
         'profile':profile,'profile_sha256':digest(a.config), 'session_capacity':capacity,
         'protocol_provenance':json.loads((output/'protocol/provenance.json').read_text()),
@@ -229,7 +318,7 @@ def prepare(a):
         'duration_seconds':a.duration_seconds,
         'inference':f"NVFP4 + FP8 KV + {profile.get('draft_method','dflash')}({profile['draft_tokens']}), "
             f"execution={profile.get('execution_mode','eager')}, backend={a.backend_kind}; original qw3 text protocol helpers.",
-        'differences':['vLLM native per-request seed=1000 (qw3 server RNG is sequential)',
+        'differences':[f"vLLM native per-request seed={getattr(a, 'seed', 1000)} (qw3 server RNG is sequential)",
             'Current attention pressure + Query history; guided/private growth/evidence triggers remain disabled as current implementation profile',
             f"Native generation max_tokens is capped at G={profile['kvmem']['gen_budget']}; logical position limit {profile['max_model_len']}",
             'Anthropic SSE buffers a completed model response with keepalive pings; agent receives identical completed tool content'],
@@ -237,6 +326,7 @@ def prepare(a):
         'scoring':'Original frozen hidden verifier, committed model.patch only, no auto-commit of working tree',
         'network':'Dedicated internal Docker bridge, no WAN; protocol bridge binds its gateway only',
         'agent_timeout':'Original unlimited','verifier_timeout':'Original 30m'}
+    manifest['optimized_handoff'] = bool(getattr(a, 'optimized_handoff', False))
     manifest['cpu_admission']={'budget_gib':72,'active_agent_clients':a.workers,
         'short_trajectory_reserve_tokens':49152,'long_trajectory_reserve_tokens':1048576,
         'long_trajectory_slots':1,'policy':'CPU-only; preserve parked histories, no eviction/recompute. Up to eight clients while short, one long trajectory at a time. Release finished histories before admitting further growth.'}
@@ -259,11 +349,18 @@ def run(a):
         raise ValueError('Observation duration must be finite and nonnegative')
     if a.duration_seconds and (a.adopt_controller or a.duration_seconds < 60 or a.warmup_tokens is None):
         raise ValueError('Bounded windows require >=60 seconds, warmup tokens and a new controller')
+    if getattr(a, 'snapshot_window_workspaces', False) and not a.duration_seconds:
+        raise ValueError('Workspace snapshots require a finite observation window')
     if a.bash_repeat_limit and a.bash_repeat_limit<2:raise ValueError('Bash repetition limit must be zero or at least two')
     m=json.loads((a.output/'manifest.json').read_text()) if a.adopt_controller or a.use_prepared else prepare(a)
+    if type(getattr(a, 'seed', 1000)) is not int or not 0 <= getattr(a, 'seed', 1000) < 2**32:
+        raise ValueError('Benchmark seed must be an unsigned 32-bit integer')
+    if getattr(a, 'seed', 1000) != m.get('seed', 1000):
+        raise ValueError('Requested seed differs from the frozen task manifest')
     if a.use_prepared:
         assert json.loads(a.config.read_text())==m['profile']
         assert (a.workers,a.backend_kind,a.duration_seconds)==(m['workers'],m['backend_kind'],m['duration_seconds'])
+        assert bool(getattr(a, 'optimized_handoff', False)) == m.get('optimized_handoff', False)
     if a.adopt_controller:
         assert json.loads(a.config.read_text())==m['profile'], 'Adoption must preserve the inference profile'
         assert a.workers==m['workers'], 'Adoption must preserve client concurrency'
@@ -282,6 +379,7 @@ def run(a):
     control_token=secrets.token_hex(24)
     network=run_id
     children=[];logs=[];stop=threading.Event();window_done=threading.Event();state_lock=threading.Lock()
+    window_closing=threading.Event()
     context_limited=set()
     state={'id':run_id,'started_at':time.time(),'workers':a.workers,'status':'starting','tasks':{},'network':network}
     for path in a.carry_result:
@@ -351,14 +449,30 @@ def run(a):
                 '--backend-kind',a.backend_kind,
                 '--max-model-len',str(cfg['max_model_len']),
                 '--gen-budget',str(generation_tokens),
+                '--seed',str(m.get('seed', 1000)),
+                *(['--optimized-handoff'] if getattr(a, 'optimized_handoff', False) else []),
                 *(['--cpu-admission-policy','engine','--cache-geometry',str(out/'server/capture/cache-geometry.json'),
                    '--cpu-admission-bytes',str(cfg['kvmem']['cpu_read_cache_bytes'])]
                   if a.backend_kind == 'kvmem' and cfg['kvmem'].get('cpu_history_coordination') else [])],out/'bridge.log',
                 {**environment,'DEEPSWE_CONTROL_TOKEN':control_token})
             http=urllib.request.build_opener(urllib.request.ProxyHandler({}))
             endpoint=f'http://{gateway}:{a.bridge_port}'
-            wait_backend_ready(http,endpoint,server,bridge)
-            if a.duration_seconds:
+            wait_backend_ready(http,endpoint,server,bridge,
+                timeout_seconds=getattr(a,'startup_timeout_seconds',1800))
+            if m.get('seed_suite_qualification'):
+                from scripts.queue_deepswe_seed_suite import validate_preflight_reuse
+                validate_preflight_reuse(out)
+                bounded_warmup(a,cfg,out,http)
+            elif m.get('preflight_reuse'):
+                from scripts.continue_deepswe_formal import validate_reuse, fresh_engine_archive
+                proof = validate_reuse(out.parent)
+                archive = fresh_engine_archive(out/'server/capture')
+                save(out/'preflight-reuse.json', dict(status='reused', source=proof['source'],
+                    long_gc_status='user_stopped_incomplete', at=time.time()))
+                state['preflight_native_counters'] = {k:archive.get(k,0) for k in (
+                    'session_restored_tokens','session_checkpoint_deferrals','disk_read_bytes','disk_write_bytes')}
+                save_idle_metrics(cfg,out,http)
+            elif a.duration_seconds:
                 bounded_warmup(a,cfg,out,http)
             else:
                 # Reproduce atomic Query batches larger than the normal 1024-token
@@ -368,22 +482,20 @@ def run(a):
                 base=(tokenizer.encode('An ordinary synthetic context. ',add_special_tokens=False)*5000)[:16384]
                 query=(tokenizer.encode('A synthetic Query for attention qualification. ',add_special_tokens=False)*1000)[:4096]
                 assert len(base)==16384 and len(query)==4096
+                def complete(payload):
+                    return preflight_completion(http,cfg,payload,namespace=run_id,
+                        release_token=tokenizer.convert_tokens_to_ids('<|im_end|>'),output=out,
+                        timeout=max(1200,generation_tokens/10))
                 def qualify(index):
                     payload={'model':cfg['served_model_name'],'prompt':base+query,'max_tokens':1,'temperature':0,
                              'kvmem_query_span':[len(base),len(base)+len(query)]}
-                    request=urllib.request.Request(f"http://127.0.0.1:{cfg['port']}/v1/completions",
-                        data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
-                    with http.open(request,timeout=600) as response:return json.load(response)
+                    return complete(payload)
                 with ThreadPoolExecutor(max_workers=preflight_concurrency) as pool:
                     qualification=list(pool.map(qualify,range(preflight_concurrency)))
                 save(out/'atomic-query-preflight.json',{'passed':True,'concurrency':preflight_concurrency,'query_tokens':4096,'sampled_rows_per_query':128,
                     'requests':[{'id':r['id'],'usage':r['usage']} for r in qualification]})
                 # Prove that clearing a finished namespace also clears its mandatory
                 # spans before the short cleanup prompt is admitted.
-                def complete(payload):
-                    request=urllib.request.Request(f"http://127.0.0.1:{cfg['port']}/v1/completions",
-                        data=json.dumps({'model':cfg['served_model_name'],**payload}).encode(),headers={'Content-Type':'application/json'})
-                    with http.open(request,timeout=max(1200, generation_tokens / 10)) as response:return json.load(response)
                 # Exercise cold and restored one-token tails inside a live decode
                 # batch before paying for the full-G qualification.
                 one=[tokenizer.convert_tokens_to_ids('<|im_end|>')]
@@ -462,6 +574,11 @@ def run(a):
                     'kv_transfer_params':{'kvmem_release_session':True}})
                 save(out/'cleanup-preflight.json',{'passed':True,'initial_request':initial['id'],'cleanup_request':cleared['id']})
                 archive=wait_preflight_release(out/'server/capture')
+                if m.get('long_gc_qualification'):
+                    from scripts.deepswe_long_gc_preflight import run as qualify_long_gc
+                    qualify_long_gc(cfg, out, m['long_gc_qualification'], tokenizer,
+                                    namespace=run_id, server=server, bridge=bridge)
+                    archive=wait_preflight_release(out/'server/capture')
                 state['preflight_native_counters']={k:archive.get(k,0) for k in (
                     'session_restored_tokens','session_checkpoint_deferrals','disk_read_bytes','disk_write_bytes')}
                 save_idle_metrics(cfg,out,http)
@@ -474,7 +591,29 @@ def run(a):
             cursor=0
             while not monitor_done.is_set():
                 if a.duration_seconds and time.time() >= state['window_deadline']:
-                    window_done.set();stop.set();return
+                    window_closing.set()
+                    preserved=None
+                    try:
+                        if getattr(a, 'snapshot_window_workspaces', False):
+                            measurement={'started_at':time.time(), 'started_monotonic':time.monotonic()}
+                            with http.open(f"http://127.0.0.1:{cfg['port']}/metrics",timeout=5) as response:
+                                measurement['raw_metrics']=response.read().decode()
+                            measurement.update(finished_at=time.time(),finished_monotonic=time.monotonic())
+                            measurement['stream_bytes']={str(p.relative_to(out)):p.stat().st_size
+                                for p in (out/'cases').glob('*/claude.stream.jsonl')}
+                            requests=out/'bridge/requests.jsonl'
+                            measurement['bridge_bytes']=requests.stat().st_size if requests.exists() else 0
+                            save(out/'window-end-metrics.json',measurement)
+                            from scripts.deepswe_window_snapshot import snapshot
+                            preserved=snapshot(out,children)
+                    except BaseException as error:
+                        state['window_snapshot_error']=repr(error)
+                    finally:
+                        window_done.set();stop.set()
+                        if preserved:
+                            from scripts.deepswe_window_snapshot import release_supervisors
+                            release_supervisors(preserved)
+                    return
                 if server.poll() is not None or bridge.poll() is not None:
                     stop.set()
                 sample={'at':time.time()}
@@ -518,7 +657,7 @@ def run(a):
         monitor_thread=threading.Thread(target=monitor,daemon=True);monitor_thread.start()
         def task_attempt(row):
             tid=row['task_id']
-            if stop.is_set() or state['tasks'].get(tid,{}).get('state')=='completed':return
+            if stop.is_set() or window_closing.is_set() or state['tasks'].get(tid,{}).get('state')=='completed':return
             cell=out/'cases'/tid
             if tid not in adopted_cells:cell.mkdir(parents=True)
             task_env={**environment,'CLAUDE_AGENT_RUNNER':str(out/'setup/container_claude_agent.sh'),
@@ -617,6 +756,20 @@ print(json.dumps({'cli_pids':pids}))
             # Preserve that evidence separately; other API errors still invalidate.
             stop_cancellations=[r for r in bridge_errors if expected_stop_cancellation(r,signalled)]
             bridge_errors=[r for r in bridge_errors if r not in stop_cancellations]
+            client_limit = read_client_context_limit(
+                cell/'claude.stream.jsonl', cfg['served_model_name'], cfg['max_model_len'])
+            if (client_limit is not None and result.get('agent_exit') == 1
+                    and not signalled and not bridge_errors):
+                # A local CLI guard never reaches the bridge's context_limit log.
+                # Keep any verifier artifacts, but do not score this bounded attempt
+                # or stop the other workers. Real transport/service failures still
+                # follow the existing fail-closed path.
+                save(cell/'client-context-limit.json', client_limit)
+                with state_lock:
+                    state['tasks'][tid].update(state='context_ceiling', ended_at=time.time(),
+                        scored=False, runner_exit=code, context_limit=client_limit)
+                    update()
+                return
             valid=((code==0 or getattr(child,'adopted',False)) and (result.get('agent_exit')==0 or (signalled and result.get('agent_exit') in (130,137,143)))
                    and not bridge_errors and result.get('verifier_exit')==0
                    and isinstance(result.get('reward'),dict) and result['reward'].get('reward') in (0,1))
@@ -641,22 +794,39 @@ print(json.dumps({'cli_pids':pids}))
         with ThreadPoolExecutor(max_workers=a.workers) as pool:
             futures=[pool.submit(task,row) for row in m['tasks']]
             for future in as_completed(futures):future.result()
-        state['status']='window_complete' if window_done.is_set() else 'completed' if len(state['tasks'])==16 and not stop.is_set() else 'needs_attention'
+        state['status']='needs_attention' if state.get('window_snapshot_error') else 'window_complete' if window_done.is_set() else 'completed' if len(state['tasks'])==16 and not stop.is_set() else 'needs_attention'
     except BaseException as error:
         if owns_run:state['status']='needs_attention';state['error']=repr(error)
         raise
     finally:
+        if owns_run:
+            # A failed or explicitly stopped formal cohort must retain the
+            # unfinished files before wrapper EXIT traps remove containers.
+            preserve_incomplete_suite(out,children,m,state)
         # Publish termination before potentially slow process/container cleanup.
         # Otherwise monitors keep counting an already stopped run as inference.
         if owns_run:state['ended_at']=time.time();update()
         if 'monitor_done' in locals():monitor_done.set();monitor_thread.join(timeout=10)
         cleanup_errors=[]
+        retained=set()
+        if state.get('window_snapshot_error'):
+            # A failed filesystem snapshot must not destroy the only remaining
+            # workspace through a cell wrapper's EXIT trap. Leave these exact
+            # children/container network for an audited manual recovery.
+            for child in children:
+                args=getattr(child,'args',[])
+                if len(args)>1 and args[:2]==['bash',str(out/'setup/run_deepswe_cell.sh')]:
+                    retained.add(child.pid)
+            cleanup_errors.append({'snapshot':state['window_snapshot_error'],
+                                   'retained_cell_processes':sorted(retained)})
         for child in reversed(children):
+            if child.pid in retained:continue
             if child.poll() is None:
                 try:os.killpg(child.pid,signal.SIGTERM)
                 except ProcessLookupError:pass
         cleanup_deadline=time.monotonic()+15
         for child in reversed(children):
+            if child.pid in retained:continue
             try:child.wait(timeout=max(0,cleanup_deadline-time.monotonic()))
             except subprocess.TimeoutExpired:
                 try:os.killpg(child.pid,signal.SIGKILL)
@@ -664,7 +834,7 @@ print(json.dumps({'cli_pids':pids}))
                 try:child.wait(timeout=5)
                 except subprocess.TimeoutExpired:cleanup_errors.append({'pid':child.pid,'error':'Process did not exit after kill'})
         for log in logs:log.close()
-        if network_created:
+        if network_created and not state.get('window_snapshot_error'):
             # Killing a docker exec client can leave its detached agent alive.
             # Remove only containers whose role and per-cell owner both match.
             for cid_path in (out/'cases').glob('*/*.container.cid'):
@@ -690,12 +860,16 @@ if __name__=='__main__':
     p.add_argument('--reference',type=Path,default=Path('/home/chaidi/qw3/benchmark/action_pressure_first16_warmfix_20261010'))
     p.add_argument('--config',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
     p.add_argument('--workers',type=int,choices=(1,2,4,8),default=8)
+    p.add_argument('--seed',type=int,default=1000)
     p.add_argument('--adopt-controller',type=int,help='Transfer the owned active run without restarting model or clients')
     p.add_argument('--bash-repeat-limit',type=int,default=0,help='Opt-in exact successful Bash input/output repetition policy; zero preserves reference')
     p.add_argument('--carry-result',type=Path,action='append',default=[],help='Preserve an independently audited completed result without retrying it')
     p.add_argument('--backend-kind',choices=('native','kvmem'),default='kvmem')
     p.add_argument('--duration-seconds',type=float,default=0,help='Formal fixed observation window; zero runs all tasks')
     p.add_argument('--warmup-tokens',type=Path)
+    p.add_argument('--snapshot-window-workspaces',action='store_true',help='Preserve unfinished owned container files at a finite window boundary')
     p.add_argument('--use-prepared',action='store_true',help='Use the immutable prevalidated task manifest')
     p.add_argument('--bridge-port',type=int,default=18483);p.add_argument('--prepare-only',action='store_true')
+    p.add_argument('--optimized-handoff',action='store_true')
+    p.add_argument('--startup-timeout-seconds',type=int,default=1800)
     run(p.parse_args())

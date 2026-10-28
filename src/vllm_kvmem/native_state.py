@@ -6,31 +6,18 @@ included. Prefix-cached/aligned and context-parallel layouts need separate adapt
 """
 from dataclasses import dataclass
 from functools import lru_cache
-import hashlib
-from importlib.metadata import distribution
 
 import torch
 
 from .checkpoint_timing import async_checkpoint_capture, checkpoint_stage
 from .publication_step import native_publication_step
-
-
-STATE_SOURCES = {
-    'model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py': 'b80f8e6f3fff442fb880aebb3209c52f814f66490009f4ac4003de603576d10a',
-    'model_executor/layers/mamba/ops/causal_conv1d.py': '044d005cfe59fd0818ed421274e04f3e8dd679b8cdb64fca9f4422f2643484b2',
-    'third_party/flash_linear_attention/ops/fused_sigmoid_gating.py': '000ab8996af9788fdb8843a6a3b91833e7a14c8acc0e1ea073a536330f64cb6f',
-    'v1/worker/gpu/model_states/mamba_hybrid.py': '573e130ac5587d4822fabf97adad1ad0fda02ff83c5e70df879a5bb175ae845c',
-}
+from .native_pages import stored_expansions
 
 
 @lru_cache(maxsize=1)
 def verify_state_sources():
-    from .integration import check_engine_version
-    check_engine_version()
-    package = distribution('vllm')
-    for relative, expected in STATE_SOURCES.items():
-        if hashlib.sha256(package.locate_file('vllm/' + relative).read_bytes()).hexdigest() != expected:
-            raise ValueError(f'Unqualified native recurrent-state lifecycle source: {relative}')
+    from .engine_api import require_contract
+    require_contract('state')
 
 
 @dataclass
@@ -80,7 +67,7 @@ class NativeRecurrentState:
                     raise ValueError("Expected native convolution and recurrent cache tensors")
                 layers[name] = module.kv_cache
                 self.conv_widths[name] = module.conv1d.weight.shape[-1]
-            if runner.block_tables.blocks_per_kv_block[group_id] != 1:
+            if stored_expansions(runner.block_tables)[group_id] != 1:
                 raise ValueError("Recurrent state rows must not use attention page expansion")
             self.groups[group_id] = layers
         if not self.groups:
@@ -91,7 +78,7 @@ class NativeRecurrentState:
         count = int(self.runner.block_tables.num_blocks.np[group_id, index])
         if count <= 0:
             raise ValueError("Request has no allocated native recurrent state")
-        # The CPU witness is populated from the actual pinned native writes,
+        # The CPU witness is populated from the actual native writes,
         # never from num_blocks or an assumed persistent CPU table mirror.
         journal = getattr(self.runner, '_kvmem_recurrent_table_journal', None)
         rows = journal.rows(request_id, group_id) if journal is not None and async_checkpoint_capture(self.runner) else None

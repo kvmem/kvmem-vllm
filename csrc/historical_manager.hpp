@@ -7,6 +7,8 @@
 #include "qw3/kvmem_store.hpp"
 
 #include <memory>
+#include <map>
+#include <array>
 #include <vector>
 
 namespace vllm_kvmem {
@@ -25,6 +27,8 @@ struct HistoricalGcStats {
     uint64_t pending_slots = 0, pending_cpu_bytes = 0;
     uint64_t retries = 0, stale = 0, policy_failures = 0, shadow_decisions = 0;
     uint64_t admission_attempts = 0, admission_retries = 0;
+    uint64_t redundancy_retired = 0, lossy_retired = 0;
+    uint64_t rejected_ineligible = 0, cancelled_decisions = 0;
 };
 
 struct HistoricalStorageStats {
@@ -71,6 +75,14 @@ public:
     bool observes(const std::shared_ptr<qw3::KvMemRepository> &) const override;
     qw3::KvMemExecutionAdmission admit(qw3::KvMemBlockHandle) override;
     std::shared_ptr<HistoricalFrameHold> protect(const std::vector<qw3::KvMemBlockHandle> &);
+    bool configure_features(uint32_t layers, uint32_t kv_heads, uint32_t q_heads, uint32_t dimension);
+    std::array<size_t, 4> feature_geometry() const;
+    bool publish_features(const qw3::KvMemRepository::Lease &, const float *, size_t elements);
+    uint64_t begin_question(uint64_t expected_tokens);
+    bool append_question(uint64_t epoch, uint64_t offset, const float *, size_t elements, uint32_t tokens);
+    bool observe_query(uint64_t epoch, const float *, size_t elements, uint32_t tokens);
+    void invalidate_question();
+    std::map<std::string, uint64_t> feature_stats() const;
     void pause_policy(bool paused);
     bool policy_paused() const;
     void request_capacity(uint32_t ready_slots, uint64_t retained_cpu_bytes = UINT64_MAX);

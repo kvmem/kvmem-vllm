@@ -51,7 +51,9 @@ def run(args):
     cfg=json.loads(args.config.read_text());kv=cfg['kvmem']
     graph_v2 = kv.get('graph_scoring_version', 'v1') == 'v2'
     if graph_v2:
-        if getattr(args, 'guided_comparison', False):
+        if kv.get('query_mean_quota_fraction', 0):
+            import hybrid_memory_protocol as graph_protocol
+        elif getattr(args, 'guided_comparison', False):
             import guided_benchmark_protocol as graph_protocol
         else:
             import graph_v2_protocol as graph_protocol
@@ -144,7 +146,7 @@ def run(args):
                             {'prompt_tokens':len(tokens),'token_sha256':row['token_sha256'],
                              'prefix_tokens':prefix,'prefix_sha256':prefix_sha,'sampling_sha256':sha(old)})
                         save(directory/'attempt.json',{'started_at':time.time(),'session':session,'group':group})
-                        capture_slice=CaptureSlice(args.capture/name for name in ('bounded_refresh.jsonl','block_graph.jsonl'))
+                        capture_slice=CaptureSlice(args.capture/name for name in ('bounded_refresh.jsonl','block_graph.jsonl','block_graph_inputs.jsonl'))
                         started=time.monotonic()
                         try:
                             http=urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -184,7 +186,10 @@ def run(args):
                                     record['graph_v2'] = graph_protocol.audit_case(args.capture, rid, cfg,
                                         [row['query_begin'], row['query_end']],
                                         require_pressure=not completed and len(tokens) > kv['select_budget'] + kv['gen_budget'],
-                                        event_reader=capture_slice.read)
+                                        event_reader=capture_slice.read,
+                                        **(dict(prompt_tokens=len(tokens),output_tokens=payload['max_tokens'],
+                                                replay_span=payload['kvmem_replay_span'])
+                                           if kv.get('query_mean_quota_fraction',0) else {}))
                             save(directory/'events.json',refresh);save(directory/'terminal.json',terminal)
                             save(directory/'result.json',record);completed+=1
                             with timing.stage('progress_publish'):

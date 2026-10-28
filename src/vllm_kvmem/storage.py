@@ -84,7 +84,10 @@ def _submit_archive_job(executor, work):
 def make_shared_archive(options, directory, record_bytes, max_requests, *, max_query_tokens=0):
     """One process-wide arena; each admitted authority has a lifetime partition."""
     from .query_window_budget import split_cpu_history_budget
+    from .historical_feature_budget import split_historical_feature_budget
     history_bytes, query_cache_bytes = split_cpu_history_budget(options)
+    history_bytes, feature_bytes = split_historical_feature_budget(
+        options, history_bytes, max_requests + options.session_capacity)
     capacity = options.memory.repository_blocks * (max_requests + options.session_capacity)
     if options.archive_backend == 'cpu':
         # Immutable authority, not an evictable read cache. No file or mmap is
@@ -108,6 +111,7 @@ def make_shared_archive(options, directory, record_bytes, max_requests, *, max_q
         archive.async_seal = options.async_seal
         archive.history_record_charge = charge
         archive._query_window_cache_reserved_bytes = query_cache_bytes
+        archive._historical_feature_reserved_bytes = feature_bytes
         archive._query_window_cache_bytes = 0
         if getattr(options, 'historical_gc', None) is not None:
             archive.enable_history_gc(options.historical_gc.native(options.memory, max_requests+options.session_capacity))
@@ -228,6 +232,7 @@ class AsyncArchive:
                         archive_io_peak_bytes=self._io_peak_bytes,
                         archive_io_deferrals=self._io_deferrals,
                         query_window_cache_reserved_bytes=getattr(self, '_query_window_cache_reserved_bytes', 0),
+                        historical_feature_reserved_bytes=getattr(self, '_historical_feature_reserved_bytes', 0),
                         query_window_cache_bytes=getattr(self, '_query_window_cache_bytes', 0),
                         **(self._seal_totals or {}))
 
@@ -452,6 +457,22 @@ class AsyncArchive:
                 owned.clear()
                 self._complete(size)
                 raise
+
+    def borrow_read_sources(self, namespace, leases):
+        """Retain immutable payload read rights for a bounded deferred reader.
+
+        Metadata leases alone do not fence native CPU payload retirement. This
+        admission is short and copies no data; the caller releases every source
+        after cancellation or after its independently admitted I/O completes.
+        """
+        if not leases or len(leases) > 32:
+            raise ValueError('Deferred archive readers require one to 32 leases')
+        keys = [self.key(namespace, lease) for lease in leases]
+        with self._lock:
+            entries = [self._entries.get(key) for key in keys]
+            if any(entry is None or not entry.ready for entry in entries):
+                raise KeyError('Deferred archive record missing, stale or unpublished')
+            return self._admit_read_sources(entries)
 
     def _admit_read_sources(self, entries):
         return None

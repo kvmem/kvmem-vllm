@@ -4,8 +4,6 @@ No prefix hits are invented. The worker runtime owns capture/storage/assembly;
 the connector carries commands and completion acknowledgments to the scheduler.
 """
 from dataclasses import dataclass, field
-import hashlib
-from importlib.metadata import distribution
 import os
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -17,8 +15,6 @@ from .window_manager import RefreshTicket
 from .terminal import TerminalPrefix
 from .archive_admission import ArchiveCapacity
 from .session_control import SessionCommands
-
-RETIREMENT_CONNECTOR_SHA256 = 'b89a4333f1e552d86e1815674b59e9f1335f0f49c0a7b46082439076f62c6a81'
 
 
 @dataclass(frozen=True)
@@ -50,6 +46,7 @@ class RefreshCommand:
     guided_reason: str = ''
     guided_private: bool = False
     guided_boundary: bool | None = None
+    pressure_stage: str = ''
 
 
 @dataclass
@@ -62,6 +59,8 @@ class ControlMetadata(KVConnectorMetadata):
     cost_classification: dict[str, dict] = field(default_factory=dict)
     logical_prefill_groups: dict = field(default_factory=dict)
     logical_prefill_step: int | None = None
+    # Full rows after a fenced refresh, on engines without a native row-update field.
+    block_table_updates: dict[str, tuple[list[int], ...]] = field(default_factory=dict)
 
 
 @dataclass
@@ -105,9 +104,8 @@ class KVMemConnector(KVConnectorBase_V1, SupportsHMA):
         if (self.async_retirement or repository_gc) and os.getenv('KVMEM_BOUNDED_TARGET') != '1':
             raise ValueError('Retirement/GC requires bounded authority admission')
         if self.async_retirement or repository_gc:
-            source = distribution('vllm').locate_file('vllm/v1/worker/gpu/kv_connector.py')
-            if hashlib.sha256(source.read_bytes()).hexdigest() != RETIREMENT_CONNECTOR_SHA256:
-                raise ValueError('Unqualified native idle-worker retirement completion hook')
+            from .engine_api import require_contract
+            require_contract('retirement')
         self.retirement_done = None
         self.archive_snapshot = None
         self.scheduler_archive_update = None
@@ -122,6 +120,7 @@ class KVMemConnector(KVConnectorBase_V1, SupportsHMA):
         self.step_timings = None
         self.scheduler_step_feedback = None
         self.restore_timings = None
+        self.restore_completion_poll = None
         self.scheduler_restore_feedback = None
         self.active_residency = None
         self.restore_admission = None
@@ -165,6 +164,8 @@ class KVMemConnector(KVConnectorBase_V1, SupportsHMA):
             self.worker_jobs[command.request_id] = (command, self.runtime(command))
 
     def get_finished(self, finished_req_ids):
+        if self.restore_completion_poll is not None:
+            self.restore_completion_poll()
         for request_id, (command, job) in list(self.worker_jobs.items()):
             if job.query():
                 self.worker_completions.append((request_id, command.command_id))

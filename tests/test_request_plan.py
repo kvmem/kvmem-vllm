@@ -246,12 +246,17 @@ def test_rolling_plan_is_server_only_and_survives_public_payload_roundtrip(monke
         request_plan(request,4,32)
 
 
-def test_rolling_window_keeps_http_generation_limit_within_g(monkeypatch):
+@pytest.mark.parametrize('rolling',[False,True])
+def test_only_rolling_window_can_generate_past_g_in_one_request(monkeypatch,rolling):
     import json
     from vllm_kvmem.http_sessions import normalize_query_plan
     monkeypatch.setenv('KVMEM_REQUEST_PLAN_CONFIG',json.dumps(dict(
-        block_tokens=32,gen_budget=32768,select_budget=65536,rolling_active_window=True)))
+        block_tokens=32,gen_budget=32768,select_budget=65536,rolling_active_window=rolling)))
     payload = {'prompt':[1,2,3], 'max_tokens':32768}
     assert normalize_query_plan(payload) and payload['max_tokens'] == 32768
-    with pytest.raises(ValueError,match='within G'):
-        normalize_query_plan({'prompt':[1,2,3], 'max_tokens':32769})
+    longer = {'prompt':[1,2,3], 'max_tokens':131072}
+    if rolling:
+        assert normalize_query_plan(longer) and longer['max_tokens']==131072
+    else:
+        with pytest.raises(ValueError,match='within G'):
+            normalize_query_plan(longer)

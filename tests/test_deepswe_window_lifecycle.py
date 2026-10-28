@@ -83,8 +83,9 @@ def test_startup_is_bounded_and_dead_process_fails_immediately(monkeypatch):
 
 
 @pytest.mark.parametrize('backend,context_ceiling', [('native',False),('kvmem',False),('kvmem',True)])
+@pytest.mark.parametrize('snapshot_mode', ['off','success','failure'])
 def test_window_stops_live_workers_preserves_unscored_attempts_and_cleans_owned_processes(
-        tmp_path,monkeypatch,backend,context_ceiling):
+        tmp_path,monkeypatch,backend,context_ceiling,snapshot_mode):
     root=Path(__file__).parents[1]
     # Only the original repetition helper is loaded; all external effects below
     # are controlled fakes. Neither model modules nor Docker are imported.
@@ -139,15 +140,41 @@ def test_window_stops_live_workers_preserves_unscored_attempts_and_cleans_owned_
     monkeypatch.setattr(runner.signal,'signal',lambda *args:None)
     monkeypatch.setattr(runner.urllib.request,'build_opener',lambda *args:HTTP())
     monkeypatch.setattr(runner,'bounded_warmup',lambda *args:None)
+    from scripts import deepswe_window_snapshot
+    snapshot_calls=[]
+    def snapshot(*args):
+        snapshot_calls.append('snapshot')
+        if snapshot_mode=='failure':raise RuntimeError('Snapshot storage failure')
+        return dict(status='preserved',supervisors=[])
+    monkeypatch.setattr(deepswe_window_snapshot,'snapshot',snapshot)
+    monkeypatch.setattr(deepswe_window_snapshot,'release_supervisors',lambda row:snapshot_calls.append('release'))
+    # This lifecycle test uses fake services; host memory must be fake too.
+    # A concurrent real benchmark must not turn it into a low-memory test.
+    read_text=Path.read_text
+    def host_memory(path,*args,**kwargs):
+        if path==Path('/proc/meminfo'):
+            return 'MemAvailable: 67108864 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n'
+        return read_text(path,*args,**kwargs)
+    monkeypatch.setattr(Path,'read_text',host_memory)
     if backend=='native':
         monkeypatch.setitem(sys.modules,'native_agent_launch',SimpleNamespace(
             build_launch=lambda *args,**kw:dict(argv=['owned-native'],environment={})))
     args=SimpleNamespace(duration_seconds=60,adopt_controller=None,use_prepared=True,
+        snapshot_window_workspaces=snapshot_mode!='off',
         warmup_tokens=tmp_path/'init.i32',bash_repeat_limit=0,workers=4,backend_kind=backend,
         output=output,config=path,carry_result=[],prepare_only=False,bridge_port=18521)
     runner.run(args)
     state=json.loads((output/'run.json').read_text())
+    if snapshot_mode=='failure':
+        assert state['status']=='needs_attention' and state['cleanup_errors']
+        assert snapshot_calls==['snapshot']
+        assert not any(args[:3]==['docker','network','rm'] for args in external)
+        retained={p.pid for p in processes if p.args[:2]==['bash',str(output/'setup/run_deepswe_cell.sh')] and p.poll() is None}
+        assert retained and not retained & set(terminated)
+        assert all(p.poll() is not None for p in processes if p.pid not in retained)
+        return
     assert state['status']=='window_complete' and state['cleanup_errors']==[]
+    assert snapshot_calls==(['snapshot','release'] if snapshot_mode=='success' else [])
     assert state['cleanup_finished_at']>=state['ended_at']>=state['window_deadline']
     assert state['tasks'] and len(state['tasks'])<16
     assert all(t['scored'] is False and 'result' not in t for t in state['tasks'].values())
@@ -171,6 +198,48 @@ def test_context_log_preserves_partial_record(tmp_path):
     assert limited=={'a','b'}
 
 
+def local_limit_record(model='model', context=196608):
+    return dict(type='result', subtype='success', is_error=True,
+        terminal_reason='blocking_limit', result='Prompt is too long', api_error_status=None,
+        session_id='owned-session', modelUsage={model:dict(contextWindow=context,maxOutputTokens=32000)})
+
+
+def test_cli_local_limit_requires_terminal_structured_profile_bound_evidence(tmp_path):
+    path=tmp_path/'claude.stream.jsonl'
+    assert runner.read_client_context_limit(path,'model',196608) is None
+    row=local_limit_record()
+    terminal=json.dumps(row)+'\n'
+    path.write_text(json.dumps(dict(type='assistant',message='ordinary tool call'))+'\n'+terminal)
+    proof=runner.read_client_context_limit(path,'model',196608)
+    assert proof['source']=='client_local_guard' and proof['line']==2
+    assert proof['record_sha256']==runner.hashlib.sha256(terminal.encode()).hexdigest()
+    assert proof['context_tokens']==196608 and proof['reported_max_output_tokens']==32000
+    assert runner.read_client_context_limit(path,'other-model',196608) is None
+    assert runner.read_client_context_limit(path,'model',307200) is None
+
+
+@pytest.mark.parametrize('changes',[
+    dict(type='assistant'),dict(type='user'),dict(is_error=False),dict(is_error=1),
+    dict(terminal_reason='api_error'),dict(terminal_reason=None),
+    dict(result='Connection failed'),dict(result='Tool said: Prompt is too long'),
+    dict(api_error_status=500),dict(modelUsage=None),dict(modelUsage={'model':None}),
+    dict(modelUsage={'model':dict(contextWindow='196608')}),
+])
+def test_cli_local_limit_does_not_hide_other_errors(tmp_path,changes):
+    path=tmp_path/'claude.stream.jsonl'
+    path.write_text(json.dumps(dict(local_limit_record(),**changes))+'\n')
+    assert runner.read_client_context_limit(path,'model',196608) is None
+
+
+@pytest.mark.parametrize('before,after',[
+    ('','partial'),('broken\n',''),('','{}\n'),('','[]\n'),('','{"type":"assistant"}\n'),
+])
+def test_cli_local_limit_rejects_corrupt_or_nonterminal_result(tmp_path,before,after):
+    path=tmp_path/'claude.stream.jsonl'
+    path.write_text(before+json.dumps(local_limit_record())+'\n'+after)
+    assert runner.read_client_context_limit(path,'model',196608) is None
+
+
 def test_formal_baseline_waits_for_native_drain(tmp_path,monkeypatch):
     bodies=[b'vllm:generation_tokens_total 1\n',
         b'vllm:num_requests_running{engine="0"} 1\nvllm:num_requests_waiting{engine="0"} 0\n',
@@ -187,8 +256,10 @@ def test_formal_baseline_waits_for_native_drain(tmp_path,monkeypatch):
 @pytest.mark.parametrize('metrics_failure',[False,True])
 @pytest.mark.parametrize('low_memory',[False,True])
 @pytest.mark.parametrize('history_failure',[False,True])
+@pytest.mark.parametrize('limit_source',['bridge','client'])
+@pytest.mark.parametrize('transport_failure',[False,True])
 def test_full_task_context_ceiling_after_cli_exit_is_not_infrastructure_failure(
-        tmp_path,monkeypatch,metrics_failure,low_memory,history_failure):
+        tmp_path,monkeypatch,metrics_failure,low_memory,history_failure,limit_source,transport_failure):
     """Full runs continue to later tasks even if a CLI exits before monitor reads its limit."""
     root=Path(__file__).parents[1]
     monkeypatch.syspath_prepend(str(root/'benchmarks/deepswe'))
@@ -214,8 +285,17 @@ def test_full_task_context_ceiling_after_cli_exit_is_not_infrastructure_failure(
             if args[0]=='bash':
                 # Completion races the periodic monitor; context record remains
                 # the authoritative reason, regardless of the CLI exit code.
-                with (output/'bridge/requests.jsonl').open('a') as stream:
-                    stream.write(json.dumps(dict(event='context_limit',task=args[2]))+'\n')
+                if limit_source=='bridge':
+                    with (output/'bridge/requests.jsonl').open('a') as stream:
+                        stream.write(json.dumps(dict(event='context_limit',task=args[2]))+'\n')
+                else:
+                    cell=Path(args[3])
+                    (cell/'claude.stream.jsonl').write_text(json.dumps(local_limit_record())+'\n')
+                    (cell/'cell_summary.json').write_text(json.dumps(dict(agent_exit=1,
+                        verifier_exit=0,reward=dict(reward=0))))
+                    if transport_failure:
+                        with (output/'bridge/requests.jsonl').open('a') as stream:
+                            stream.write(json.dumps(dict(event='error',task=args[2]))+'\n')
                 self.returncode=1
         def poll(self):return self.returncode
         def wait(self,timeout=None):self.returncode=0;return 0
@@ -257,8 +337,17 @@ def test_full_task_context_ceiling_after_cli_exit_is_not_infrastructure_failure(
         if history_failure:assert 'Checkpoint capacity' in state['history_contract_error']
         assert state['cleanup_errors']==[] and all(p.poll() is not None for p in processes)
         return
+    if limit_source=='client' and transport_failure:
+        assert state['status']=='needs_attention'
+        assert all(t['state']=='infrastructure_error' for t in state['tasks'].values())
+        assert all(t['bridge_errors'] for t in state['tasks'].values())
+        assert not list((output/'cases').glob('*/client-context-limit.json'))
+        return
     assert state['status']=='completed' and state['cleanup_errors']==[]
     assert len(state['tasks'])==len(release_requests)==16
     assert all(t['state']=='context_ceiling' and not t['scored'] for t in state['tasks'].values())
     assert all('result' not in t for t in state['tasks'].values())
+    if limit_source=='client':
+        assert len(list((output/'cases').glob('*/client-context-limit.json')))==16
+        assert all(t['context_limit']['source']=='client_local_guard' for t in state['tasks'].values())
     assert set(signals)=={server.pid,bridge.pid}

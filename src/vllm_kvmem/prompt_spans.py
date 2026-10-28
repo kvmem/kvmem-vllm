@@ -104,6 +104,27 @@ def install_graph_metadata(graph, binding, *, validated_prefix=0):
                                locality_provenance=provenance)
 
 
+def selection_metadata(authority):
+    """Message lifecycle owner; an LRU FPS owner stores boundaries, no edges."""
+    graph = getattr(authority, 'block_graph', None)
+    return graph if graph is not None else getattr(authority, 'query_boundaries', None)
+
+
+def install_selection_metadata(authority, binding, *, validated_prefix=0):
+    history = selection_metadata(authority)
+    if history is None:
+        return
+    if getattr(authority, 'block_graph', None) is history:
+        install_graph_metadata(history, binding, validated_prefix=validated_prefix)
+    else:
+        spans, provenance = graph_metadata(binding)
+        history.update_message_spans(spans, validated_prefix=validated_prefix,
+            locality_provenance=provenance,
+            live_ranges=sorted((r.history_begin, r.history_begin+r.count)
+                               for r in authority.records.values()),
+            future_begin=authority.history_end)
+
+
 @dataclass(frozen=True)
 class PromptSpans:
     spans: tuple

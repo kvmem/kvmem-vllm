@@ -111,7 +111,7 @@ def selection_report(authority, *, phase=None):
     result = {'attention_source': source, 'prefill_attention_samples': prefill.samples if prefill else 0,
             'prefill_attention_chunks': prefill.chunks if prefill else 0,
             'prefill_attention_pages': sum(v > 0 and key in live for key,v in scores.items())}
-    selection = getattr(authority, 'graph_selection_report', {})
+    selection = (getattr(authority, 'query_selection_report', None) if phase == 'query' else None) or getattr(authority, 'graph_selection_report', {})
     if phase is not None and selection.get('phase') == phase:
         result.update({key: selection[key] for key in ('phase','seed_source','scoring_version',
             'score_domain_version','pressure_policy','alpha','score_mask_count','transport_mask_count')

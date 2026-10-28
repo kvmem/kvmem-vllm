@@ -37,6 +37,7 @@ class MaintenancePolicy:
         self.upload_ratios = OrderedDict()
         self.restore_timings = []
         self.offline = getattr(options, 'offline_agent_policy', False)
+        self.restore_handoff_fastpath = getattr(options, 'restore_handoff_fastpath', False)
         self.readiness_costs = {}
         self.transfer_budget = None
         if getattr(options, 'maintenance_transfer_bytes_per_second', 0):
@@ -99,6 +100,14 @@ class MaintenancePolicy:
                 return (0, last, 0)
             if now - last >= self.aging_seconds:
                 return (1, last, 0)
+            # A resident job has model_bytes == 0 until its checkpoint is
+            # claimed. That unknown size must not put a new prepare ahead of
+            # a frame ready for its small model-submit stage. Keep fence reap
+            # and aging ahead of this preference, and never alter byte credits.
+            if self.restore_handoff_fastpath:
+                if getattr(job.command, 'resident', False) and job.stage == 'restore_model_prepare':
+                    return (2, last, 0)
+                return (3, self.estimate(job), last)
             if self.offline:
                 return (2, self.readiness_costs[job.command.request_id] if measured else job.started, last)
             return (2, self.estimate(job), last)

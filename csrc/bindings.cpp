@@ -19,6 +19,7 @@
 #include "action_download_buffer.hpp"
 #include "restore_frame.hpp"
 #include "action_window_segments.hpp"
+#include "query_key_fps_cpu.hpp"
 #include <filesystem>
 #include <cstring>
 #include <limits>
@@ -39,6 +40,22 @@ struct NativeIndexOwner {
     size_t bytes = 0;
     std::shared_ptr<vllm_kvmem::HistoricalPayloadArena::ExternalOwner> owner;
 };
+
+static py::buffer_info historical_feature_buffer(py::buffer buffer, const std::vector<size_t> &shape) {
+    auto info = buffer.request();
+    if (info.itemsize != sizeof(float) || info.format != py::format_descriptor<float>::format() ||
+            size_t(info.ndim) != shape.size())
+        throw std::invalid_argument("Historical features require a CPU float32 buffer with the configured shape");
+    size_t stride = sizeof(float);
+    for (size_t axis = shape.size(); axis-- > 0;) {
+        if (!shape[axis] || info.shape[axis] < 0 || size_t(info.shape[axis]) != shape[axis] ||
+                (shape[axis] > 1 && (info.strides[axis] < 0 || size_t(info.strides[axis]) != stride)) ||
+                stride > SIZE_MAX / shape[axis])
+            throw std::invalid_argument("Historical features require a C-contiguous buffer with the configured shape");
+        stride *= shape[axis];
+    }
+    return info;
+}
 
 // A private, named inode allows strict reservation verification without changing
 // the imported tier. Unlink at construction exit (including exceptions), leaving
@@ -278,6 +295,35 @@ KVMEM_AVX2 static void add_decode_mean(const py::buffer_info &raw,
 }
 
 PYBIND11_MODULE(_native, m) {
+    m.def("checkpoint_token_bytes", [](py::object tokens, Py_ssize_t count) {
+        // Match token_bytes' exact builtin-int and uint32 validation. Do not
+        // accept bool, int subclasses, truncating casts, or hash-only matches.
+        const bool tuple = PyTuple_CheckExact(tokens.ptr());
+        if (!tuple && !PyList_CheckExact(tokens.ptr()))
+            throw py::value_error("Native token identity requires a list or tuple");
+        const auto size = tuple ? PyTuple_GET_SIZE(tokens.ptr()) : PyList_GET_SIZE(tokens.ptr());
+        if (count <= 0 || count >= size)
+            throw py::value_error("Prompt checkpoint must leave at least one token for native prefill");
+        if (count > PY_SSIZE_T_MAX / 4)
+            throw py::value_error("Token identity size overflow");
+        py::bytes result = py::reinterpret_steal<py::bytes>(PyBytes_FromStringAndSize(nullptr, count * 4));
+        if (!result) throw py::error_already_set();
+        char *destination = PyBytes_AS_STRING(result.ptr());
+        for (Py_ssize_t i = 0; i < count; ++i) {
+            PyObject *token = tuple ? PyTuple_GET_ITEM(tokens.ptr(), i) : PyList_GET_ITEM(tokens.ptr(), i);
+            if (!PyLong_CheckExact(token))
+                throw py::value_error("Prompt identity requires exact unsigned token IDs");
+            const auto value = PyLong_AsUnsignedLongLong(token);
+            if (PyErr_Occurred() || value > UINT32_MAX) {
+                PyErr_Clear();
+                throw py::value_error("Prompt identity requires exact unsigned token IDs");
+            }
+            const uint32_t packed = static_cast<uint32_t>(value);
+            std::memcpy(destination + i * 4, &packed, 4);
+        }
+        return result;
+    });
+    kvmem_fps_cpu::bind(m);
     py::register_exception<KvMemAdmissionRetry>(m, "HistoryAdmissionRetry");
     kvmem_prefill::bind(m);
     kvmem_graph::bind(m);
@@ -1004,6 +1050,33 @@ PYBIND11_MODULE(_native, m) {
         .def("publish", &HistoryScope::publish, py::arg("lease"), py::arg("cpu"),
              py::arg("flags"), py::arg("use_seq") = 0)
         .def("update", &HistoryScope::update, py::arg("lease"), py::arg("flags"), py::arg("use_seq") = 0)
+        .def("configure_features", &HistoryScope::configure_features,
+             py::arg("layers"), py::arg("kv_heads"), py::arg("q_heads"), py::arg("dim"))
+        .def("publish_features", [](HistoryScope &scope, const KvMemRepository::Lease &lease, py::buffer buffer) {
+            const auto shape = scope.feature_geometry();
+            if (!shape[0]) return false;
+            auto info = historical_feature_buffer(buffer, {shape[0], shape[1], shape[3]});
+            py::gil_scoped_release no_gil;
+            return scope.publish_features(lease, static_cast<const float *>(info.ptr), info.size);
+        }, py::arg("lease"), py::arg("buffer"))
+        .def("begin_question", &HistoryScope::begin_question, py::arg("expected_tokens"))
+        .def("append_question", [](HistoryScope &scope, uint64_t epoch, uint64_t offset,
+                                    py::buffer buffer, uint32_t token_count) {
+            const auto shape = scope.feature_geometry();
+            if (!shape[0]) return false;
+            auto info = historical_feature_buffer(buffer, {shape[0], token_count, shape[2], shape[3]});
+            py::gil_scoped_release no_gil;
+            return scope.append_question(epoch, offset, static_cast<const float *>(info.ptr), info.size, token_count);
+        }, py::arg("epoch"), py::arg("offset"), py::arg("buffer"), py::arg("token_count"))
+        .def("observe_query", [](HistoryScope &scope, uint64_t epoch, py::buffer buffer, uint32_t token_count) {
+            const auto shape = scope.feature_geometry();
+            if (!shape[0]) return false;
+            auto info = historical_feature_buffer(buffer, {shape[0], token_count, shape[2], shape[3]});
+            py::gil_scoped_release no_gil;
+            return scope.observe_query(epoch, static_cast<const float *>(info.ptr), info.size, token_count);
+        }, py::arg("epoch"), py::arg("buffer"), py::arg("token_count"))
+        .def("invalidate_question", &HistoryScope::invalidate_question)
+        .def_property_readonly("feature_stats", &HistoryScope::feature_stats)
         .def("used", &HistoryScope::used)
         .def("pause_policy", &HistoryScope::pause_policy)
         .def_property_readonly("policy_paused", &HistoryScope::policy_paused)
@@ -1020,6 +1093,7 @@ PYBIND11_MODULE(_native, m) {
             HSTAT(cpu_released); HSTAT(slots_released); HSTAT(pending_slots); HSTAT(pending_cpu_bytes);
             HSTAT(retries); HSTAT(stale); HSTAT(policy_failures); HSTAT(shadow_decisions);
             HSTAT(admission_attempts); HSTAT(admission_retries);
+            HSTAT(redundancy_retired); HSTAT(lossy_retired); HSTAT(rejected_ineligible); HSTAT(cancelled_decisions);
 #undef HSTAT
             return result;
         });
@@ -1238,6 +1312,14 @@ PYBIND11_MODULE(_native, m) {
         // original Python restore path until separately qualified and enabled.
         .def("restore_frame", &kvmem_restore::restore_frame,
              py::arg("prefix"), py::arg("records"))
+        .def("validate_frame", [](KvMemStore &store,
+                const std::shared_ptr<KvMemStore::RepositoryCheckpoint> &prefix,
+                const std::vector<kvmem_restore::FrameRecord> &records) {
+            // Preserve the single producer/GIL contract used by restore_frame.
+            // The returned read leases die here, after all checks; the caller
+            // continues holding the checkpoint and historical policy protection.
+            kvmem_restore::validate_frame(store, prefix, records);
+        }, py::arg("prefix"), py::arg("records"))
         .def("set_baked", &KvMemStore::set_block_baked_pos,
              py::arg("slot"), py::arg("position"), py::arg("generation"));
 

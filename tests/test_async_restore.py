@@ -379,7 +379,7 @@ def test_runner_holds_restore_state_and_allocation_until_completion_but_allows_p
     if mutation == 'scheduled_tokens':
         output = replace(output, num_scheduled_tokens={'restore': 1}, total_num_scheduled_tokens=1)
     elif mutation == 'block_table':
-        output = replace(output, block_table_updates={'restore': ([1, 2],)})
+        output.block_table_updates = {'restore': ([1, 2],)}
     elif mutation == 'cached_state':
         output = replace(output, scheduled_cached_reqs=SimpleNamespace(req_ids=['restore']))
     else:

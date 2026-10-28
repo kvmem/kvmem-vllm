@@ -179,18 +179,22 @@ static void external_storage_releases_only_on_native_worker() {
     auto fence = owner->completion();
     owner->add_bytes(32);
     check(arena.stats().external_bytes == 96, "external index bytes not charged");
+    auto second = arena.retain_external(&state, [](void *) {}, 16);
+    check(arena.stats().external_owners == 2 && arena.stats().external_bytes == 112,
+          "split native index ownership was not charged");
     bool full = false;
     try { arena.retain_external(&state, [](void *) {}, 1); }
     catch (const std::runtime_error &) { full = true; }
     check(full && state.released == 0, "capacity rejection consumed external ownership");
     check(!arena.close() && !fence->done.load(), "close ignored the live external owner");
     owner.reset();
+    second.reset();
     eventually([&] { return fence->done.load(std::memory_order_acquire); }, "external release stalled");
     eventually([&] { return arena.close(); }, "external close stalled");
     check(state.released == 1 && state.thread != std::hash<std::thread::id>{}(std::this_thread::get_id()),
           "external storage destroyed on frontend or more than once");
     check(arena.stats().external_owners == 0 && arena.stats().external_bytes == 0 &&
-          arena.stats().external_released_bytes == 96, "external storage accounting leaked");
+          arena.stats().external_released_bytes == 112, "external storage accounting leaked");
 }
 
 static void external_completion_grants_immediately_reusable_capacity() {

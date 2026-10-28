@@ -4,6 +4,7 @@ This is not a presumed mirror: only a witnessed complete overwrite can seed a
 row, subsequent native appends extend it, and GPU submission commits it. Reads
 before submission are forbidden. Unknown rows use the existing GPU read path.
 """
+from .native_pages import stored_expansions
 import torch
 
 
@@ -23,7 +24,7 @@ class RecurrentTableJournal:
                 key = (req_index, gid)
                 old = self.pending.get(key, self.committed.get(key))
                 start = int(self.tables.num_blocks.np[gid, req_index])
-                expansion = self.tables.blocks_per_kv_block[gid]
+                expansion = stored_expansions(self.tables)[gid]
                 incoming = tuple(b * expansion + i for b in new_block_ids[gid] for i in range(expansion))
                 if overwrite:
                     proposed[key] = (incoming, None)

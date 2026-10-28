@@ -5,6 +5,7 @@ feedback separately tracks sampled prefill mass and causal exposure. Private
 guided Q, public Query replay, MTP draft layers and rejected rows contribute
 neither. Both score histories are checkpointed with the exact historical prefix.
 """
+from .native_pages import kernel_table
 from dataclasses import dataclass, field, replace
 from contextlib import nullcontext
 import json
@@ -875,7 +876,7 @@ class ActionRuntime:
                 starts=tuple(int(x) for x in plan['starts']),
                 counts=tuple(int(x) for x in plan['counts']),
                 length=plan['local_begin'] + plan['count'],
-                tables=tuple(self.runner.block_tables.block_tables[group].gpu[native_index]
+                tables=tuple(kernel_table(self.runner, group, native_index)
                              for group in groups), masses=pending.masses))
         deferred = DeferredActionFrame(pool)
         slot = pool.freeze(tuple(layers), tuple(owners), packet_lease=deferred)
@@ -1166,7 +1167,7 @@ class ActionRuntime:
                     with layer.stage('score.layer_total', gpu=True) if layer else nullcontext():
                         if mass is None or native.mode == 'verify':
                             group=self.groups[module.attn.layer_name]
-                            table=self.runner.block_tables.block_tables[group].gpu[native_index]
+                            table=kernel_table(self.runner, group, native_index)
                             key,_=native_vllm_fp8_views(module.attn.kv_cache,module.num_kv_heads,module.head_dim)
                             with layer.stage('score.q_gather', gpu=True) if layer else nullcontext():
                                 query = captured[index].query.index_select(0,row_ids)

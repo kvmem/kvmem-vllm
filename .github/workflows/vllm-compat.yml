@@ -1,0 +1,42 @@
+name: vllm-compat
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 2 * * *'
+jobs:
+  upstream-interfaces:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        upstream: [v0.30.0, latest, main]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve the latest upstream release
+        id: upstream
+        env:
+          UPSTREAM: ${{ matrix.upstream }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ref="$UPSTREAM"
+          if [ "$ref" = latest ]; then
+            ref=$(gh api repos/vllm-project/vllm/releases/latest --jq .tag_name)
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ steps.upstream.outputs.ref }}
+          path: .upstream-vllm
+      - run: python -m pip install 'pytest>=8,<10'
+      - name: Check native interfaces and import adaptations without CUDA
+        env:
+          PYTHONPATH: src
+          KVMEM_TEST_VLLM_SOURCE: .upstream-vllm/vllm
+          KVMEM_TEST_REQUIRE_SYSTEMONE: ${{ matrix.upstream == 'v0.30.0' && '0' || '1' }}
+        run: python -m pytest tests/test_engine_api.py tests/test_logprob_source_identity.py -q

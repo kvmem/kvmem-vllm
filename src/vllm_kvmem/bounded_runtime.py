@@ -6,6 +6,7 @@ provisional query, while only selected requests change attention windows.
 DFlash2 preserves independent native draft sliding pages. Exact terminal
 checkpoints are handled separately; arbitrary session rollback is unsupported.
 """
+from .native_pages import stored_expansions
 from dataclasses import dataclass
 import json
 import os
@@ -48,6 +49,8 @@ def install_bounded_target(runner):
             runner.vllm_config.cache_config.mamba_cache_mode != "none" or
             os.getenv("KVMEM_WINDOW_METADATA") != "1" or not runner._kvmem_continuous):
         raise ValueError("Bounded execution requires synchronous APC-off archive/window execution")
+    # Private read transactions must bypass the public refresh-job wrapper.
+    runner._kvmem_private_forward = runner.model.forward
     if options.async_refresh:
         if getattr(runner.speculative_config, 'method', None) != 'mtp':
             raise ValueError('Asynchronous refresh currently qualifies native Qwen MTP')
@@ -97,7 +100,7 @@ def install_bounded_target(runner):
                 raise ValueError("Query command does not cover exactly the native attention groups")
             request_index = runner.req_states.req_id_to_index[request_id]
             for group_id, ticket in job.command.groups:
-                expansion = runner.block_tables.blocks_per_kv_block[group_id]
+                expansion = stored_expansions(runner.block_tables)[group_id]
                 expected_pages = [block * expansion + page for block in ticket.original_block_ids
                                   for page in range(expansion)]
                 count = int(runner.block_tables.num_blocks.np[group_id, request_index])
@@ -110,10 +113,8 @@ def install_bounded_target(runner):
                 raise ValueError("Refresh groups disagree on query extent")
             history, selected_cap, query = values.pop()
             authority = runtime.authorities[request_id]
-            graph = getattr(authority, 'block_graph', None)
-            if graph is not None:
-                from .prompt_spans import install_graph_metadata
-                install_graph_metadata(graph, job.command, validated_prefix=history)
+            from .prompt_spans import install_selection_metadata
+            install_selection_metadata(authority, job.command, validated_prefix=history)
             if getattr(authority,'query_history',None) is not None:
                 from .query_history import begin_round
                 begin_round(runner, authority, request_id)

@@ -66,7 +66,9 @@ def _snapshot(record, block_tokens):
         closed=False,bytes=int(value.get('bytes',0)))
 
 
-def _validate_record(record):
+def _validate_record(record, *, max_nodes=MAX_NODES):
+    if type(max_nodes) is not int or not 0 < max_nodes <= 32768:
+        raise ValueError('Invalid bounded replay node capacity')
     version = record.get('version')
     if type(version) is not int or version not in (1, 2):
         raise ValueError('Unsupported recorded graph input version')
@@ -90,7 +92,7 @@ def _validate_record(record):
         if type(alpha) not in (int, float) or not math.isfinite(alpha) or not 0 <= alpha <= 1:
             raise ValueError('Invalid recorded graph alpha')
     starts,counts,raw,eligible = (record[key] for key in ('starts','counts','raw_scores','eligible'))
-    if not 0 < len(starts) <= MAX_NODES or not len(starts) == len(counts) == len(raw) == len(eligible):
+    if not 0 < len(starts) <= max_nodes or not len(starts) == len(counts) == len(raw) == len(eligible):
         raise ValueError('Recorded graph index is empty, oversized or shape mismatched')
     cfg = KVMemConfig(**record['config'])
     block = cfg.block_tokens
@@ -131,7 +133,7 @@ def _validate_record(record):
         if record.get('seed_source') not in ('output', 'prefill', 'none'):
             raise ValueError('Invalid recorded pressure seed source')
         repository = record.get('repository_records', ())
-        if not 0 < len(repository) <= MAX_NODES or any(len(r) != 4 for r in repository):
+        if not 0 < len(repository) <= max_nodes or any(len(r) != 4 for r in repository):
             raise ValueError('Recorded pressure repository is missing or exceeds bounded replay capacity')
         if any(any(type(v) is not int for v in r) or not 0 <= r[0] < cfg.repository_blocks or
                r[1] <= 0 for r in repository) or len({r[0] for r in repository}) != len(repository):
@@ -166,7 +168,7 @@ def _validate_record(record):
     snapshot = _snapshot(record,block)
     if snapshot.accepted_through < boundary:
         raise ValueError('Recorded graph accepted watermark precedes its Query index')
-    if len(snapshot.rows) > MAX_NODES or (snapshot.partial is not None and len(snapshot.partial.targets)>MAX_NODES):
+    if len(snapshot.rows) > max_nodes or (snapshot.partial is not None and len(snapshot.partial.targets)>max_nodes):
         raise ValueError('Recorded graph exceeds bounded replay capacity')
     # Production capture is strictly causal. Future-directed operator examples
     # must remain isolated math fixtures, never presented as recorded attention.

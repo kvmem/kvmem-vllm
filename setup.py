@@ -14,12 +14,16 @@ setup(
                                 'native*.cuh', 'native_attention_sources.json']},
     ext_modules=[Pybind11Extension(
         "vllm_kvmem._native",
-        ["csrc/bindings.cpp", "csrc/historical_payload.cpp", "csrc/historical_manager.cpp"] + [
+        ["csrc/bindings.cpp", "csrc/historical_payload.cpp", "csrc/historical_manager.cpp",
+         "csrc/historical_redundancy.cpp"] + [
             f"third_party/qw3/src/{name}.cpp" for name in
             ("kvmem_store", "kvmem_repository", "kvmem_repository_gc", "kvmem_gc")
         ],
         include_dirs=["third_party/qw3/include", "third_party/qw3/src"],
-        depends=["csrc/private_record_pack.hpp", "csrc/graph_propagation.hpp"],
+        depends=["csrc/private_record_pack.hpp", "csrc/graph_propagation.hpp", "csrc/restore_frame.hpp",
+                 "csrc/query_key_fps_cpu.hpp", "csrc/historical_kv_policy.hpp",
+                 "csrc/historical_policy_factory.hpp", "csrc/historical_manager.hpp",
+                 "csrc/historical_redundancy.hpp"],
         cxx_std=17,
         extra_compile_args=["-pthread"],
         extra_link_args=["-pthread"],

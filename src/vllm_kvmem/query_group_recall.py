@@ -7,7 +7,8 @@ from bisect import bisect_right
 import math
 
 
-def build_halo_groups(records, scores, *, radius=1, message_spans=()):
+def build_halo_groups(records, scores, *, radius=1, message_spans=(),
+                      message_metadata_present=None):
     if type(radius) is not int or radius != 1 or len(records) != len(scores):
         raise ValueError('Expected one-block halo and one score per original record')
     starts = [r.history_begin for r in records]
@@ -19,6 +20,9 @@ def build_halo_groups(records, scores, *, radius=1, message_spans=()):
         raise ValueError('Invalid original logical halo records/scores')
     from .block_graph import _spans
     messages = _spans(message_spans)
+    if message_metadata_present is not None and type(message_metadata_present) is not bool:
+        raise ValueError('Message metadata presence must be boolean')
+    constrained = bool(messages) or bool(message_metadata_present)
     message_starts = [s for s, _, _ in messages]
     membership = []
     for start, count in zip(starts, counts):
@@ -27,7 +31,7 @@ def build_halo_groups(records, scores, *, radius=1, message_spans=()):
 
     def adjacent(left, right):
         return (starts[left]+counts[left] == starts[right] and
-            (not messages or membership[left] is not None and membership[left] == membership[right]))
+            (not constrained or membership[left] is not None and membership[left] == membership[right]))
 
     spans, members = [], []
     for i, start in enumerate(starts):

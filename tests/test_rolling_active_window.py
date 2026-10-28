@@ -126,7 +126,7 @@ def test_zero_replay_pressure_consumes_owner_checkpoint_without_private_forward(
     obj.runner._kvmem_sessions = NS(before_attention=before_attention)
     import numpy as np
     import torch
-    obj.runner.block_tables = NS(blocks_per_kv_block={0: 1}, num_blocks=NS(np=np.array([[2]])),
+    obj.runner.block_tables = NS(blocks_per_kv_block=[1], num_blocks=NS(np=np.array([[2]])),
         block_tables={0: NS(gpu=torch.tensor([[3, 4]]))})
     monkeypatch.setattr(ar, 'maintenance_batch', lambda *_: pytest.fail('Empty private forward'))
     submitted = []

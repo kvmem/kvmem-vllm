@@ -32,6 +32,10 @@ class CapturedPacket:
     download: object
     next_request: int = 0
     query_inputs: dict = field(default_factory=dict)
+    # CPU metadata only; Q bytes share this packet's bounded DMA and lifetime.
+    redundancy_queries: dict = field(default_factory=dict)
+    # Experiment-only public Q sidecar; acceptance owns branch/row validation.
+    pressure_queries: dict = field(default_factory=dict)
     action_inputs: dict = field(default_factory=dict)
     # Hand-built diagnostic packets are already scheduler-confirmed. Serving
     # submit explicitly sets this false until the next scheduler decision.
@@ -92,6 +96,41 @@ class CaptureRuntime(EarlyCaptureFeedback):
             raise ValueError("Invalid target V scales")
         self.row_elements = len(self.layers) * self.heads * self.dim
         self.raw_dtype = torch.float8_e4m3fn
+        gc = getattr(self.options, 'historical_gc', None)
+        self.redundancy_enabled = gc is not None and gc.policy == 'redundancy' and gc.mode != 'off'
+        self.redundancy_q_stats = dict(packets=0, bytes=0, overflow_packets=0)
+        q_slot_bytes = 0
+        if self.redundancy_enabled:
+            from .historical_gc import redundancy_layers, REDUNDANCY_Q_SLOT_BYTES
+            unsupported = ('offline_prefill_coalescing', 'prefill_physical_coalescing', 'prefill_publication_pipeline',
+                           'early_capture_slot_release', 'prefill_capture_ahead')
+            if any(getattr(self.options, key, False) for key in unsupported):
+                raise ValueError('Redundancy Q capture does not support coalescing or early/pipelined publication')
+            self.redundancy_layers = redundancy_layers(len(runner._kvmem_layers))
+            query_heads = {self.layers[i].num_heads for i in self.redundancy_layers}
+            if len(query_heads) != 1:
+                raise ValueError('Redundancy requires uniform target Query head geometry')
+            self.redundancy_query_heads = query_heads.pop()
+            q_slot_bytes = REDUNDANCY_Q_SLOT_BYTES
+        from .pressure_query_capture import configured_method, PRESSURE_QUERY_WINDOW
+        self.pressure_query_enabled = configured_method() is not None
+        self.pressure_query_stats = dict(packets=0, bytes=0, accepted_rows=0)
+        self.pressure_query_window = PRESSURE_QUERY_WINDOW
+        if self.pressure_query_enabled:
+            unsupported = ('offline_prefill_coalescing', 'prefill_physical_coalescing',
+                           'prefill_publication_pipeline', 'early_capture_slot_release',
+                           'prefill_capture_ahead')
+            active = [key for key in unsupported if getattr(self.options, key, False)]
+            if active:
+                raise ValueError('Recall pressure Q capture requires disabled options: ' + ', '.join(active))
+            self.pressure_query_layers = tuple(range(len(runner._kvmem_layers)))
+            query_heads = {self.layers[i].num_heads for i in self.pressure_query_layers}
+            if len(query_heads) != 1:
+                raise ValueError('Recall pressure Q capture requires uniform target Query geometry')
+            self.pressure_query_heads = query_heads.pop()
+            q_slot_bytes += (runner.vllm_config.scheduler_config.max_num_seqs *
+                PRESSURE_QUERY_WINDOW * len(self.pressure_query_layers) *
+                self.pressure_query_heads * self.dim * 2)
         record_bytes = self.row_elements * self.config.block_tokens * 2
         if self.options.cpu_history_coordination:
             from .cache_manifest import archive_bytes_per_token
@@ -133,7 +172,7 @@ class CaptureRuntime(EarlyCaptureFeedback):
             self.archive = make_shared_archive(self.options, output / 'continuous_archive', record_bytes,
                 max_reqs if getattr(runner, '_kvmem_bounded_target', False) else 1,
                 max_query_tokens=max_tokens)
-        self.downloads = PackedDownloads(max_tokens * self.row_elements * 2 + (4 * max_reqs + 1) * 8,
+        self.downloads = PackedDownloads(max_tokens * self.row_elements * 2 + (4 * max_reqs + 1) * 8 + q_slot_bytes,
                                          2, runner.device)
         split_flag = os.getenv('KVMEM_SPLIT_CAPTURE_DMA',
             '1' if getattr(self.options, 'split_capture_dma', True) else '0')
@@ -149,7 +188,7 @@ class CaptureRuntime(EarlyCaptureFeedback):
             # bulk capacity remains sufficient for an all-prefill batch.
             small_tokens = min(max_tokens, max_reqs * self.decode_capture_limit)
             self.decode_downloads = PackedDownloads(
-                small_tokens * self.row_elements * 2 + (4 * max_reqs + 1) * 8,
+                small_tokens * self.row_elements * 2 + (4 * max_reqs + 1) * 8 + q_slot_bytes,
                 2, runner.device)
         self.resident_records = max(16, (max_tokens + self.config.block_tokens - 1) // self.config.block_tokens + 1)
         self.authorities = {}
@@ -262,6 +301,8 @@ class CaptureRuntime(EarlyCaptureFeedback):
             raise
         packets = {}
         for lane, indices in groups:
+            redundancy_queries = {}
+            pressure_queries = {}
             if staged is not None:
                 payload, t, download = staged
             else:
@@ -269,6 +310,10 @@ class CaptureRuntime(EarlyCaptureFeedback):
                 if len(pool.pending) == len(pool.buffers):
                     self.ensure_download_slot((batch.req_ids[i] for i in indices), lane=lane)
                 payload, t = self._capture_payload(captured, batch, rejected, indices)
+                payload, redundancy_queries = self._capture_redundancy_queries(
+                    payload, captured, batch, indices)
+                payload, pressure_queries = self._capture_pressure_queries(
+                    payload, captured, batch, indices)
                 download = pool.download(payload)
                 if download is None:
                     raise RuntimeError("Capture queue failed to provide bounded staging after drain")
@@ -276,6 +321,8 @@ class CaptureRuntime(EarlyCaptureFeedback):
                 request_tokens=tuple(int(batch.query_start_loc_np[i+1]-batch.query_start_loc_np[i])
                                      for i in indices), lane=lane)
             packet.action_inputs = {rid: action_inputs[rid] for rid in packet.request_ids if rid in action_inputs}
+            packet.redundancy_queries = redundancy_queries
+            packet.pressure_queries = pressure_queries
             packet.action_validation = getattr(action_inputs, 'validation', None)
             packet.pipeline_requests = frozenset(pipeline.intersection(packet.request_ids))
             if logical_group is not None:
@@ -425,6 +472,157 @@ class CaptureRuntime(EarlyCaptureFeedback):
         values = (torch.stack(vals).float() / self.scales[:, None, None, None]).clamp(-448, 448).to(torch.float8_e4m3fn)
         return torch.cat((header.view(torch.uint8), raw.view(torch.uint8).flatten(),
                           values.view(torch.uint8).flatten())), t
+
+    def _capture_redundancy_queries(self, payload, captured, batch, indices):
+        """Append bounded BF16 public Q, keeping head order and original rows.
+
+        The CPU scheduler supplies only bounds; device starts locate actual MTP
+        rows. Extra adaptive/padding rows are excluded by the later accepted
+        prefix. No .item(), CPU readback or device synchronization occurs here.
+        """
+        if not getattr(self, 'redundancy_enabled', False):
+            return payload, {}
+        from .historical_gc import REDUNDANCY_Q_SLOT_BYTES
+        sessions = getattr(self.runner, '_kvmem_sessions', None)
+        descriptors, total = {}, 0
+        layers = self.redundancy_layers
+        row_bytes = len(layers)*self.redundancy_query_heads*self.dim*2
+        for i in indices:
+            rid = batch.req_ids[i]
+            binding = sessions.bindings.get(rid) if sessions is not None else None
+            if binding is None:
+                if rid not in getattr(sessions, 'release_requests', ()):
+                    raise ValueError('Redundancy public capture requires an owned session binding')
+                descriptors[rid] = dict(binding=None, count=0)
+                continue
+            # The native batch retains logical positions. WindowBatchAdapter
+            # translates only attention/RoPE positions, not this input batch.
+            history = int(batch.num_computed_tokens_np[i])
+            count = int(batch.query_start_loc_np[i+1]-batch.query_start_loc_np[i])
+            prefill, offset = bool(batch.is_prefilling_np[i]), 0
+            if prefill:
+                query = binding.query_span
+                if query is None:
+                    count = 0
+                else:
+                    offset = max(0, query[0]-history)
+                    count = max(0, min(history+count, query[1])-history-offset)
+            descriptors[rid] = dict(binding=binding, prefill=prefill, row_offset=offset,
+                count=count, byte_offset=payload.numel()+total, history_begin=history,
+                batch_index=i, overflow=False)
+            total += count*row_bytes
+        self.redundancy_q_stats['packets'] += 1
+        if total > REDUNDANCY_Q_SLOT_BYTES:
+            self.redundancy_q_stats['overflow_packets'] += 1
+            for row in descriptors.values():
+                row['overflow'] = bool(row['count'])
+                row['count'] = 0
+            return payload, descriptors
+        if not total:
+            return payload, descriptors
+        result = torch.empty(payload.numel()+total, dtype=torch.uint8, device=payload.device)
+        result[:payload.numel()].copy_(payload)
+        for row in descriptors.values():
+            count = row['count']
+            if not count:
+                continue
+            i, offset = row['batch_index'], row['row_offset']
+            positions = (batch.query_start_loc[i].to(torch.int64) + offset +
+                torch.arange(count, device=payload.device, dtype=torch.int64)).clamp(0, batch.num_tokens-1)
+            at = row['byte_offset']
+            target = result[at:at+count*row_bytes].view(torch.bfloat16).view(
+                len(layers), count, self.redundancy_query_heads, self.dim)
+            for out, layer in enumerate(layers):
+                target[out].copy_(captured[layer].query.index_select(0, positions))
+        self.redundancy_q_stats['bytes'] += total
+        return result, descriptors
+
+    def _accept_redundancy_queries(self, packet, request_id, history_begin, retained):
+        if not getattr(self, 'redundancy_enabled', False):
+            return
+        row = packet.redundancy_queries.pop(request_id, None)
+        if row is None:
+            raise RuntimeError('Accepted public owner lost its redundancy Q descriptor')
+        if row['binding'] is None:
+            return  # Narrow session-release allowlist; never creates a Q bank.
+        authority = self.authorities[request_id]
+        history = authority.redundancy_history
+        if row['prefill'] and row['history_begin'] != history_begin:
+            # Do not associate a stale scheduler extent with another prefix.
+            history.invalidate()
+            return
+        # Adaptive MTP's CPU computed count is an upper bound. Decode row zero
+        # uses the actual device start and its accepted-header history below.
+        values = None
+        if row['count']:
+            size = len(self.redundancy_layers)*row['count']*self.redundancy_query_heads*self.dim*2
+            at = row['byte_offset']
+            values = packet.download.payload[at:at+size].view(torch.bfloat16).view(
+                len(self.redundancy_layers), row['count'], self.redundancy_query_heads, self.dim)
+        history.accept(row['binding'], history_begin, retained, prefill=row['prefill'],
+            row_offset=row['row_offset'], rows=values, overflow=row['overflow'])
+
+    def _capture_pressure_queries(self, payload, captured, batch, indices):
+        """Copy original public Q into the same bounded accepted-prefix DMA.
+
+        Prefill keeps its last 128 scheduled rows. Decode keeps all possible
+        accepted rows, locating them by device starts under adaptive MTP. The
+        private replay/refresh suffix is never part of these public owners.
+        """
+        if not getattr(self, 'pressure_query_enabled', False):
+            return payload, {}
+        layers = self.pressure_query_layers
+        row_bytes = len(layers) * self.pressure_query_heads * self.dim * 2
+        descriptors, total = {}, 0
+        for i in indices:
+            rid = batch.req_ids[i]
+            prefill = bool(batch.is_prefilling_np[i])
+            scheduled = int(batch.query_start_loc_np[i+1]-batch.query_start_loc_np[i])
+            if scheduled <= 0 or not prefill and scheduled > self.pressure_query_window:
+                raise ValueError('Public pressure Query capture exceeds its bounded row geometry')
+            offset = max(0, scheduled-self.pressure_query_window) if prefill else 0
+            count = scheduled-offset
+            authority = self.authorities.get(rid)
+            window = getattr(authority, 'pressure_query_window', None)
+            descriptors[rid] = dict(prefill=prefill, row_offset=offset, count=count,
+                history_begin=int(batch.num_computed_tokens_np[i]), batch_index=i,
+                epoch=window.epoch if window is not None else 0,
+                byte_offset=payload.numel()+total)
+            total += count*row_bytes
+        result = torch.empty(payload.numel()+total, dtype=torch.uint8, device=payload.device)
+        result[:payload.numel()].copy_(payload)
+        for row in descriptors.values():
+            count, i = row['count'], row['batch_index']
+            positions = (batch.query_start_loc[i].to(torch.int64) + row['row_offset'] +
+                torch.arange(count, device=payload.device, dtype=torch.int64)).clamp(0, batch.num_tokens-1)
+            at = row['byte_offset']
+            target = result[at:at+count*row_bytes].view(torch.bfloat16).view(
+                len(layers), count, self.pressure_query_heads, self.dim)
+            for out, layer in enumerate(layers):
+                target[out].copy_(captured[layer].query.index_select(0, positions))
+        self.pressure_query_stats['packets'] += 1
+        self.pressure_query_stats['bytes'] += total
+        return result, descriptors
+
+    def _accept_pressure_queries(self, packet, request_id, history_begin, retained):
+        if not getattr(self, 'pressure_query_enabled', False):
+            return
+        row = packet.pressure_queries.pop(request_id, None)
+        if row is None:
+            raise RuntimeError('Accepted public owner lost its pressure Query descriptor')
+        if row['prefill'] and row['history_begin'] != history_begin:
+            raise RuntimeError('Prefill pressure Query capture differs from its accepted prefix')
+        authority = self.authorities[request_id]
+        window = getattr(authority, 'pressure_query_window', None)
+        if window is None:
+            raise RuntimeError('Recall experiment authority lacks its accepted pressure Query cache')
+        size = len(self.pressure_query_layers)*row['count']*self.pressure_query_heads*self.dim*2
+        at = row['byte_offset']
+        values = packet.download.payload[at:at+size].view(torch.bfloat16).view(
+            len(self.pressure_query_layers), row['count'], self.pressure_query_heads, self.dim)
+        window.accept(history_begin, retained, values, row_offset=row['row_offset'],
+            epoch=row['epoch'], prefill=row['prefill'])
+        self.pressure_query_stats['accepted_rows'] += max(0, min(row['count'], retained-row['row_offset']))
 
     def _download_pool(self, lane='bulk'):
         return self.decode_downloads if lane == 'decode' else self.downloads
@@ -966,8 +1164,11 @@ class CaptureRuntime(EarlyCaptureFeedback):
             sessions = getattr(self.runner,'_kvmem_sessions',None)
             graph_enabled = (getattr(self.options, 'graph_mode', 'off') != 'off' and
                              request_id not in getattr(sessions, 'release_requests', ()))
+            boundary_enabled = (getattr(self.options, 'historical_gc', None) is not None and
+                self.options.query_score_mode == 'key_fps_4' and not graph_enabled and
+                request_id not in getattr(sessions, 'release_requests', ()))
             binding = sessions.bindings.get(request_id) if sessions is not None else None
-            if graph_enabled and binding is None:
+            if (graph_enabled or boundary_enabled) and binding is None:
                 # Never allocate authority state for a graph with temporary
                 # request ownership; its logical identities would be unstable.
                 raise ValueError('Block graph requires an owned session binding')
@@ -982,7 +1183,40 @@ class CaptureRuntime(EarlyCaptureFeedback):
                 query_score_mode=getattr(self.options, 'query_score_mode', 'mean_k'),
                 query_window_cache_bytes=getattr(self.options, 'query_window_cache_bytes', 2147483648),
                 cpu_mean_index_simd=getattr(self.options, 'cpu_mean_index_simd', False),
+                cpu_release_sealed_sums=getattr(self.options, 'cpu_release_sealed_sums', False),
+                query_fps_cache_fp8=getattr(self.options, 'query_fps_cache_fp8', False),
                 mean_index_stats=self.cpu_mean_index_stats)
+            authority.graph_options = self.options
+            if (getattr(self, 'redundancy_enabled', False) and
+                    request_id not in getattr(sessions, 'release_requests', ())):
+                if binding is None or not getattr(authority.gc, 'native_history', False):
+                    authority.close()
+                    raise ValueError('Redundancy requires native history and an owned session binding')
+                from .historical_gc import RedundancyHistory
+                authority.redundancy_history = RedundancyHistory(authority.gc.scope,
+                    len(self.runner._kvmem_layers), self.heads, self.redundancy_query_heads, self.dim)
+            if boundary_enabled:
+                from .query_boundary_history import QueryBoundaryHistory
+                from .prompt_spans import install_selection_metadata
+                try:
+                    authority.query_boundaries = QueryBoundaryHistory(
+                        (binding.namespace, binding.generation),
+                        block_tokens=self.config.block_tokens,
+                        max_spans=self.config.repository_blocks*self.config.block_tokens)
+                    authority.graph_report_path = self.output/'block_graph.jsonl'
+                    install_selection_metadata(authority, binding, validated_prefix=0)
+                except BaseException:
+                    authority.close()
+                    raise
+            if getattr(self.options, 'query_fps_prebuild', False):
+                if getattr(self, 'fps_prebuild_manager', None) is None:
+                    from .query_fps_prebuild import FPSPrebuildManager
+                    device = (self.runner.device if self.options.query_fps_prebuild_device == 'cuda'
+                              else 'cpu')
+                    self.fps_prebuild_manager = FPSPrebuildManager(device=device,
+                        cpu_backend=getattr(self.options, 'query_fps_cpu_backend', 'torch'),
+                        cpu_workers=getattr(self.options, 'query_fps_cpu_workers', 8))
+                authority.fps_prebuild = self.fps_prebuild_manager.bind(authority)
             if getattr(self,'action',None) is not None:
                 from .action_attention import ActionHistory
                 authority.action_history = ActionHistory(self.options,self.action.ids)
@@ -1329,6 +1563,8 @@ class CaptureRuntime(EarlyCaptureFeedback):
                     started = time.perf_counter()
                     action.accept(packet, request_id, accepted)
                     self._publication_metric('owner_action_seconds', time.perf_counter()-started, lane=packet.lane)
+                self._accept_redundancy_queries(packet, request_id, history_begin, accepted)
+                self._accept_pressure_queries(packet, request_id, history_begin, accepted)
             except BaseException:
                 if prepared is not None:
                     prepared.abort()
@@ -1410,7 +1646,8 @@ class CaptureRuntime(EarlyCaptureFeedback):
         shape = (len(self.layers), t, self.heads, self.dim)
         raw_bytes = self.row_elements * t * self.raw_dtype.itemsize
         raw = data[header_bytes:header_bytes+raw_bytes].view(self.raw_dtype).reshape(shape)
-        values = data[header_bytes+raw_bytes:].reshape(shape)
+        value_end = header_bytes+raw_bytes+self.row_elements*t
+        values = data[header_bytes+raw_bytes:value_end].reshape(shape)
         entries, metadata = [], []
         for i in indices:
             request_id = packet.request_ids[i]
@@ -1421,6 +1658,18 @@ class CaptureRuntime(EarlyCaptureFeedback):
                 raise ValueError('Native sampling rejection count exceeds captured rows')
             terminal = self.terminal_prefixes.get(request_id)
             retained = accepted if terminal is None else max(0, min(accepted, terminal.history_end-histories[i]))
+            if getattr(self, 'pressure_query_enabled', False):
+                query = packet.pressure_queries.get(request_id)
+                window = getattr(authority, 'pressure_query_window', None)
+                if query is None or window is None:
+                    raise RuntimeError('Public capture lacks its accepted pressure Query metadata')
+                window.validate_epoch(query['epoch'])
+            if getattr(self, 'redundancy_enabled', False):
+                query = packet.redundancy_queries.get(request_id)
+                if query is None:
+                    raise RuntimeError('Public capture lacks its redundancy Q metadata')
+                if query['binding'] is not None:
+                    authority.redundancy_history.begin(query['binding'], histories[i])
             entries.append((authority, raw[:, begin:end], values[:, begin:end],
                 dict(history_begin=histories[i], local_rope_begin=local[i], accepted=retained)))
             metadata.append((i, retained, accepted-retained, end-begin, histories[i], rejected[i]))
@@ -1468,6 +1717,8 @@ class CaptureRuntime(EarlyCaptureFeedback):
     def _write_progress_locked(self):
         busy = self._busy_requests()
         progress = {"batches_submitted": self.batches,
+            'redundancy_q_capture': dict(getattr(self, 'redundancy_q_stats', {})),
+            'pressure_q_capture': dict(getattr(self, 'pressure_query_stats', {})),
             'batched_append_calls': getattr(self, 'batched_append_calls', 0),
             'batched_append_requests': getattr(self, 'batched_append_requests', 0),
             'full_graph_decode_calls': getattr(self.runner, '_kvmem_graph_decode_calls', 0),
@@ -1488,6 +1739,7 @@ class CaptureRuntime(EarlyCaptureFeedback):
                 if getattr(self.runner, '_kvmem_capture_opaque', None) is not None else {}),
             'cpu_mean_index_simd': getattr(self.options, 'cpu_mean_index_simd', False),
             'query_score_mode': getattr(self.options, 'query_score_mode', 'mean_k'),
+            'query_mean_quota_fraction': getattr(self.options, 'query_mean_quota_fraction', 0.),
             'query_window_cache_bytes': getattr(self.options, 'query_window_cache_bytes', 2147483648),
             'cpu_mean_index_stats': (self.cpu_mean_index_stats.snapshot()
                 if getattr(self, 'cpu_mean_index_stats', None) is not None else {}),
@@ -1610,6 +1862,8 @@ class CaptureRuntime(EarlyCaptureFeedback):
             terminal_report = {
                 'terminal_prefix': asdict(terminal) if terminal is not None else None,
                 'terminal_discarded_tokens': getattr(self, 'terminal_discarded', {}).pop(request_id, 0)}
+            if getattr(authority, 'fps_prebuild', None) is not None:
+                terminal_report['query_fps_prebuild'] = authority.fps_prebuild.snapshot()
             if getattr(self,'action',None) is not None:
                 terminal_report['action_attention'] = self.action.finish(request_id,authority)
             sessions = getattr(self.runner, '_kvmem_sessions', None)
@@ -1699,6 +1953,8 @@ class CaptureRuntime(EarlyCaptureFeedback):
     def shutdown_retirement(self):
         """Graceful engine shutdown drains detached work before releasing storage."""
         self.join_cpu_scatter()
+        if getattr(self, 'fps_prebuild_manager', None) is not None:
+            self.fps_prebuild_manager.close()
         executor=getattr(self,'_cpu_scatter_executor',None)
         if executor is not None:
             executor.shutdown(wait=True)

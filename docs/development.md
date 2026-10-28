@@ -1,7 +1,5 @@
 # Development
 
-> **Documentation preview.** This branch previews the README, GIF and guides. The runtime and benchmark-tooling updates described here are still pending publication. Installation commands and new profiles require that development runtime; they are not a validated installation path for this preview branch.
-
 Start with the CPU core when changing selection, storage, ownership or request
 planning. GPU behavior requires a separate model/runtime environment and should
 be validated only when the change touches that path.
@@ -78,7 +76,7 @@ PYTHONPATH=src python3.12 -m vllm_kvmem.engine_api \
 
 Omit `--systemone` when checking the historical baseline without that optional
 API. See [compatibility](vllm-compatibility.md) and the
-source-compatibility workflow (`.github/workflows/vllm-compat.yml`, pending the runtime update) for the
+[source-compatibility workflow](../.github/workflows/vllm-compat.yml) for the
 difference between structural checks, CPU regressions and model execution.
 
 Run the existing focused tests for the component you change. The full test tree

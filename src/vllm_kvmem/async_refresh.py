@@ -7,6 +7,7 @@ GDN state and graph capture buffers are never used concurrently by two forwards.
 Resident imports have one independent producer/stream and touch only their own
 leased recurrent state, so a cold assembly cannot block their DMA submission.
 """
+from .native_pages import stored_expansions
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 import json
@@ -74,6 +75,7 @@ class RefreshJob:
     steps: int = 0
     last_progress: float | None = None
     restore_context: object = None
+    restore_plan: object = None
     model_bytes: int = 0
     service_started: float = 0.0
     pressure_oracle: object = None
@@ -249,6 +251,28 @@ class AsyncRefresh:
                 self.cursor=(at+1)%len(jobs)
                 break
 
+    def poll_restore_completions(self):
+        """Reap completed imports at native post-forward, without new work.
+
+        Only the engine thread commits. No preparation, private forward,
+        future wait or CUDA synchronization is allowed here. Native metadata
+        then carries both the restored session notice and transaction ACK in
+        this batch, instead of waiting for the next pre-forward pump.
+        """
+        if not getattr(self.options, 'restore_handoff_fastpath', False):
+            return
+        capture = getattr(self.runner, '_kvmem_capture_runtime', None)
+        for job in tuple(self.jobs.values()):
+            if job.done or job.stage != 'restore_copy':
+                continue
+            if capture is not None and not capture.publication_ready((job.command.request_id,)):
+                continue
+            job.restore_completion_poll = 'post_forward'
+            try:
+                self.step(job)
+            finally:
+                job.restore_completion_poll = None
+
     def _forward(self, job, tokens, begin, *, next_token=False):
         from vllm.config.compilation import CUDAGraphMode
         from vllm.forward_context import set_forward_context
@@ -325,9 +349,11 @@ class AsyncRefresh:
 
     def _submit(self, job):
         self._restore_state(job)
-        ready=torch.cuda.Event();ready.record()
         rows = job.guided_rows or job.query_rows
         query=torch.cat(rows,dim=1) if rows else None
+        # The assembly stream consumes the concatenated tensor, so its fence
+        # must cover cat as well as the query forwards and state restoration.
+        ready=torch.cuda.Event();ready.record()
         if os.getenv('KVMEM_RETRIEVAL_DIAGNOSTICS') == '1':
             from .retrieval_diagnostics import capture_native
             capture_native(self, job, query)
@@ -337,6 +363,7 @@ class AsyncRefresh:
         self.emit(job,'assembly_queued')
 
     def _assemble(self,job,queries,ready):
+        from .recall_experiment import configured_method, select_for_event
         from .request_plan import RequestPlan, selection_config
         from .window_assembly import NativeWindowAssembler
         pressure_policy = getattr(self.options, 'pressure_policy', None) or (
@@ -344,7 +371,10 @@ class AsyncRefresh:
         cfg=selection_config(self.options.memory,job.command.groups[0][1].window_tokens,
             selection=job.command.selection,pressure_policy=pressure_policy)
         authority=job.authority
-        graph = getattr(authority, 'block_graph', None)
+        if configured_method():
+            authority.recall_selection_report = None
+        from .prompt_spans import selection_metadata
+        graph = selection_metadata(authority)
         if graph is not None and job.graph_binding is not None:
             graph.validate_binding(job.graph_binding)
         with torch.inference_mode(),torch.cuda.device(self.runner.device),torch.cuda.stream(self.stream):
@@ -362,7 +392,34 @@ class AsyncRefresh:
             mandatory=[r.handle for r in authority.records.values() if r.history_begin//cfg.block_tokens in required]
             if {authority.records[(h.slot,h.generation)].history_begin//cfg.block_tokens for h in mandatory}!=required:
                 raise ValueError('Missing required historical evidence')
-            if job.command.selection=='pressure':
+            if configured_method() and job.history > cfg.select_budget:
+                if job.guided_pressure or job.guided_rows:
+                    raise ValueError('Recall comparison prohibits guided selection')
+                if job.command.selection == 'pressure':
+                    stage = getattr(job.command, 'pressure_stage', '')
+                    if stage not in ('prefill', 'decode'):
+                        raise ValueError('Recall pressure event lacks its original execution stage')
+                    window = getattr(authority, 'pressure_query_window', None)
+                    if window is None:
+                        raise ValueError('Recall pressure requires captured accepted Q')
+                    recall_q, metadata = window.read(job.history)
+                    event_type = stage + '_pressure'
+                elif job.command.selection == 'query' and job.command.query_span is not None:
+                    recall_q = queries
+                    begin, end = job.command.query_span
+                    metadata = dict(query_source='public_query', query_begin=begin, query_end=end,
+                        query_processed_through=end, public_input_end=job.history+len(job.command.input_tokens))
+                    event_type = 'query'
+                else:
+                    raise ValueError('Recall experiment encountered an unqualified selection entry')
+                plan = select_for_event(authority, recall_q, mandatory, max_tokens=cfg.select_budget,
+                    event_type=event_type, query_metadata=metadata, request_id=job.command.request_id,
+                    output=self.runner._kvmem_probe_output)
+            elif configured_method():
+                # A fitting history needs no ranking. In particular, do not
+                # send a fitting pressure event through the legacy scorer.
+                plan = authority.memory.select({}, action=False, max_tokens=cfg.select_budget)
+            elif job.command.selection=='pressure':
                 if job.guided_pressure and queries is not None:
                     plan=authority.select_for_queries(queries,mandatory,max_tokens=cfg.select_budget,
                                                      guided_pressure=True)
@@ -430,7 +487,8 @@ class AsyncRefresh:
             if job.graph_binding is not None:
                 if self.runtime.authorities.get(job.command.request_id) is not authority:
                     raise RuntimeError('Asynchronous graph selection lost authority ownership')
-                authority.block_graph.validate_binding(job.graph_binding)
+                from .prompt_spans import selection_metadata
+                selection_metadata(authority).validate_binding(job.graph_binding)
             authority.memory.attach_completion(assembly)
             if not authority.memory.commit_selection():raise RuntimeError('Ready refresh did not commit')
             job.selected_tokens=plan.total_window_tokens
@@ -470,16 +528,16 @@ class AsyncRefresh:
             if authority is None or authority.history_end<job.history:return False
             if authority.history_end!=job.history:raise ValueError('Private Query crossed accepted history')
             job.authority=authority
-            graph = getattr(authority, 'block_graph', None)
+            from .prompt_spans import selection_metadata, install_selection_metadata
+            install_selection_metadata(authority, job.command, validated_prefix=job.history)
+            graph = selection_metadata(authority)
             if graph is not None:
-                from .prompt_spans import install_graph_metadata
-                install_graph_metadata(graph, job.command, validated_prefix=job.history)
                 job.graph_binding = graph.binding
             if getattr(authority,'query_history',None) is not None:
                 from .query_history import begin_round
                 begin_round(self.runner,authority,rid)
             for group,ticket in job.command.groups:
-                expansion=self.runner.block_tables.blocks_per_kv_block[group]
+                expansion=stored_expansions(self.runner.block_tables)[group]
                 expected=[b*expansion+p for b in ticket.original_block_ids for p in range(expansion)]
                 index=self.runner.req_states.req_id_to_index[rid]
                 count=int(self.runner.block_tables.num_blocks.np[group,index])
@@ -603,7 +661,15 @@ class AsyncRefresh:
             maintenance=self.maintenance.snapshot() if getattr(self, 'maintenance', None) is not None else None,
             **selection_report(authority, phase=job.command.selection))
         row.update(job.guided_diagnostics)
-        if job.command.selection == 'query':
+        from .recall_experiment import configured_method
+        if configured_method():
+            report = getattr(authority, 'recall_selection_report', None)
+            row['configured_method'] = configured_method()
+            row['reselection_required'] = report is not None
+            row['recall_experiment'] = dict(report) if report is not None else None
+            row['actual_method'] = report['actual_method'] if report is not None else None
+            row['query_scoring_method'] = report['actual_method'] if report is not None else 'no_eviction_required'
+        elif job.command.selection == 'query':
             row['query_scoring_method'] = ('content_token_softmax_page_sum' if
                 os.getenv('KVMEM_EXPERIMENTAL_QUERY_TOKEN_SCORES') == 'sum' else
                 getattr(authority, 'query_score_mode', 'mean_k'))
@@ -613,6 +679,10 @@ class AsyncRefresh:
                 row['query_key_fps_scoring'] = dict(authority.query_key_fps_stats)
                 if getattr(self.options, 'query_fps_halo_blocks', 0):
                     row['query_group_selection'] = dict(authority.query_group_selection)
+                if getattr(self.options, 'query_mean_quota_fraction', 0):
+                    row['query_quota_selection'] = dict(authority.query_quota_selection)
+                    if getattr(authority, 'query_quota_propagation', None) is not None:
+                        row['query_quota_propagation'] = authority.query_quota_propagation
         if job.guided_pressure:
             row.update(guided_scope='prefill-pressure', guided_context_end=job.guided_base,
                 public_input_replayed_for_guidance=0, guided_state_verified=job.guided_state_verified)
