@@ -1,167 +1,211 @@
-# Installation and experimental serving
+# Installation and first request
 
-The default direct agent deployment, selected by the user on 2026-10-20, is
-NVFP4 + FP8 target KV, DFlash2 k=7, FULL CUDA Graphs, GPU memory utilization .80,
-eight active requests, K36864/G16384, synchronous Query/pressure restoration and
-all four attention-maintenance optimizations. Its CPU-only history budget is
-100,000,000,000 bytes; prefix caching is disabled. The editable configuration is
-`examples/serve-default.json`; its paths refer to this host's external models.
+> **Documentation preview.** This branch previews the README, GIF and guides. The runtime and benchmark-tooling updates described here are still pending publication. Installation commands and new profiles require that development runtime; they are not a validated installation path for this preview branch.
+
+KVMem is an experimental vLLM integration for bounded GPU working contexts and
+CPU-backed KV history. Install it from source, supply model files separately, and
+launch it with an explicit configuration. Installing the package alone does not
+enable KVMem for an ordinary vLLM server.
+
+## Requirements
+
+| Component | Requirement or tested configuration |
+| --- | --- |
+| Host development | Linux, Python 3.12+, a C++17 compiler; CMake 3.20+ for the C++ tests |
+| GPU serving | A compatible NVIDIA GPU/driver and CUDA toolkit; the supplied installer resolves CUDA 13.0 packages |
+| Tested hardware | One RTX PRO 6000 Blackwell Server Edition, 96 GB VRAM; this is the measured setup, not a minimum-memory guarantee |
+| GPU runtime | vLLM with the required native interfaces; see the [compatibility matrix](support.md#runtime-and-hardware) |
+| Installer | `uv` available on `PATH` |
+| Weights and tokenizer | Local, matching model/config/tokenizer directories; model weights are not included |
+
+Model size, active context, concurrent requests, history pools and temporary
+buffers all affect GPU and host memory requirements. The 100 GB CPU history
+settings in some research profiles are unsuitable for small-memory machines and
+are not a whole-process RAM limit.
+
+## Install the GPU package
+
+Run these commands from your checkout:
 
 ```sh
-PYTHONPATH=src python -m vllm_kvmem serve --run-dir runs/agent-01 --dry-run
+bash scripts/setup_gpu.sh --latest
+.venv/bin/python -m vllm_kvmem serve --help
 ```
 
-Omit `--dry-run` to start the default. After installing the current package,
-`vllm-kvmem serve --run-dir runs/agent-01` uses the same bundled profile without
-depending on a checkout's examples directory or benchmark execution records.
-To change paths/settings, copy the example and pass `--config local-profile.json`.
-The default explicitly enables the experimental DFlash Query-planning option
-within its qualified synchronous/full-graph scope. Existing explicit MTP and
-other profiles retain their settings. See the [agent results and limits](dflash-agents-20261020.md):
-the larger pool improves this single window, with extra GPU memory and no
-completed full-task quality evaluation.
+The installer creates or updates the checkout's `.venv`, installs this package
+in editable mode together with vLLM and test dependencies, and runs the native
+interface check. `--latest` is also the script's default. It resolves the vLLM
+release available at installation time; successful dependency resolution is not
+an end-to-end GPU qualification for every future release.
 
-For the earlier original-MeanK integration, see
-[MeanK setup and implementation](meank-integration-20261013.md).
-The [elastic API](elastic-serving.md) also supports full-context native MTP
-offloading as a separate mode. See [measured results](meank-throughput-20261013.md)
-for their different performance and qualification boundaries.
-
-The installed development wheel for this update is retained locally at
-`artifacts/meank-20261013/dist/`. Reinstall when replacing another build of the
-same `0.1.0.dev1` version. The eager/DFlash2 profiles described below are the
-earlier direct-serving entry.
-
-This is a pinned development integration, not a production release. The actual
-model gates for the direct eager entry cover Qwen3.8-27B GGUF Q8_0 and NVIDIA ModelOpt NVFP4/FP8
-mixed safetensors, target FP8 e4m3, DFlash2 BF16
-draft/native sliding KV, TP=1, eager synchronous execution and text-only requests.
-The kernel/source adapters require vLLM 0.30.0. They do not rewrite installed vLLM
-files. Broader model, quantization, KV codec and engine versions need separate
-adapters and qualification; installing the package does not establish support.
-The [NVFP4 report](nvfp4-throughput-20261013.md) records the exact checkpoint,
-tested workloads, kernel choices and remaining output-quality limits.
-
-## Install from the independent repository
-
-On the qualified Linux/CUDA 13/RTX PRO 6000 Blackwell setup:
+To run the interface check again:
 
 ```sh
-cd ~
-git clone https://github.com/Di-Chai/kvmem-vllm.git
-cd kvmem-vllm
-bash scripts/setup_gpu.sh
+.venv/bin/python -m vllm_kvmem.engine_api --systemone
 ```
 
-The setup script installs the pinned Python/GPU requirements and the independent
-GGUF plugin revision recorded in `requirements-cu130.lock` and the script. It uses
-`uv` and expects CUDA at `/usr/local/cuda-13`. It builds for SM120. Model files are
-external and must be provided separately. A different CUDA/GPU environment needs
-its own dependency/build validation; the host-only core can be installed without
-torch or vLLM using `uv pip install '.[test]'` in a Python 3.12 environment.
+The `--systemone` check includes the optional native decision API. It requires a
+vLLM version that provides that API; ordinary serving on the historical 0.30.0
+baseline does not require SystemOne. The [compatibility guide](vllm-compatibility.md)
+distinguishes source checks, runtime adapters and actual-model validation.
 
-The entry point `vllm.general_plugins:kvmem` is registered by package installation.
-Discovery alone is passive. The explicit launcher supplies the pinned runner,
-metadata, bounded scheduler and public KV connector settings needed for serving.
+### Historical locked environment
 
-## Configure and inspect a launch
-
-Copy `examples/qwen-q8-fp8-dflash.json` to a local profile and replace the model
-paths. Relative paths resolve against the profile directory; `~` is expanded.
-The `tokenizer` and `hf_config_path` folders supply tokenizer/model configuration,
-not BF16 target weights. `mm_proj` is required by the pinned GGUF loader even though
-this profile enables language-only execution. The draft uses its BF16 safetensors.
-
-For NVFP4, use `examples/qwen-nvfp4-fp8-dflash-multi-user.json` and the
-[NVFP4 setup instructions](nvfp4-throughput-20261013.md). Set
-`model_format: "safetensors"`, point both `model` and `hf_config_path` at the
-same ModelOpt NVFP4 checkpoint, omit `mm_proj`, and disable `q8_tensorcore`.
-The optional `linear_backend_per_quant` mapping selects compatible native
-vLLM kernels; availability depends on the installed GPU libraries. The launcher
-preserves checkpoint quantization metadata and does not force a uniform FP4
-scheme onto mixed-precision weights.
+To reproduce the older dependency set instead of resolving a new runtime:
 
 ```sh
-cp examples/qwen-q8-fp8-dflash.json local-profile.json
-# Edit the five model/config paths in local-profile.json.
+bash scripts/setup_gpu.sh --locked
+```
+
+This uses `requirements-cu130.lock` with vLLM 0.30.0, then builds the separately
+pinned GGUF plugin. This branch of the script expects CUDA at
+`/usr/local/cuda-13` and targets SM120. It is intended for that historical
+environment; it is not the portable installation path for other GPU families.
+It does not run the SystemOne check because that API is absent in the baseline.
+
+## Download the model and tokenizer
+
+The current actual-model measurements use Qwen hybrid GDN models. The commands
+below select the measured
+[NVIDIA Qwen3.8-27B NVFP4 revision](https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4/tree/482ca0f3832238542f8f5295dde86b5f22711d80)
+and its matching
+[Qwen tokenizer revision](https://huggingface.co/Qwen/Qwen3.8-27B/tree/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0).
+The target uses ModelOpt mixed NVFP4/FP8 weights. Model licenses and hardware
+requirements apply separately from this repository's license.
+
+Choose local directories outside your source checkout:
+
+```sh
+export MODEL_DIR="$HOME/models/Qwen3.8-27B-NVFP4"
+export TOKENIZER_DIR="$HOME/models/Qwen3.8-27B-tokenizer"
+
+.venv/bin/hf download nvidia/Qwen3.8-27B-NVFP4 \
+  --revision 482ca0f3832238542f8f5295dde86b5f22711d80 \
+  --local-dir "$MODEL_DIR"
+
+.venv/bin/hf download Qwen/Qwen3.8-27B \
+  tokenizer.json tokenizer_config.json chat_template.jinja vocab.json merges.txt config.json \
+  --revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
+  --local-dir "$TOKENIZER_DIR"
+```
+
+Only tokenizer/configuration files are downloaded from the second repository;
+BF16 target weights are not needed for this NVFP4 setup. If you already have
+these files, set `MODEL_DIR` and `TOKENIZER_DIR` to their existing locations.
+Accepting a safetensors directory does not imply support for every model
+architecture; consult the [support guide](support.md) for other configurations.
+
+## Create an explicit configuration
+
+Start with the [native-MTP example](../examples/serve-qwen-mtp.json). MTP uses the
+target checkpoint's own prediction head, so this example does not require a
+separately downloaded DFlash model. With the environment variables above set:
+
+```sh
+.venv/bin/python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+profile = json.loads(Path("examples/serve-qwen-mtp.json").read_text())
+profile["model"] = str(Path(os.environ["MODEL_DIR"]).expanduser().resolve())
+profile["hf_config_path"] = profile["model"]
+profile["tokenizer"] = str(Path(os.environ["TOKENIZER_DIR"]).expanduser().resolve())
+Path("local-profile.json").write_text(json.dumps(profile, indent=2) + "\n")
+PY
+```
+
+`local-profile.json` is ignored by Git. For safetensors, `hf_config_path` must
+match `model` so the native loader sees the checkpoint's own quantization
+metadata. Relative paths in a profile resolve against that profile's directory,
+and `~` is expanded.
+
+The starter uses the actual-model-tested eager MTP1 configuration: two concurrent
+sequences, a 16K logical context limit, K=2,048 and G=2,048. It is a small-window
+setup for verifying the service, not the eight-request, 256K compiled-graph
+throughput profile. See [serving configuration](serving.md) for the larger
+profile and explicit token-ID request planning.
+
+### Inspect before starting
+
+```sh
 .venv/bin/python -m vllm_kvmem serve \
-  --config local-profile.json --run-dir runs/session-01 --dry-run
+  --config local-profile.json \
+  --run-dir runs/first-server \
+  --dry-run
 ```
 
-The dry run validates local paths and options, prints the exact native argument
-vector and environment, and neither imports torch/vLLM nor creates the run
-directory. It does not allocate GPU memory or prove that the model fits. The
-example preserves K131072/G65536 and B128, uses a 36-GiB shared read cache and a
-four-entry/1-GiB CPU prompt-checkpoint pool. These are separate limits, not a total
-host-RAM quota. NVMe arena geometry includes both active and retained authorities;
-physical disk reservation and shared I/O-byte controls are opt-in public connector
-options. The example leaves repository GC and physical reservation disabled because
-their serving GPU qualification is still pending.
+This validates local paths and options and prints the resolved native command
+and environment. It does not import torch/vLLM, allocate GPU memory or create
+the run directory. A successful dry run verifies configuration, not model
+loading, available memory or numerical behavior.
 
-`q8_tensorcore` defaults to false. Setting it to true enables the experimental
-SM120 batched Q8 integer Tensor Core adapter with the measured speed gains and
-remaining quality limitations described in `support.md`. It keeps target Q8_0
-weights and FP8 KV; it does change floating-point reduction order.
+`serve` without `--config` still selects the bundled DFlash2 k=7 deployment in
+`default_profile.py`. That profile uses the original machine's absolute paths,
+GPU budget 0.80 and large CPU history pools. Use an explicit local profile on a
+new machine. The [historical DFlash guide](dflash-agents-20261020.md) records why
+that deployment was chosen.
 
-## Start and use the API
+## Start the service
 
 ```sh
 .venv/bin/python -m vllm_kvmem serve \
-  --config local-profile.json --run-dir runs/session-01
+  --config local-profile.json \
+  --run-dir runs/first-server
 ```
 
-After reinstalling the updated package, the console command `vllm-kvmem serve`
-is equivalent. vLLM owns the API and process lifecycle. The new run directory must
-not already exist, so another server's archive or readiness marker cannot be
-reused accidentally. `launch.json` records the resolved profile and argument vector;
-`capture/` contains the runtime lifecycle/authority evidence and NVMe arena.
+The installed `.venv/bin/vllm-kvmem serve` command is equivalent. Choose a new run
+directory for each launch: an existing directory is rejected to prevent reuse
+of stale server state. The directory records `launch.json` and the server's
+`capture/` diagnostics. The model and engine may compile GPU kernels during the
+first startup.
 
-The profile defaults to `127.0.0.1:8000` and model name `kvmem`. A normal OpenAI
-completion/chat request works without a session. To request exact-prefix reuse,
-provide a stable `session_id` body field or native `X-Session-ID` header:
+In another terminal, wait for readiness and send a request:
 
 ```sh
-curl http://127.0.0.1:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' -H 'X-Session-ID: task-01' \
-  -d '{"model":"kvmem","messages":[{"role":"user","content":"Explain this repository."}],"max_tokens":128}'
+curl --fail http://127.0.0.1:8000/health
+
+curl --fail http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"kvmem","messages":[{"role":"user","content":"Explain what a KV cache stores."}],"max_tokens":128,"chat_template_kwargs":{"enable_thinking":false}}'
 ```
 
-A short request may not create a checkpoint. Reuse requires an exact matching
-token prefix and a sealed non-final prefill snapshot; a session header by itself
-does not prove a cache hit. Continue sending the full intended conversation.
-Do not remove old messages or alter task input to manufacture reuse. The serving
-gateway must supply an appropriate `cache_salt`/session scope for its clients;
-these fields are namespace identifiers, not authentication.
+For streaming, add `"stream":true` to the JSON body and `-N` to `curl`. The
+profile's `host`, `port` and `served_model_name` determine the URL and model
+field. The example binds to loopback. This short request verifies ordinary API
+use; it does not demonstrate long-history retrieval or a session cache hit.
 
-The profile installs `vllm_kvmem.http_sessions.validate_prompt_session` through
-vLLM's public `--middleware` option. Session IDs and salts used for reuse are
-limited to 1024 characters and rejected with HTTP 400 before scheduler dispatch.
-Body/header/`vllm_xargs` precedence matches the pinned engine. Native ASGI host
-tests cover rejection, concurrent valid requests and unchanged streaming bodies;
-the current real-model entry checks are recorded in the
-[2026-10-13 report](status-20261013.md). Direct custom launches must include the
-middleware explicitly to obtain the same validation.
+## Continue a conversation
 
-For per-user authentication, bounded admission and server-owned session namespaces,
-use [multi-user serving](multi-user-serving.md). That entry installs its own
-validation middleware in place of this single-user guard.
+When the profile enables sessions, provide a stable `session_id` in the request
+body or `X-Session-ID` header, and keep sending the complete intended conversation:
 
-Serving mode distinguishes native warmup (no connector metadata) from the first
-real scheduler message and enables accepted capture before that first forward.
-It omits the one-off diagnostic tensor snapshot used by the original probe tools.
-There is no API-ready/externally-created-marker race. The public profile entry now
-has actual-model single-user startup and authenticated multi-user validation from
-2026-10-13, including short and 134K exact session continuation. See the
-[current qualification report](status-20261013.md) for the tested configurations,
-concurrent load results, and remaining quality and capacity limits.
+```sh
+curl --fail http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'X-Session-ID: example-conversation' \
+  -d '{"model":"kvmem","messages":[{"role":"user","content":"Explain CPU KV offloading."}],"max_tokens":128,"chat_template_kwargs":{"enable_thinking":false}}'
+```
 
-The public entry also passes an isolated source-package check recorded in
-`artifacts/source-build-serving_01`: rebuild the native wheel from an extracted
-sdist with no extension binary, install into a fresh environment without torch or
-vLLM, and run 73 host checks (2 skipped). Both console help and a real-path console
-dry run pass without creating a runtime directory. The source archive includes
-the example profile; the installed wheel contains the console entry and all three
-licenses. This verifies host installation, not GPU startup or performance.
+A session selects candidate retained state; exact token-prefix checks determine
+reuse. A short request or a changed prefix may have no reusable checkpoint.
+Session IDs and `cache_salt` identify namespaces, not authenticated users. See
+[current serving behavior](serving.md), [historical session checks](prompt-sessions.md),
+and [runtime boundaries](support.md#sessions-and-data-lifetime) before integrating
+a shared service.
 
-For measured support and test commands, see `prompt-sessions.md`, `support.md` and
-`qualification-20260928.md`. Current agent evaluation remains incomplete.
+## Troubleshooting
+
+| Symptom | First check |
+| --- | --- |
+| `Missing local model`, tokenizer or draft path | Edit the explicit profile; the bundled default has machine-specific paths |
+| Safetensors config mismatch | Set `hf_config_path` to the same directory as `model`; retain the original model configuration |
+| Run directory already exists | Choose a new run directory for this launch |
+| Native interface or layout check fails | Record the vLLM version and read [compatibility](vllm-compatibility.md); this is different from a missing model file |
+| GPU OOM or host-memory pressure | Reduce concurrency and the relevant pools; monitor actual GPU and host usage, not just the configured budget fraction |
+| First startup appears slow | Check compilation progress and ensure the CUDA toolkit and compiler are available |
+| Session has no cache hit | Verify the full token prefix, session namespace and completed checkpoint publication |
+
+For CPU-only installation and contribution checks, use the
+[development guide](development.md). The superseded installation record is
+preserved in the [archive](archive/installation-before-public-guide.md).

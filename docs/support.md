@@ -1,71 +1,105 @@
-# Qualification boundaries
+# Support and compatibility
 
-The new [original MeanK integration](meank-integration-20261013.md) adds NVFP4,
-native FULL decode graphs and terminal accepted-history checkpoints. It has
-separate component, real restoration and throughput evidence; the older eager
-measurements below remain historical. MeanK currently uses DFlash2, whereas the
-native MTP offload entry keeps complete KV. Cold-prefill token equality, executed
-agent-task quality and sustained mixed-tool SLO acceptance remain incomplete.
+> **Documentation preview.** This branch previews the README, GIF and guides. The runtime and benchmark-tooling updates described here are still pending publication. Installation commands and new profiles require that development runtime; they are not a validated installation path for this preview branch.
 
-The native NVFP4/FP8/MTP elastic-turn entry has separate
-[2026-10-13 CPU-restore and selected-context evidence](elastic-throughput-20261013.md).
-It uses upstream graph execution and KV offloading; it does not qualify the
-older eager/MeanK compressed-runtime boundaries documented below.
+KVMem is an experimental integration. The package exposes checked adapters for
+specific vLLM interfaces and model-state layouts; the installation requirement
+`vllm>=0.30.0` is not a promise that every version, model or hardware combination
+has been tested.
 
-## Correction: cold-block residency, 2026-09-29
+## Runtime and hardware
 
-A repeated reselection defect was reproduced after the earlier model runs:
-a dropped block retained GPU residency. If its old dense position was reused by
-another block, selecting it again at that position could incorrectly skip the
-archive reload. `RequestMemory.commit_selection` now changes working residency
-only after the assembly completion fence, preserving generation-qualified leases.
-
-Earlier compressed model timings and lifecycle observations remain historical
-measurements, but **do not establish compressed numerical correctness or accepted
-performance**. The metadata classification correction described elsewhere did not
-fix this separate issue. A corrected long-C4 lifecycle run now passes; matched
-performance and executed task-quality acceptance remain pending. The optimized
-long-C4 run `engine_long_c4_dflash_direct_cadence_01` was deliberately interrupted
-before compression, and is not a completed benchmark.
-
-The regression cycles different blocks through the same dense position and back.
-Ordinary, packed and direct-pinned GPU assembly match independent native FP8 K/V
-bytes. The complete updated suite passes **154 tests**, plus **5 original C++
-CTest tests**. Evidence: `artifacts/components_cold_residency_fixed.xml` and
-`artifacts/cold_reselection_regression.xml`. This qualifies the component fix;
-it does not replace native model, task-quality or throughput qualification.
-
-This is a development plugin, not a production support declaration. Installation
-and discovery alone leave the serving engine unchanged. Engine hooks require
-explicit flags and pinned source hashes; no installed vLLM files are rewritten.
-
-| Area | Current evidence | Still required |
+| Area | Recorded coverage | Boundary |
 | --- | --- | --- |
-| Engine | vLLM 0.30.0 V2 runner; native scheduling, batching, attention and sampling | Additional engine versions and graph modes |
-| Target weights | Qwen3.8-27B GGUF Q8_0 through pinned vllm-gguf-plugin | Other quantizations and model families |
-| Target KV | Native FP8 e4m3 layouts; raw pre-RoPE K authority and FP8 V; byte-checked assembly | Other native KV codecs and scale layouts |
-| Hybrid state | Qwen3.5-family GDN native state identity restore/replay; active-prefill HTTP cancellation releases all resources | Compressed-refresh cancellation and persistent-session state continuation |
-| DFlash2 | Corrected long compressed C4 lifecycle; short native exact terminal archive clipping and checksums pass | Matched performance, decode-time refresh/cancellation, recurrent terminal rollback in serving and persistent sessions |
-| Bounded target | Scheduled semantic prefill/selection, actual-length acknowledgment, page trimming implemented | Corrected real long C1/C4 pass; pressure tests and performance acceptance remain |
-| GPU admission | Future growth reservations tested with native full-attention/Mamba allocator | Attached to bounded scheduler; native GPU pressure tests remain |
-| Storage | Immutable archive, generation-qualified leases, packed/direct transfers; async retirement passes native long C4; CPU tests cover serving GC, strict NVMe reservation and shared I/O byte admission | GPU GC/quota/backpressure qualification; whole-process host-byte admission and fair I/O scheduling |
-| Prompt sessions | Short and frozen 134K exact-token restore; four active sessions, isolated exact continuation, cancellation/recovery, scope isolation and idle reclamation pass actual GPU/HTTP gates | Concurrent numerical quality, growing multi-turn agent histories, expiry and agent performance; see `prompt-sessions.md` |
-| Measurements | Exact frozen-token inputs, SSE arrival/usage validation, C1/C4 aggregation | Native SSE C1/short-C4 passes; matched warm repeats and executed agent-task success remain |
+| Host core | Linux, Python 3.12, C++17; CPU-only Python and C++ tests | CUDA and vLLM are not required for the host-core build |
+| vLLM 0.30.0 | Actual-model serving, MTP/DFlash experiments and the recorded long-history throughput run | Individual profiles and experiments have separate evidence |
+| vLLM 0.32.0 | Actual-model eager MTP and native SystemOne checks | These checks do not establish compiled-graph parity for every older benchmark |
+| Other vLLM releases / upstream main | Interface and source checks where supported | Source CI is not GPU model qualification; unsupported structures fail explicitly |
+| GPU setup | One NVIDIA RTX PRO 6000 Blackwell Server Edition, CUDA 13.0 environment | Multi-GPU, tensor-parallel and other GPU families are not established by these runs |
+| Model family | Tested Qwen hybrid GDN 27B checkpoints | A safetensors loader accepting a configuration does not qualify another architecture |
+| Weights | Tested ModelOpt mixed NVFP4/FP8 safetensors and historical GGUF Q8_0 | The GGUF path has additional pinned-plugin and kernel requirements |
+| Attention KV | Native FP8 E4M3 layouts; immutable raw K/V history and model-state restoration | Other KV codecs, scales or recurrent layouts need separate adapters and validation |
+| Requests | Text completion/chat and supported native decision requests | Multimodal inputs and arbitrary model extensions are not qualified by text tests |
 
-BF16 is used for activations and the draft model; it does not change the Q8_0
-target weight path. Initial integration requires one GPU/rank, eager execution,
-text-only input, prefix caching disabled and Mamba cache mode `none`. Bounded
-refresh has corrected target-only and experimental DFlash2 long-C4 lifecycle evidence.
-`--bounded-dflash` uses synchronous DFlash2 with native BF16 sliding draft KV;
-Matched DFlash performance and decode-time refresh qualification are still pending. Public connector
-metadata carries commands/acknowledgments; isolated runner/scheduler adapters
-supply the missing historical selection, replay and bounded-allocation semantics.
+See [vLLM compatibility](vllm-compatibility.md) for exact checks, source revisions,
+SystemOne restrictions and actual-model results. Neither plugin registration nor
+a passing interface check establishes that a particular model fits in memory.
 
-An optional `--q8-tensorcore` qualification flag experiments with a source-pinned
-GGUF batch linear adapter on SM120, for BF16 input batches of at least 16 rows.
-It preserves original Q8_0 bytes/FP16 scales and the native fast-math Q8_1
-activation quantization, using grouped integer Tensor Core dots and FP32 scaling.
-It changes floating-point reduction order. It is disabled by default and has not
-yet passed task-quality equivalence or repeated matched performance acceptance;
-single short and long native comparisons are recorded in the qualification log. This does not
-add BF16 target weights or change target FP8 KV.
+## What KVMem changes
+
+vLLM continues to own native execution, scheduling, attention kernels and
+sampling. KVMem retains historical state outside the active GPU window and
+selects context to restore when needed. Selected-context execution can change
+model outputs relative to full-context attention. Storage/restore byte checks,
+throughput measurements and end-task quality are different kinds of evidence.
+
+The direct `serve` path and the separate [elastic entry](elastic-serving.md)
+have different APIs and configurations. Do not copy an `elastic-serve` profile
+into the direct launcher or assume their measurements describe the same path.
+
+The currently bundled DFlash default, the public MTP starter example and the
+performance-demonstration profile also differ. Use explicit configurations and
+report the configuration actually measured.
+
+## Context and memory budgets
+
+- The logical context limit, selected-context budget `K` and generation workspace
+  `G` are separate limits. Setting a 256K context limit does not reserve space for
+  eight complete 256K GPU-resident histories.
+- Rolling-window profiles can generate across multiple workspace windows when
+  their required planning, session and restoration options are enabled. Other
+  profiles retain their per-window output limits; see
+  [rolling long output](rolling-long-output.md).
+- `gpu_memory_utilization` controls an engine budget. Actual device memory also
+  reflects model weights, native caches, runtime allocations and KVMem buffers.
+  Measure physical usage and leave runtime headroom.
+- CPU history, checkpoint, transfer and index pools consume separate memory.
+  One configured cache size is not a process-wide RAM cap.
+- Deleting historical GC intentionally removes old history under its policy.
+  It is an explicit behavior change, not lossless offloading; see
+  [historical GC](background-history-gc.md).
+
+The long-history demonstration measures eight fixed recorded continuations with
+equal output quotas. Its generation throughput includes waits during that
+continuation batch and excludes prior history preparation. It does not establish
+maximum sustainable arrival QPS, identical model answers or completed DeepSWE
+task success. Use the workload and timing definition attached to each result.
+
+## Sessions and data lifetime
+
+Sessions are scoped to the worker/model load. A session namespace and an exact
+prefix match permit reuse; they do not authenticate a caller. Requests using the
+same active session serialize while unrelated sessions remain eligible.
+
+CPU-backed history and checkpoints are not a durable conversation database.
+Do not assume recovery across process restarts, worker changes or distributed
+replicas. The optional NVMe storage machinery has its own ownership and lifecycle
+contracts; enabling a disk backend does not add a distributed session service.
+
+The direct API binds to loopback in the starter profile. Shared authenticated
+serving uses a gateway or the separately documented
+[multi-user entry](multi-user-serving.md), whose supported options differ from
+the direct path. Provide the full conversation when continuing a session, and
+observe actual hit/miss and cleanup evidence rather than inferring reuse from a
+session ID alone.
+
+## Reporting an issue
+
+Include the repository revision, Python/vLLM/CUDA versions, GPU model, the
+explicit profile with local paths and credentials removed, the failing command,
+and the relevant error or capture records. State whether the failure occurs
+during dry run, model startup, first request, continuation, or shutdown. A small
+reproducible input is more useful than an unrelated large benchmark directory.
+
+For a performance report, include actual input/output token counts, concurrency,
+memory measurements, timing boundaries and the native comparison configuration.
+Report correctness or task-quality checks separately from speed.
+
+## Historical corrections
+
+The 2026-09-29 cold-block-residency correction invalidated earlier compressed
+numerical-correctness/performance acceptance claims. That correction and the
+original support matrix remain in the
+[historical support record](archive/support-before-public-guide.md). Dated
+reports describe their own source and environment; they do not override the
+current compatibility guide or qualify a different configuration.

@@ -3,7 +3,8 @@ recursive-include src/vllm_kvmem native*.cuh native_attention_sources.json
 recursive-include third_party/qw3 *.hpp *.cpp LICENSE *.json
 recursive-include third_party/vllm *.py LICENSE *.json
 include CMakeLists.txt requirements-cu130.lock
-recursive-include docs *.md
+recursive-include docs *.md *.svg *.json
+include CONTRIBUTING.md
 recursive-include examples *.json
 recursive-include scripts *.py *.sh
 recursive-include benchmarks/deepswe *.py *.json LICENSE *.md

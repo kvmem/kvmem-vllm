@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="540" viewBox="0 0 1200 540" role="img" aria-labelledby="title desc">
+<title id="title">DeepSWE long-history generation throughput: 3.70 times native vLLM</title>
+<desc id="desc">One batch of eight real histories, approximately 229 thousand input tokens per request, with a 256 thousand token context limit. Each request generates 4096 tokens, or 32768 total per backend. Native vLLM measures 126.2 output tokens per second; KVMem measures 466.9. Actual GPU memory is 94.1 and 93.5 GiB. History preparation is excluded; waits and recomputation are included.</desc>
+<rect width="1200" height="540" rx="18" fill="#0b111b"/>
+<g font-family="DejaVu Sans, Arial, sans-serif">
+<text x="40" y="60" fill="#e6eef6" font-size="30" font-weight="bold">Long-history generation throughput</text>
+<text x="40" y="98" fill="#9cb0c5" font-size="18">8 concurrent requests · 4,096 output tokens each · 32,768 total</text>
+<rect x="961" y="25" width="199" height="95" rx="14" fill="#12352e" stroke="#2a705c"/>
+<text x="1060" y="78" text-anchor="middle" fill="#60e3bd" font-size="43" font-weight="bold">3.70×</text>
+<text x="1060" y="103" text-anchor="middle" fill="#60e3bd" font-size="12">GENERATION THROUGHPUT</text>
+<text x="40" y="202" fill="#ffbc6e" font-size="23">Native vLLM</text>
+<rect x="300" y="162" width="203.12" height="62" rx="7" fill="#ffbc6e"/>
+<text x="519.12" y="202" fill="#e6eef6" font-size="23">126.2 tok/s</text>
+<text x="40" y="298" fill="#60e3bd" font-size="23">vLLM + KVMem</text>
+<rect x="300" y="258" width="751.63" height="62" rx="7" fill="#60e3bd"/>
+<text x="1067.63" y="298" fill="#e6eef6" font-size="21">466.9 tok/s</text>
+<line x1="300" y1="349" x2="1105" y2="349" stroke="#304255"/>
+<line x1="300.0" y1="349" x2="300.0" y2="355" stroke="#53677c"/><text x="300.0" y="379" text-anchor="middle" fill="#9cb0c5" font-size="14">0</text>
+<line x1="461.0" y1="349" x2="461.0" y2="355" stroke="#53677c"/><text x="461.0" y="379" text-anchor="middle" fill="#9cb0c5" font-size="14">100</text>
+<line x1="622.0" y1="349" x2="622.0" y2="355" stroke="#53677c"/><text x="622.0" y="379" text-anchor="middle" fill="#9cb0c5" font-size="14">200</text>
+<line x1="783.0" y1="349" x2="783.0" y2="355" stroke="#53677c"/><text x="783.0" y="379" text-anchor="middle" fill="#9cb0c5" font-size="14">300</text>
+<line x1="944.0" y1="349" x2="944.0" y2="355" stroke="#53677c"/><text x="944.0" y="379" text-anchor="middle" fill="#9cb0c5" font-size="14">400</text>
+<line x1="1105.0" y1="349" x2="1105.0" y2="355" stroke="#53677c"/><text x="1105.0" y="379" text-anchor="middle" fill="#9cb0c5" font-size="14">500</text>
+<text x="40" y="420" fill="#9cb0c5" font-size="17">GPU VRAM: native 94.1 GiB / KVMem 93.5 GiB — both near full</text>
+<line x1="40" y1="444" x2="1160" y2="444" stroke="#304255"/>
+<text x="40" y="476" fill="#9cb0c5" font-size="15">RTX PRO 6000 Blackwell · ~229K input tokens each · 256K context limit · measured 2026-10-28</text>
+<text x="40" y="509" fill="#9cb0c5" font-size="14">Single measured batch. History preparation excluded; queueing and recomputation included. Selected active KV changes attention.</text>
+</g></svg>
