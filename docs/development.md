@@ -121,6 +121,29 @@ additional completed inference work.
 Do not replace a failed or interrupted measurement with a success record. Keep
 its cause and provenance, and record a subsequent attempt independently.
 
+### CPU harness checks
+
+The benchmark scripts have optional HTTP and process-monitoring dependencies.
+After the CPU-only setup above, this focused selection checks replay validation,
+handoff monitoring and mocked Terminal-Bench request handling:
+
+```sh
+.venv/bin/python -m pip install httpx psutil fastapi
+CUDA_VISIBLE_DEVICES='' PYTHONPATH=src:scripts:. \
+  .venv/bin/python -m pytest -q \
+  tests/test_deepswe_qps_replay.py \
+  tests/test_agent_handoff_monitor.py \
+  tests/test_terminalbench_suite.py \
+  tests/test_terminalbench_harness.py \
+  -k 'not real_tmux'
+```
+
+Run from the repository root: `scripts` on `PYTHONPATH` makes sibling script
+imports available. This selection excludes the real tmux/Harbor integration
+case and does not launch a GPU server or a benchmark workload. Other harness
+tests can require Harbor, compiled protocol fixtures or local historical
+artifacts; select those checks only when their prerequisites are available.
+
 ## Contributing
 
 Describe the behavior changed, why it is needed, and the focused validation

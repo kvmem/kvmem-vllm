@@ -101,9 +101,11 @@ def request(path, body, control=None):
 @pytest.mark.parametrize('release_failure',[False,True])
 def test_release_fences_native_work_and_frees_capacity(tmp_path,monkeypatch,release_failure):
     import scripts.dsh_bridge as bridge
-    from benchmarks.deepswe.claude_bridge import Planner,Protocol
-    library=Path(__file__).resolve().parents[1]/'artifacts/deepswe-first16-20261015-r16/protocol/protocol.so'
-    protocol=Protocol(library)
+    from benchmarks.deepswe.claude_bridge import Planner
+    # Release ownership does not depend on the optional compiled Qwen parser.
+    def protocol(**payload):
+        assert payload==dict(op='parse',text='</think>ok',tools=[])
+        return dict(reasoning='',content='ok',tool_calls=[])
     async def check():
         entered=asyncio.Event();gate=asyncio.Event();calls=[]
         class Stream(httpx.AsyncByteStream):

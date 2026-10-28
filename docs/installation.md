@@ -146,6 +146,27 @@ that deployment was chosen.
 
 ## Start the service
 
+If your CUDA toolkit is outside the standard locations, make its compiler
+available before starting the service. Replace the path with the toolkit
+directory that contains `bin/nvcc`:
+
+```sh
+export CUDA_HOME=/absolute/path/to/cuda
+export PATH="$CUDA_HOME/bin:$PATH"
+```
+
+The first native CUDA build can take several minutes. To bound compiler
+concurrency and host-memory use, optionally set the limits used in the
+installation smoke check:
+
+```sh
+export MAX_JOBS=4
+export FLASHINFER_NVCC_THREADS=1
+```
+
+These settings control compilation; they do not change the profile's GPU
+context or output budgets.
+
 ```sh
 .venv/bin/python -m vllm_kvmem serve \
   --config local-profile.json \

@@ -116,6 +116,10 @@ def test_runner_never_calls_completed_before_arm(source, tmp_path, monkeypatch):
     monkeypatch.setattr(benchmark, 'ROOT', output/'optimization/after/runtime')
     monkeypatch.setattr(q, 'wait_dependency', lambda *_:None)
     monkeypatch.setattr(q, 'gpu_pids', lambda:[])
+    def isolated_lock(path, *args, **kwargs):
+        assert path == '/tmp/kvmem-coordination-qualification.lock'
+        return open(tmp_path/'qualification.lock', *args, **kwargs)
+    monkeypatch.setattr(benchmark, 'open', isolated_lock, raising=False)
     calls = []
     def run_arm(root, name, plan):
         calls.append(name)
