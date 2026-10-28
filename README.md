@@ -47,7 +47,7 @@ cd kvmem-vllm
 bash scripts/setup_gpu.sh --latest
 ```
 
-This resolves the current vLLM release with its dependencies and checks the required interfaces. A passing interface check is not a GPU performance qualification. The starter's recorded GPU validation used vLLM 0.32.0; the throughput comparison above used 0.30.0. See [vLLM compatibility](docs/vllm-compatibility.md).
+This resolves the current vLLM release with its dependencies and checks the required interfaces. The quick start was verified in a fresh environment on **2026-10-28 with vLLM 0.32.0**, including streaming, CPU-history session restoration and explicit session release ([validation record](docs/validation/installation-20261028.json)). The throughput comparison above used 0.30.0. A passing interface check alone is not a GPU performance qualification; see [vLLM compatibility](docs/vllm-compatibility.md).
 
 ### 2. Configure your model paths
 

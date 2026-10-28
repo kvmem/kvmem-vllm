@@ -36,6 +36,13 @@ interface check. `--latest` is also the script's default. It resolves the vLLM
 release available at installation time; successful dependency resolution is not
 an end-to-end GPU qualification for every future release.
 
+The starter was verified in a fresh environment on 2026-10-28 with vLLM 0.32.0
+on the hardware listed above. Streaming chat, token-ID requests, a 5,201-token
+history with session restoration, and explicit session release passed. See the
+[installation validation record](validation/installation-20261028.json) for the
+resolved versions and results. This checks the starter's installation and API
+lifecycle; it does not remeasure the separate 256K throughput benchmark.
+
 To run the interface check again:
 
 ```sh

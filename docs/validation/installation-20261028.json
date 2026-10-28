@@ -1,0 +1,251 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-28",
+  "timezone": "Asia/Shanghai",
+  "status": "passed",
+  "scope": "Fresh-environment installation and actual-model API/session lifecycle smoke. This is not a throughput benchmark, a DeepSWE task-quality result, or a general compatibility guarantee.",
+  "source": {
+    "repository": "https://github.com/kvmem/kvmem-vllm",
+    "validated_checkout_commit": "3fdec80670ace5be162adda51a1d123910c83755",
+    "runtime_commit": "c14498685b5571b28b222134a57202eeece8066b",
+    "runtime_source_changes_during_successful_attempt": false
+  },
+  "installation": {
+    "command": "bash scripts/setup_gpu.sh --latest",
+    "fresh_virtual_environment": true,
+    "dependency_check": {
+      "command": "uv pip check --python .venv/bin/python",
+      "status": "passed",
+      "packages_checked": 202
+    },
+    "python": "3.12.13",
+    "packages": {
+      "vllm-kvmem": "0.1.0.dev1",
+      "vllm": "0.32.0",
+      "torch": "2.13.0+cu130",
+      "flashinfer-python": "0.7.0.post1",
+      "transformers": "5.19.0",
+      "triton": "3.7.1",
+      "nvidia-cudnn-cu13": "9.20.0.48",
+      "nvidia-cudnn-frontend": "1.32.0",
+      "cuda-python": "13.4.4"
+    },
+    "standalone_editable_import_check": {
+      "passed": true,
+      "cwd_outside_checkout": true,
+      "pythonpath_removed": true,
+      "user_site_disabled": true,
+      "modules": [
+        "vllm_kvmem",
+        "vllm_kvmem._native",
+        "vllm_kvmem.serve",
+        "vllm_kvmem.engine_api"
+      ]
+    }
+  },
+  "hardware": {
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "gpu_memory_reported_mib": 97887,
+    "driver": "580.159.03",
+    "cuda_toolkit": "13.0.88",
+    "os": "Ubuntu 22.04",
+    "architecture": "x86_64",
+    "host_memory_kib": 131700692
+  },
+  "artifacts": {
+    "model": {
+      "repository": "nvidia/Qwen3.8-27B-NVFP4",
+      "revision": "482ca0f3832238542f8f5295dde86b5f22711d80",
+      "format": "safetensors"
+    },
+    "tokenizer": {
+      "repository": "Qwen/Qwen3.8-27B",
+      "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "files": [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "chat_template.jinja",
+        "vocab.json",
+        "merges.txt",
+        "config.json"
+      ],
+      "six_file_only_load_passed": true,
+      "chat_template_ids_match_tested_tokenizer": true
+    },
+    "note": "Existing verified pinned model files were reused. Model weights were not downloaded again as part of the fresh-environment smoke."
+  },
+  "profile": {
+    "file": "examples/serve-qwen-mtp.json",
+    "changed_fields": [
+      "hf_config_path",
+      "model",
+      "tokenizer"
+    ],
+    "changes": "Only the three local model/tokenizer paths were replaced; hf_config_path remained identical to model. All serving settings were unchanged.",
+    "settings": {
+      "model_format": "safetensors",
+      "draft_method": "mtp",
+      "draft_tokens": 1,
+      "execution_mode": "eager",
+      "served_model_name": "kvmem",
+      "host": "127.0.0.1",
+      "port": 8000,
+      "max_model_len": 16384,
+      "max_num_seqs": 2,
+      "max_num_batched_tokens": 1024,
+      "gpu_memory_utilization": 0.55,
+      "prefill_chunk_tokens": 128,
+      "verify_session_restore": false,
+      "linear_backend_per_quant": {
+        "nvfp4_w4a4": "auto",
+        "fp8_w8a8": "auto"
+      },
+      "kvmem": {
+        "block_tokens": 32,
+        "select_budget": 2048,
+        "gen_budget": 2048,
+        "repository_blocks": 1024,
+        "sink_blocks": 1,
+        "recent_blocks": 1,
+        "cpu_read_cache_bytes": 2147483648,
+        "archive_backend": "cpu",
+        "archive_io_max_bytes": 134217728,
+        "async_seal": true,
+        "async_archive_retirement": true,
+        "packed_assembly": true,
+        "direct_pinned_reads": true,
+        "async_cpu_scatter": true,
+        "batched_cpu_append": true,
+        "request_planning": true,
+        "session_capacity": 8,
+        "session_checkpoint_bytes": 536870912,
+        "session_checkpoint_policy": "pm",
+        "session_capture_terminal": true,
+        "mean_k_backend": "torch_reference",
+        "async_refresh": false,
+        "refresh_quantum_tokens": 128,
+        "cpu_history_coordination": false,
+        "maintenance_max_steps": 0,
+        "async_restore": false,
+        "step_latency_interval": 1,
+        "verify_archive_on_finish": false
+      }
+    },
+    "effective_max_num_batched_tokens": 2052
+  },
+  "validation_environment": {
+    "optional_compiler_limits": {
+      "MAX_JOBS": "4",
+      "FLASHINFER_NVCC_THREADS": "1"
+    },
+    "CUDA_HOME": "Standard local CUDA 13.0 toolkit directory",
+    "PATH": "Fresh environment binaries and CUDA toolkit binaries prepended",
+    "TORCH_CUDA_ARCH_LIST": null,
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "TOKENIZERS_PARALLELISM": "false",
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONPATH": "Validation helper added checkout source/scripts/tests/root; the separate standalone import check passed with PYTHONPATH removed.",
+    "note": "Offline settings reused verified local model files. Compiler/thread limits bounded test resource use; no serving profile settings were overridden."
+  },
+  "checks": {
+    "readme_chat": {
+      "passed": true,
+      "events": 53,
+      "finish_reason": "stop"
+    },
+    "docs_token_short": {
+      "passed": true,
+      "input_tokens": 20,
+      "output_tokens": 80
+    },
+    "long_history_continuation": {
+      "passed": true,
+      "first_input_tokens": 5201,
+      "continued_input_tokens": 5287,
+      "first_output_tokens": 64,
+      "continued_output_tokens": 64,
+      "exact_accepted_prefix_preserved": true,
+      "restored_tokens": 5056,
+      "acknowledged_hits": 1,
+      "cpu_history_bytes": 182714368,
+      "restored_active_window_tokens": 2048,
+      "restored_tokens_meaning": "Acknowledged logical checkpoint history length; this is not a count of tokens physically transferred from CPU to GPU."
+    },
+    "explicit_session_close": {
+      "passed": true,
+      "sessions_closed": 3,
+      "empty_session_views": true,
+      "zero_active_requests": true,
+      "zero_retained_cpu_history": true,
+      "health_after_close": 200
+    },
+    "model_listing": {
+      "endpoint": "GET /v1/models",
+      "status_code": 200
+    },
+    "stream_endpoints": [
+      "POST /v1/chat/completions",
+      "POST /v1/completions"
+    ],
+    "explicit_close_endpoint": "POST /v1/completions with kv_transfer_params.kvmem_release_session=true"
+  },
+  "closed_resources": {
+    "scheduler": {
+      "requests": 0,
+      "refresh_pending": 0,
+      "connector_pending": 0,
+      "owned_blocks": 0,
+      "reservations": [],
+      "session_views": [],
+      "session_owners": []
+    },
+    "archive": {
+      "active_requests": 0,
+      "retiring_requests": 0,
+      "session_retiring_requests": 0,
+      "pending_downloads": 0,
+      "session_checkpoints": 0,
+      "session_checkpoint_payload_bytes": 0,
+      "cpu_authority_bytes": 0
+    },
+    "remaining_owned_processes": [],
+    "remaining_owned_gpu_pids": [],
+    "gpu_process_list_empty_after_cleanup": true
+  },
+  "attempts": [
+    {
+      "id": "r1",
+      "status": "failed",
+      "cause": "Validation harness required a checkpoint history of at least 5,169 tokens. The valid P/M checkpoint was before the aligned Query boundary at 5,056 tokens, with a 2,048-token active window. The harness timed out; the runtime had completed the request.",
+      "completed_checks": [
+        "README streaming chat",
+        "short token-ID streaming completion",
+        "5,201-token prompt with 64 generated tokens"
+      ],
+      "owned_cleanup_empty": true,
+      "runtime_behavior_or_profile_modified": false
+    },
+    {
+      "id": "r2",
+      "status": "passed",
+      "correction": "The harness required an idle reusable checkpoint beyond K and no larger than accepted history, then independently required acknowledged session-hit and restored-token counters to increase on continuation.",
+      "restored_checkpoint_tokens": 5056,
+      "acknowledged_session_hits": 1,
+      "owned_cleanup_empty": true
+    }
+  ],
+  "notes": [
+    "The first attempt built native CUDA kernels and took several minutes. The successful retry reused those compiled kernels in the same fresh environment.",
+    "The 512 MiB checkpoint budget may defer a terminal checkpoint; the earlier published P/M checkpoint remains reusable. The client preserved the entire accepted token prefix on continuation.",
+    "The test used a synthetic natural-language history for API and history-restoration coverage, not a DeepSWE task.",
+    "Shutdown emitted Python resource_tracker warning about one semaphore; the harness confirmed no remaining owned processes or GPU processes, and session CPU/archive resources were zero."
+  ],
+  "evidence": {
+    "runner_sha256": "0c07959805e9de4265a151ac58c6113f03ebcfe6d97ff8638048af028afacb4b",
+    "raw_request_text_and_machine_paths_omitted": true
+  }
+}
