@@ -1,5 +1,110 @@
 # Benchmarks
 
+## Real DeepSWE agents on RTX 5090
+
+The real-agent measurement on **2026-10-31** used one RTX 5090 (32,607 MiB
+reported memory), Qwen3.8-27B NVFP4, FP8 KV, native MTP with four draft tokens,
+and a 262,144-token context limit. KVMem used K=36,864 selected tokens and
+G=12,288 growth tokens. Each configuration ran a queue of 16 tasks with four
+agents in fresh containers for a 900-second measured window. Agents actually
+read and changed files and executed commands; inference did not use
+`ignore_eos` or fixed-token replay.
+
+| GPU request limit | Generated tokens/s | Completed model turns | Model-turn QPS | Real tool results | Completed tasks |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Native vLLM: 1 | 71.840 | 84 | 0.093333 | 166 | 0 |
+| Native vLLM: 2 | 59.971 | 73 | 0.081111 | 153 | 0 |
+| Native vLLM: 4 | 58.629 | 84 | 0.093333 | 140 | 0 |
+| KVMem: 4 | 239.254 | 320 | 0.355556 | 391 | 0 |
+
+KVMem generated **3.33×** as many accepted output tokens per unit of window
+time as the best measured native setting, and completed **3.81×** as many model
+turns. The native search covered only the three admission limits above. These
+are single-run observations, not maximum sustainable QPS estimates.
+
+Generation throughput divides the server's accepted output-token counter delta
+by the actual counter-sampling interval (900.46–901.13 seconds). The denominator
+includes prefill, tool execution, queueing and generation. Model-turn QPS counts
+only calls that returned before the 900-second deadline, divided by 900; it is
+not completed-task QPS. Work at the cutoff was preserved and not marked as
+solved or failed. All four admitted tasks remained unfinished in every
+configuration; the other twelve tasks remained queued.
+
+Both runnable backends mapped the same BF16 input embedding to CPU memory and
+used a 10,408,591,360-byte KV pool. MLP, attention and output-head weights stayed
+on the GPU. Native automatic memory planning could not start this checkpoint
+at 256K before this explicit memory setup. The comparison therefore uses native
+full attention and scheduling with a matched input-embedding mapping, rather
+than an untouched stock launch.
+
+Native vLLM enabled asynchronous scheduling, prefix caching and FlashInfer
+autotuning; KVMem disabled them in this recorded run. KVMem also uses selective
+attention and CPU session history. This was not an experiment isolating only
+lossless KV transport. The later matched-configuration single-request tests are
+separate experiments and do not retroactively change this result.
+
+The context limit was 256K; actual agent histories grew naturally. Native's
+best-throughput run had mean/maximum input lengths of 44,873/79,827 tokens;
+KVMem's were 95,772/189,675. Trajectories and output lengths diverged across
+backends. No completed-task quality or task-per-hour improvement has been
+established by this bounded window.
+
+The [portable real-agent result](benchmarks/deepswe-rtx5090-agents-20261031.json)
+contains counts, timing, all four configurations and source-evidence hashes.
+Raw task workspaces, model files and large profiling traces are retained in the
+experiment artifacts and are not distributed in the source checkout. The
+[executed-agent harness](../benchmarks/deepswe/README.md) describes the task,
+container and verifier requirements. Historical fixed-length generation
+measurements below remain diagnostic results and are not real-agent throughput.
+
+## Active-KV handoff profiling
+
+A follow-up on the same RTX 5090 used eight actual DeepSWE agents, sixteen
+queued tasks and four GPU request slots, with K=36K/G=12K/MTP4 unchanged.
+The configuration pair observed **109.89 → 155.04 generation tokens/s
+(1.41×)** across two 15-minute windows. Mean cold restoration changed from
+**2.90 → 1.01 seconds**.
+
+This pair shares the same capacity fixes, task manifest, server settings and
+host tracing. It is a different workload from the four-agent native comparison
+above, and has not established a trace-free production speedup or quality gain.
+See the [profiling report](profiling-rtx5090-active-kv-20261031.md) and
+[portable evidence](benchmarks/deepswe-rtx5090-active-kv-20261031.json) for the
+bottlenecks, implementation, memory limits, correctness checks and rejected trials.
+
+## Adaptive tool-return grace
+
+A fresh pair of 15-minute windows tested an opt-in short grace period for idle
+attention KV, using the same eight-agent/four-GPU-slot DeepSWE setup and
+K=36K/G=12K/MTP4. The policy learns the interval from model completion to the
+next request's arrival, including tool and client time, then caps protection
+at one second and the observed cold-restore cost. A request waiting 15 seconds
+overrides this preference; active work and native capacity still determine
+its actual admission time.
+
+| Measurement | Original KVMem scheduling | Adaptive grace |
+| --- | ---: | ---: |
+| Accepted generation tokens/s | 131.70 | 147.35 |
+| Completed model-turn QPS | 0.2400 | 0.3711 |
+| Hot share of completed restores | 18.4% | 41.5% |
+| Mean request queue wait | 15.39 s | 10.17 s |
+| Measured-window peak GPU memory | 31.310 GiB | 31.310 GiB |
+
+The observed generation-rate difference was **11.9%**. A subsequent audit found
+that identical single-request warmup took **63.78 versus 44.97 seconds**, before
+multi-task TTL contention. This pair therefore **does not isolate a policy
+speedup**. Both arms disabled
+detailed host/restore tracing and retained the same lightweight timing and
+resource sampling. This uses its own fresh baseline, not the instrumented
+155.04 tokens/s result above. Output lengths and natural trajectories differed;
+the 54.6% model-turn QPS gain is a separate metric. Neither arm completed a whole
+task. More rounds completed, so total cold restores and uploaded bytes increased
+even though the cold fraction fell. See the
+[configuration, interpretation and validation](profiling-rtx5090-active-kv-20261031.md#adaptive-tool-return-grace)
+and [audited data](benchmarks/deepswe-rtx5090-tool-ttl-20261031.json).
+The [cross-run audit and evaluation protocol](profiling-rtx5090-active-kv-20261031.md#cross-run-audit-and-evaluation-protocol)
+explain the remaining controls needed before claiming a repeatable improvement.
+
 ## Long-history generation throughput
 
 On one RTX PRO 6000 Blackwell Server Edition, KVMem delivered **3.70× the

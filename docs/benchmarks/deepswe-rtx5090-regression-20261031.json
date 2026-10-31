@@ -1,0 +1,892 @@
+{
+  "schema_version": 1,
+  "measured_date": "2026-10-31",
+  "status": "paused_by_user",
+  "scope": "Saved real DeepSWE four-agent observations on RTX 5090. Regression cause unresolved; no newly optimized variant has completed GPU validation.",
+  "configuration": {
+    "model": "Qwen3.8-27B NVFP4",
+    "kv_dtype": "FP8",
+    "context_limit": 262144,
+    "K": 36864,
+    "G": 12288,
+    "mtp_draft_tokens": 4,
+    "agents": 4,
+    "gpu_request_limit": 4,
+    "queued_tasks": 16,
+    "query_replay_budget": 1856,
+    "max_num_batched_tokens": 1876,
+    "assembly_chunk_blocks": 4,
+    "cpu_gather_workers": 8,
+    "gpu_raw_k_cache_bytes": 0,
+    "reuse_resident_v": false,
+    "active_resident_max_fraction": 0.5,
+    "tool_grace_enabled": false,
+    "MLP_offload": false,
+    "sampling": "Same initial task manifest, instructions and seed; natural EOS and real tools. Live trajectories may diverge.",
+    "warmup": "One original 67584-token request generating one token, released before each formal window.",
+    "timing": "Common lightweight model-step/refresh capture; detailed host_stage_timing and restore_stage_timing disabled. Latest campaign adds common 1 Hz host/GPU state telemetry."
+  },
+  "metric_definitions": {
+    "generation": "Accepted output counter delta divided by actual counter interval; includes prefill, tools, waiting and output from unfinished requests. Not pure decode speed.",
+    "model_turn_qps": "Model calls completed by the strict 900-second deadline divided by 900; not whole-task QPS.",
+    "public_prefill": "Executed public-batch prefill tokens in the strict 900-second window, not logical prompt counters or private Query work.",
+    "step_spans": "CUDA-event wall spans can include host submission gaps, maintenance and overlapping work. Not pure kernel time; four_decode is a subset of pure_decode.",
+    "refresh_stages": "Wall intervals can overlap each other and public model work; cumulative durations must not be summed into exclusive GPU idle time.",
+    "delivery": "Engine scheduler finish to local bridge finish; includes server/API delivery and client consumption. Clock-aligned observations do not isolate network time.",
+    "tasks": "Zero naturally completed whole tasks. Window-truncated attempts remain unscored; no success-throughput claim."
+  },
+  "completed_runs": [
+    {
+      "id": "historical_old",
+      "label": "Historical old runtime",
+      "status": "window_complete",
+      "source_campaign": "kvmem-5090-queue-20261031-r1",
+      "nominal_window_seconds": 900,
+      "accepted_generation_tokens": 215599,
+      "counter_interval_seconds": 901.1306059360504,
+      "accepted_generation_tokens_per_second": 239.25388681704612,
+      "actual_public_prefill_tokens": 368691,
+      "completed_model_turns": 320,
+      "model_turn_qps": 0.35555555555555557,
+      "completed_whole_tasks": 0,
+      "preemptions": 0,
+      "request_errors": 0,
+      "steps": {
+        "all": {
+          "batches": 17635,
+          "model_ms": {
+            "n": 17635,
+            "mean": 45.01946366031345,
+            "median": 32.88304138183594,
+            "p95": 154.3590087890625,
+            "max": 1293.958984375,
+            "sum": 793918.2416496277
+          },
+          "maintenance_ms": {
+            "n": 17635,
+            "mean": 4.68301278844556,
+            "median": 0.09433600306510925,
+            "p95": 26.668672561645508,
+            "max": 181.6273956298828,
+            "sum": 82584.93052423745
+          },
+          "step_span_seconds": 876.503172449112,
+          "prefill_tokens": 368691
+        },
+        "pure_decode": {
+          "batches": 16314,
+          "model_ms": {
+            "n": 16314,
+            "mean": 33.41653975397549,
+            "median": 32.74273681640625,
+            "p95": 36.19260787963867,
+            "max": 252.38450622558594,
+            "sum": 545157.4295463562
+          },
+          "maintenance_ms": {
+            "n": 16314,
+            "mean": 2.6710850405569015,
+            "median": 0.09017600119113922,
+            "p95": 12.401344299316406,
+            "max": 106.11369323730469,
+            "sum": 43576.08135164529
+          },
+          "step_span_seconds": 588.7335109729767,
+          "prefill_tokens": 0
+        },
+        "four_decode": {
+          "batches": 10215,
+          "model_ms": {
+            "n": 10215,
+            "mean": 33.82500964933555,
+            "median": 33.3771858215332,
+            "p95": 35.62188720703125,
+            "max": 135.14556884765625,
+            "sum": 345522.47356796265
+          },
+          "maintenance_ms": {
+            "n": 10215,
+            "mean": 0.997616289080473,
+            "median": 0.09113600105047226,
+            "p95": 3.1948161125183105,
+            "max": 27.47007942199707,
+            "sum": 10190.650392957032
+          },
+          "step_span_seconds": 355.7131239128113,
+          "prefill_tokens": 0
+        },
+        "prefill_or_mixed": {
+          "batches": 1321,
+          "model_ms": {
+            "n": 1321,
+            "mean": 188.3124996996756,
+            "median": 157.9713897705078,
+            "p95": 402.9356994628906,
+            "max": 1293.958984375,
+            "sum": 248760.81210327148
+          },
+          "maintenance_ms": {
+            "n": 1321,
+            "mean": 29.529787413014507,
+            "median": 15.294015884399414,
+            "p95": 80.57254028320312,
+            "max": 181.6273956298828,
+            "sum": 39008.84917259216
+          },
+          "step_span_seconds": 287.76966147613524,
+          "prefill_tokens": 368691
+        }
+      },
+      "missing_public_call_indices": 0,
+      "pressure_refresh": {
+        "n": 33,
+        "uploaded_GiB": 16.74267578125,
+        "chunks": 4048,
+        "stages_seconds": {
+          "assembly": {
+            "n": 33,
+            "mean": 1.0692687462662545,
+            "median": 1.0999074820429087,
+            "p95": 1.2872863300144672,
+            "max": 1.3451045828405768,
+            "sum": 35.285868626786396
+          },
+          "host_prepare": {
+            "n": 33,
+            "mean": 0.6938344074667178,
+            "median": 0.6935575327370316,
+            "p95": 0.858424938749522,
+            "max": 0.8939451221376657,
+            "sum": 22.896535446401685
+          },
+          "cpu_copy": {
+            "n": 33,
+            "mean": 0.5516441376654037,
+            "median": 0.5625316293444484,
+            "p95": 0.7014247851911932,
+            "max": 0.7029278622940183,
+            "sum": 18.20425654295832
+          },
+          "cpu_read": {
+            "n": 33,
+            "mean": 0.5559519915454545,
+            "median": 0.566688312,
+            "p95": 0.706941659,
+            "max": 0.708277797,
+            "sum": 18.346415721000007
+          },
+          "refresh_elapsed": {
+            "n": 33,
+            "mean": 1.2090653541258,
+            "median": 1.2009848710149527,
+            "p95": 1.5276537120807916,
+            "max": 1.6943263378925622,
+            "sum": 39.8991566861514
+          }
+        },
+        "aggregate_seconds_per_GiB": {
+          "assembly": 2.1075405800011238,
+          "host_prepare": 1.367555326612927,
+          "cpu_copy": 1.0872967248965744,
+          "cpu_read": 1.0957875527605938,
+          "refresh_elapsed": 2.3830812474332315
+        },
+        "admission_wait_seconds": 0.0,
+        "private_forward_steps": 0
+      },
+      "restores": {
+        "resident": {
+          "n": 318,
+          "elapsed_seconds": {
+            "n": 318,
+            "mean": 0.18388850027299924,
+            "median": 0.10494389908853918,
+            "p95": 0.567071066936478,
+            "max": 0.9864773759618402,
+            "sum": 58.47654308681376
+          },
+          "uploaded_GiB": 0.0
+        }
+      },
+      "cold_restores": 0,
+      "host_telemetry_available": false,
+      "engine_to_bridge_delivery": {
+        "engine_to_bridge_finish_seconds": {
+          "n": 320,
+          "mean": 0.21943388432264327,
+          "median": 0.2226862907409668,
+          "p95": 0.3473801612854004,
+          "max": 0.547914981842041,
+          "sum": 70.21884298324585
+        },
+        "over_3s": 0,
+        "over_5s": 0
+      },
+      "real_tool_results": 391
+    },
+    {
+      "id": "previous_current",
+      "label": "Previously completed current runtime",
+      "status": "window_complete",
+      "source_campaign": "kvmem-5090-four-agent-regression-20261031-r2",
+      "nominal_window_seconds": 900,
+      "accepted_generation_tokens": 181523,
+      "counter_interval_seconds": 901.1380476951599,
+      "accepted_generation_tokens_per_second": 201.43750501300133,
+      "actual_public_prefill_tokens": 386587,
+      "completed_model_turns": 298,
+      "model_turn_qps": 0.33111111111111113,
+      "completed_whole_tasks": 0,
+      "preemptions": 0,
+      "request_errors": 0,
+      "steps": {
+        "all": {
+          "batches": 14677,
+          "model_ms": {
+            "n": 14677,
+            "mean": 53.00430311119962,
+            "median": 33.711551666259766,
+            "p95": 166.27049255371094,
+            "max": 2120.248779296875,
+            "sum": 777944.1567630768
+          },
+          "maintenance_ms": {
+            "n": 14677,
+            "mean": 6.333468228217892,
+            "median": 1.595039963722229,
+            "p95": 33.735294342041016,
+            "max": 535.9735107421875,
+            "sum": 92956.313185554
+          },
+          "step_span_seconds": 870.9004707870483,
+          "prefill_tokens": 386587
+        },
+        "pure_decode": {
+          "batches": 13375,
+          "model_ms": {
+            "n": 13375,
+            "mean": 34.61653562927246,
+            "median": 33.38547134399414,
+            "p95": 38.18310546875,
+            "max": 285.4781799316406,
+            "sum": 462996.16404151917
+          },
+          "maintenance_ms": {
+            "n": 13375,
+            "mean": 4.043296974800179,
+            "median": 1.249343991279602,
+            "p95": 19.60550308227539,
+            "max": 199.2249298095703,
+            "sum": 54079.09703795239
+          },
+          "step_span_seconds": 517.075261253357,
+          "prefill_tokens": 0
+        },
+        "four_decode": {
+          "batches": 7764,
+          "model_ms": {
+            "n": 7764,
+            "mean": 34.35831945597174,
+            "median": 33.9127197265625,
+            "p95": 36.83987045288086,
+            "max": 210.46517944335938,
+            "sum": 266757.99225616455
+          },
+          "maintenance_ms": {
+            "n": 7764,
+            "mean": 1.4365820624567627,
+            "median": 0.9377599954605103,
+            "p95": 4.214015960693359,
+            "max": 21.79292869567871,
+            "sum": 11153.623132914305
+          },
+          "step_span_seconds": 277.9116153640747,
+          "prefill_tokens": 0
+        },
+        "prefill_or_mixed": {
+          "batches": 1302,
+          "model_ms": {
+            "n": 1302,
+            "mean": 241.89553972469864,
+            "median": 173.0760269165039,
+            "p95": 418.3803405761719,
+            "max": 2120.248779296875,
+            "sum": 314947.9927215576
+          },
+          "maintenance_ms": {
+            "n": 1302,
+            "mean": 29.859613016591094,
+            "median": 19.12875270843506,
+            "p95": 93.11347198486328,
+            "max": 535.9735107421875,
+            "sum": 38877.216147601604
+          },
+          "step_span_seconds": 353.8252095336914,
+          "prefill_tokens": 386587
+        }
+      },
+      "missing_public_call_indices": 0,
+      "pressure_refresh": {
+        "n": 33,
+        "uploaded_GiB": 16.78314208984375,
+        "chunks": 4058,
+        "stages_seconds": {
+          "assembly": {
+            "n": 33,
+            "mean": 1.9212117601313035,
+            "median": 1.1652397508732975,
+            "p95": 5.157309328904375,
+            "max": 5.500789690064266,
+            "sum": 63.39998808433302
+          },
+          "host_prepare": {
+            "n": 33,
+            "mean": 1.106196172380199,
+            "median": 0.7540594658348709,
+            "p95": 2.597286212723702,
+            "max": 2.803799156565219,
+            "sum": 36.50447368854657
+          },
+          "cpu_copy": {
+            "n": 33,
+            "mean": 0.7767586475238204,
+            "median": 0.596585005056113,
+            "p95": 1.5323501226957887,
+            "max": 1.5760360413696617,
+            "sum": 25.633035368286073
+          },
+          "cpu_read": {
+            "n": 33,
+            "mean": 0.7845539403030303,
+            "median": 0.602035043,
+            "p95": 1.551443124,
+            "max": 1.59346011,
+            "sum": 25.89028003
+          },
+          "refresh_elapsed": {
+            "n": 33,
+            "mean": 2.1075633100840743,
+            "median": 1.2878132199402899,
+            "p95": 5.630672711879015,
+            "max": 5.760780147043988,
+            "sum": 69.54958923277445
+          }
+        },
+        "aggregate_seconds_per_GiB": {
+          "assembly": 3.7775994354894524,
+          "host_prepare": 2.1750679040390835,
+          "cpu_copy": 1.52730848794981,
+          "cpu_read": 1.5426360505919452,
+          "refresh_elapsed": 4.144014801308398
+        },
+        "admission_wait_seconds": 0.0,
+        "private_forward_steps": 0
+      },
+      "restores": {
+        "resident": {
+          "n": 298,
+          "elapsed_seconds": {
+            "n": 298,
+            "mean": 0.2770360451693265,
+            "median": 0.12675336247775704,
+            "p95": 1.0315001758281142,
+            "max": 3.5823106369934976,
+            "sum": 82.5567414604593
+          },
+          "uploaded_GiB": 0.0
+        }
+      },
+      "cold_restores": 0,
+      "host_telemetry_available": false,
+      "engine_to_bridge_delivery": {
+        "engine_to_bridge_finish_seconds": {
+          "n": 298,
+          "mean": 0.21662910032592364,
+          "median": 0.21711206436157227,
+          "p95": 0.3417999744415283,
+          "max": 0.3976426124572754,
+          "sum": 64.55547189712524
+        },
+        "over_3s": 0,
+        "over_5s": 0
+      },
+      "real_tool_results": 378
+    },
+    {
+      "id": "new_old_a",
+      "label": "Latest old-a repeat",
+      "status": "window_complete",
+      "source_campaign": "kvmem-5090-prefill-investigation-20261031-r2",
+      "nominal_window_seconds": 900,
+      "accepted_generation_tokens": 201279,
+      "counter_interval_seconds": 901.1331870555878,
+      "accepted_generation_tokens_per_second": 223.36209884542163,
+      "actual_public_prefill_tokens": 414032,
+      "completed_model_turns": 331,
+      "model_turn_qps": 0.36777777777777776,
+      "completed_whole_tasks": 0,
+      "preemptions": 0,
+      "request_errors": 0,
+      "steps": {
+        "all": {
+          "batches": 17453,
+          "model_ms": {
+            "n": 17453,
+            "mean": 45.90523764506962,
+            "median": 32.658592224121094,
+            "p95": 156.25840759277344,
+            "max": 1443.692138671875,
+            "sum": 801184.1126194
+          },
+          "maintenance_ms": {
+            "n": 17453,
+            "mean": 4.04881315218017,
+            "median": 0.10534399747848511,
+            "p95": 23.06559944152832,
+            "max": 182.0847930908203,
+            "sum": 70663.9359450005
+          },
+          "step_span_seconds": 871.848048078537,
+          "prefill_tokens": 414032
+        },
+        "pure_decode": {
+          "batches": 15988,
+          "model_ms": {
+            "n": 15988,
+            "mean": 32.93841467638567,
+            "median": 32.58244705200195,
+            "p95": 35.838111877441406,
+            "max": 368.4739074707031,
+            "sum": 526619.3738460541
+          },
+          "maintenance_ms": {
+            "n": 15988,
+            "mean": 2.633070709517709,
+            "median": 0.09092799946665764,
+            "p95": 11.10211181640625,
+            "max": 116.78406524658203,
+            "sum": 42097.53450376913
+          },
+          "step_span_seconds": 568.71690842247,
+          "prefill_tokens": 0
+        },
+        "four_decode": {
+          "batches": 7685,
+          "model_ms": {
+            "n": 7685,
+            "mean": 33.71414552662539,
+            "median": 33.259742736816406,
+            "p95": 35.64179229736328,
+            "max": 117.29695892333984,
+            "sum": 259093.2083721161
+          },
+          "maintenance_ms": {
+            "n": 7685,
+            "mean": 0.8368020279615361,
+            "median": 0.09055999666452408,
+            "p95": 2.978912115097046,
+            "max": 22.13983917236328,
+            "sum": 6430.823584884405
+          },
+          "step_span_seconds": 265.52403199958803,
+          "prefill_tokens": 0
+        },
+        "prefill_or_mixed": {
+          "batches": 1465,
+          "model_ms": {
+            "n": 1465,
+            "mean": 187.41620394085047,
+            "median": 158.09523010253906,
+            "p95": 390.1256103515625,
+            "max": 1443.692138671875,
+            "sum": 274564.73877334595
+          },
+          "maintenance_ms": {
+            "n": 1465,
+            "mean": 19.49925013053336,
+            "median": 13.9236478805542,
+            "p95": 57.9354248046875,
+            "max": 182.0847930908203,
+            "sum": 28566.40144123137
+          },
+          "step_span_seconds": 303.1311396560669,
+          "prefill_tokens": 414032
+        }
+      },
+      "missing_public_call_indices": 0,
+      "pressure_refresh": {
+        "n": 37,
+        "uploaded_GiB": 18.86871337890625,
+        "chunks": 4562,
+        "stages_seconds": {
+          "assembly": {
+            "n": 37,
+            "mean": 1.0529270424079653,
+            "median": 1.0539866520557553,
+            "p95": 1.401684789918363,
+            "max": 1.4267999299336225,
+            "sum": 38.95830056909472
+          },
+          "host_prepare": {
+            "n": 37,
+            "mean": 0.676711778590657,
+            "median": 0.6861626438330859,
+            "p95": 0.8620271494146436,
+            "max": 0.8868274861015379,
+            "sum": 25.03833580785431
+          },
+          "cpu_copy": {
+            "n": 37,
+            "mean": 0.5257702187660176,
+            "median": 0.5450327654834837,
+            "p95": 0.6460669895168394,
+            "max": 0.662783526815474,
+            "sum": 19.45349809434265
+          },
+          "cpu_read": {
+            "n": 37,
+            "mean": 0.5300309145675676,
+            "median": 0.549624335,
+            "p95": 0.65121781,
+            "max": 0.6672608,
+            "sum": 19.611143839
+          },
+          "refresh_elapsed": {
+            "n": 37,
+            "mean": 1.1982982737213574,
+            "median": 1.1988742630928755,
+            "p95": 1.5521673278417438,
+            "max": 1.8822809478733689,
+            "sum": 44.337036127690226
+          }
+        },
+        "aggregate_seconds_per_GiB": {
+          "assembly": 2.064703606799553,
+          "host_prepare": 1.326976318154539,
+          "cpu_copy": 1.0309922941587604,
+          "cpu_read": 1.039347169315939,
+          "refresh_elapsed": 2.3497646732636035
+        },
+        "admission_wait_seconds": 0.0,
+        "private_forward_steps": 0
+      },
+      "restores": {
+        "resident": {
+          "n": 328,
+          "elapsed_seconds": {
+            "n": 328,
+            "mean": 0.19582400087440363,
+            "median": 0.10170743393246084,
+            "p95": 0.5576263091061264,
+            "max": 0.968369984999299,
+            "sum": 64.2302722868044
+          },
+          "uploaded_GiB": 0.0
+        },
+        "assembly": {
+          "n": 2,
+          "elapsed_seconds": {
+            "n": 2,
+            "mean": 3.60293587052729,
+            "median": 3.60293587052729,
+            "p95": 3.639204283012077,
+            "max": 3.639204283012077,
+            "sum": 7.20587174105458
+          },
+          "uploaded_GiB": 2.881603240966797
+        }
+      },
+      "cold_restores": 2,
+      "host_telemetry_available": true,
+      "engine_to_bridge_delivery": {
+        "engine_to_bridge_finish_seconds": {
+          "n": 331,
+          "mean": 0.7088377353287896,
+          "median": 0.3038506507873535,
+          "p95": 3.8419156074523926,
+          "max": 15.568336248397827,
+          "sum": 234.62529039382935
+        },
+        "over_3s": 21,
+        "over_5s": 11
+      },
+      "real_tool_results": 400
+    }
+  ],
+  "latest_campaign": {
+    "completed_arms": [
+      "old-a"
+    ],
+    "interrupted_arms": [
+      {
+        "id": "current-a",
+        "status": "interrupted",
+        "reason": "Infrastructure stopped during the window, followed by user pause and reported GPU shutdown. Missing a completed 900-second boundary; no complete-arm throughput is reported.",
+        "included_in_completed_results": false
+      }
+    ],
+    "not_started": [
+      "old-b",
+      "fixed_input_diagnostics",
+      "optimized_15_minute_validation"
+    ],
+    "failed_prior_attempt": {
+      "campaign": "kvmem-5090-prefill-investigation-20261031-r1",
+      "arm": "old-a",
+      "included_in_results": false,
+      "reason": "Two client RemoteProtocolError responses while server generation continued; root cause unproven."
+    },
+    "common_transport_change": {
+      "path": "benchmarks/deepswe/claude_bridge.py",
+      "old_sha256": "310f2bc9265a98bb3ba64cc0b20457a3efeea128adb7c90032f0e389c5e52edd",
+      "new_sha256": "eeafa2006fef544abf4663157c580d6ce158cd1a28b9c4582b9f1ede158ed3b2",
+      "change": "Disable model HTTP keepalive reuse equally for every arm. No model-request retries added.",
+      "reason": "Prior old-a failed with two RemoteProtocolError responses while model server continued. Root cause not proven; failed run is retained and excluded."
+    },
+    "comparability_limit": "HTTP keepalive is disabled equally for all latest planned arms, but historical completed campaigns used the original transport. Latest old-a versus historical is observational, not an isolated code comparison. No model retries were added."
+  },
+  "latest_old_a_details": {
+    "mtp": {
+      "drafts": 55166.0,
+      "draft_tokens": 220648.0,
+      "accepted_draft_tokens": 146408.0,
+      "draft_acceptance_rate": 0.6635364925129619,
+      "mean_acceptance_length": 3.653953522096944
+    },
+    "warmup": {
+      "passed": true,
+      "input_tokens": 67584,
+      "input_sha256": "1bc29c9d13bd6ba101985c33bda99abc4af78474c5bc7ac88b7e39cf6dbe8197",
+      "client_seconds": 49.05355215072632,
+      "ttft_ms": 48004.27790801041
+    },
+    "counter_quality": {
+      "counter_samples": 690,
+      "bad_samples": 10,
+      "max_sample_gap_seconds": 14.136508464813232,
+      "counter_sample_gap_count": 11,
+      "generation_masked_bin_count": 14,
+      "generation_display_policy": "Hide every bin with positive overlap with a counter-sample gap greater than 3 seconds; full-window total and mean still use measured endpoints.",
+      "counter_integral_audit": true,
+      "missing_public_call_indices": 0
+    },
+    "numa_snapshots": [
+      {
+        "snapshot": "numa-early.json",
+        "resident_bytes_by_numa_node": {
+          "1": 8970739712,
+          "0": 200216576
+        },
+        "node1_fraction": 0.9781684079923073,
+        "cpu_affinity_was_bound": false,
+        "memory_policy_was_bound": false,
+        "scope": "Process resident-page placement snapshot, not memory bandwidth or causal evidence."
+      },
+      {
+        "snapshot": "numa-late.json",
+        "resident_bytes_by_numa_node": {
+          "1": 34692763648,
+          "0": 232157184
+        },
+        "node1_fraction": 0.9933526783033596,
+        "cpu_affinity_was_bound": false,
+        "memory_policy_was_bound": false,
+        "scope": "Process resident-page placement snapshot, not memory bandwidth or causal evidence."
+      },
+      {
+        "snapshot": "numa-middle.json",
+        "resident_bytes_by_numa_node": {
+          "1": 23583834112,
+          "0": 232026112
+        },
+        "node1_fraction": 0.9902574960628052,
+        "cpu_affinity_was_bound": false,
+        "memory_policy_was_bound": false,
+        "scope": "Process resident-page placement snapshot, not memory bandwidth or causal evidence."
+      }
+    ],
+    "audit": {
+      "runtime": "old",
+      "runtime_files": 1169,
+      "native_extension_sha256": "517c0e123c46fdd268d30359c9676ac2ac994b6c0484a1976ac5f87da0e1810b",
+      "model_settings_equal_to_reference": true,
+      "cold_restores": 2,
+      "pressure_refreshes": 37,
+      "inputs_sha256": {
+        "manifest.json": "7efce0fca5b813497c63899303c678b632e4056a9d0eda620c4067fe0d77e8b3",
+        "tasks.txt": "2018d2de77eb2c869d6cf94515ae746f42bd90b6ccb473819ef06013abab7ec8",
+        "profile.json": "c1b52fcafbe19fa2ed86d147f427b2dcde4374daa13cdfaa80186b7ebd79b224",
+        "warmup.i32": "1bc29c9d13bd6ba101985c33bda99abc4af78474c5bc7ac88b7e39cf6dbe8197"
+      },
+      "summary_sha256": "99d9ea36691a62d47cc34c25bd4dff2393f22d2d8f54190dc287fc508228c501"
+    },
+    "audit_passed": true
+  },
+  "observations": {
+    "new_old_a_prefill_increase_percent_vs_historical": 12.297832059909242,
+    "finding": "Latest old-a model-step and per-refresh assembly durations are close to historical old, while executed prefill volume is higher, four-request decode opportunities are fewer, delivery tails are larger and two cold restores occur. These observations do not allocate the entire throughput difference to any one cause.",
+    "previous_current_finding": "Previously completed current has slower prefill/mixed model spans and larger pressure-assembly tails; same-count/similar-byte refreshes are not matched identical work or a controlled environment.",
+    "approximate_KV_matching": [
+      {
+        "left": "historical_old",
+        "right": "new_old_a",
+        "phase": "mixed",
+        "prefill_KV_bucket_width": 512,
+        "decode_KV_bucket_width": 1024,
+        "decode_matching": "mean",
+        "minimum_n_per_bin_per_run": 3,
+        "matched_bins": 24,
+        "left_batches": 110,
+        "right_batches": 123,
+        "model_ms": {
+          "left_mean_reweighted_to_right": 167.91847136435098,
+          "right_mean": 163.25356733120555,
+          "right_over_left": 0.972219232373647
+        }
+      },
+      {
+        "left": "historical_old",
+        "right": "new_old_a",
+        "phase": "four_decode",
+        "prefill_KV_bucket_width": 512,
+        "decode_KV_bucket_width": 1024,
+        "decode_matching": "mean",
+        "minimum_n_per_bin_per_run": 3,
+        "matched_bins": 11,
+        "left_batches": 10089,
+        "right_batches": 7601,
+        "model_ms": {
+          "left_mean_reweighted_to_right": 33.718524539688126,
+          "right_mean": 33.61911060778409,
+          "right_over_left": 0.9970516523702861
+        }
+      },
+      {
+        "left": "historical_old",
+        "right": "new_old_a",
+        "phase": "mixed",
+        "prefill_KV_bucket_width": 512,
+        "decode_KV_bucket_width": 1024,
+        "decode_matching": "individual",
+        "minimum_n_per_bin_per_run": 3,
+        "matched_bins": 0,
+        "left_batches": 0,
+        "right_batches": 0,
+        "model_ms": {
+          "left_mean_reweighted_to_right": null,
+          "right_mean": null,
+          "right_over_left": null
+        }
+      },
+      {
+        "left": "historical_old",
+        "right": "new_old_a",
+        "phase": "four_decode",
+        "prefill_KV_bucket_width": 512,
+        "decode_KV_bucket_width": 1024,
+        "decode_matching": "individual",
+        "minimum_n_per_bin_per_run": 3,
+        "matched_bins": 43,
+        "left_batches": 1882,
+        "right_batches": 1480,
+        "model_ms": {
+          "left_mean_reweighted_to_right": 33.778587310899475,
+          "right_mean": 33.53981365642032,
+          "right_over_left": 0.9929312125376508
+        }
+      }
+    ],
+    "matching_limit": "Bucketed KV lengths and batch geometry only; matched bins require at least 3 samples per run. Mean-peer-KV mixed matching is approximate; the narrow per-peer mixed match has zero bins.",
+    "cold_restore_limit": "Two cold service intervals total 7.20587174105458 seconds and may overlap public work. Pressure retention is an inferred contributor, not a logged per-eviction causal proof.",
+    "regression_cause_confirmed": false,
+    "new_optimization_validated": false
+  },
+  "earlier_1_41x_attribution_correction": {
+    "scope": "Historical eight-agent 109.89 to 155.04 tokens/s combined-variant observation; original counts retained in deepswe-rtx5090-active-kv-20261031.json.",
+    "split_metadata_hunk_present": true,
+    "split_metadata_hunk_reached_in_measured_configuration": false,
+    "actual_path": "generic packed assembly: raw cache disabled and resident-V reuse false",
+    "generic_assembler_changed": false,
+    "chunk_blocks": [
+      4,
+      16
+    ],
+    "payload_MiB": [
+      4.25,
+      17.0
+    ],
+    "parallel_gather_threshold_bytes": 8388608,
+    "configured_cpu_gather_workers": 8,
+    "effective_cpu_gather_workers": [
+      1,
+      8
+    ],
+    "interpretation": "Cannot attribute the observed 1.41x ratio to split-metadata batching. Chunk size changes launch count, staging/H2D extent and crosses the CPU parallel-gather threshold. Individual contributions have not been isolated."
+  },
+  "unrun_follow_up": [
+    {
+      "candidate": "Fixed-input old/current diagnostics",
+      "status": "not_run",
+      "plan": "Use identical recorded input tokens, output lengths, public-prefill shape and pressure-refresh state; retain the original warmup and profile and verify actual batch composition. Separate byte-equivalence checks from performance timing."
+    },
+    {
+      "candidate": "CPU/NUMA controls",
+      "status": "not_run",
+      "plan": "Apply the same permitted node-0 CPU affinity to both diagnostic server supervisors before model creation; record allowed/selected CPUs and actual memory placement. CPU affinity is not memory binding. Check clocks, power, host scheduling and sampling overhead."
+    },
+    {
+      "candidate": "Idle attention retention fraction 0.675",
+      "status": "not_run",
+      "current_fraction": 0.5,
+      "candidate_fraction": 0.675,
+      "native_pool_pages": 185,
+      "null_page_count": 1,
+      "current_attention_retention_cap": 92,
+      "candidate_attention_retention_cap": 124,
+      "four_owner_attention_pages": 124,
+      "remaining_pool_pages_after_candidate_cap_and_null": 60,
+      "plan": "Test the same four returning owners with the existing pool and lease/revocation protections. Do not change the default or claim support for four retained owners plus four different active owners. CPU capacity arithmetic is not GPU validation."
+    },
+    {
+      "candidate": "Generic cross-layer assembly fusion and chunk isolation",
+      "status": "not_run",
+      "plan": "First measure host-launch, gather and transfer costs with fixed inputs; verify generic-path eligibility and byte equality including partial tails. To isolate chunking from parallel gather, compare 4/7 blocks below 8 MiB or hold cpu_gather_workers=1 for 4/16 before production-worker validation."
+    },
+    {
+      "candidate": "Alternating live-agent validation",
+      "status": "not_run",
+      "plan": "Complete old/current/old with common transport, observability, task set and warmup; then validate any confirmed optimization for 15 minutes. Do not fill missing arms with partial counters."
+    }
+  ],
+  "submission_validation": {
+    "scope": "Parent-reported focused CPU qualification of the submitted runtime/test candidates, separate from historical GPU experiments.",
+    "cpu_passed": 125,
+    "gpu_skipped": 17,
+    "gpu_performance_restarted_after_pause": false,
+    "documentation_check": "Portable selected fields and markdown table checked against saved evidence; no GPU or remote execution."
+  },
+  "plots": {
+    "throughput": "../assets/deepswe-rtx5090-old-repeat-throughput-20261031.png",
+    "latency": "../assets/deepswe-rtx5090-old-repeat-latency-20261031.png",
+    "scope": "Historical old versus latest completed old-a only, not a completed current-a comparison. Ten-second generation bins intersecting counter gaps greater than 3 seconds are blank; public-prefill values use model-step records."
+  },
+  "source_evidence_sha256": {
+    "artifacts/kvmem-5090-prefill-investigation-20261031-r2/old-a-historical-analysis.json": "13cebf9b797ca109b81278832f8ecf011a9658d9816192f8a8c1194d6b85d2f5",
+    "artifacts/kvmem-5090-prefill-investigation-20261031-r2/old-a-summary.json": "99d9ea36691a62d47cc34c25bd4dff2393f22d2d8f54190dc287fc508228c501",
+    "artifacts/kvmem-5090-prefill-investigation-20261031-r2/audit-old-a.json": "25a9fdd07a410ebe1beae575657627fb4fe14880c5f11deb8b7dee917e719bdf",
+    "artifacts/kvmem-5090-prefill-investigation-20261031-r2/protocol.json": "5dba4d9dd0bdf0ab06d30b3bc85b096adc308d951e1ce30a66dc30e1c9b207ac",
+    "artifacts/kvmem-5090-prefill-investigation-20261031-r2/user-pause.json": "25fa182327f51e13761d958b1a7ae2e5708a8bf2be1d38e3f4a97e9fdca7cb75",
+    "artifacts/kvmem-5090-prefill-investigation-20261031-r2/live-current-a/run.json": "623846437af72bc3e6720a80723e8a18564394f1ac8eabe3faaf821e8e4d559f",
+    "artifacts/kvmem-5090-prefill-investigation-20261031-r2/idle-retention-capacity-review.json": "a2ed41577e2386bd7e18d1cbf278d7d6d6b39a50fc4e16fcd43f391ff21cd140",
+    "artifacts/kvmem-5090-assembly-review-20261031/path-reachability-audit.json": "70eee98d1b2a3617fb058399cd8804f2834c51c9614d6b5d74f444fb8b1c928e",
+    "artifacts/kvmem-5090-four-agent-regression-20261031-r2/real-agent-comparison.json": "c3ce14b5a54037be8065cd7c62aabcc8833f37151a5d2e80416d1a12fbbd189b",
+    "docs/benchmarks/deepswe-rtx5090-agents-20261031.json": "657d8a9af8cbae752cfaa21334c0ab47de6d26da93933a6cf478e6d1538ac3ae"
+  },
+  "limitations": [
+    "One completed latest repeat; alternating order is incomplete.",
+    "Natural task trajectories and response delivery differ even with identical initial samples.",
+    "Latest old-a has 11 counter-sample gaps greater than 3 seconds; 14 of 90 displayed generation bins are masked, while endpoint totals remain available.",
+    "Detailed host-state telemetry and NUMA placement are unavailable for the two historical completed windows; environment equivalence is not established.",
+    "Private raw logs and frozen workspaces are identified by portable campaign names and hashes but are not distributed in this checkout."
+  ]
+}

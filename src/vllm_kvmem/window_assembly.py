@@ -669,12 +669,27 @@ class NativeWindowAssembler:
             groups[hits[i] is not None,i in resident_index].append(i)
         # Every cache hit consumes its old slot before any miss may evict it.
         for (hit,reuse),indices in groups.items():
+            if not indices:
+                continue
+            clock = time.perf_counter()
+            # Upload this group's immutable addressing once. Per-chunk pinned
+            # allocations and three tiny H2D copies otherwise sit between the
+            # large KV transfers. Views below retain the same completion-owned
+            # storage, including the final short chunk. Uncached staging indices
+            # restart at zero for each chunk; cache/resident indices stay global.
+            count = len(indices)
+            metadata = self._upload_metadata(
+                [pending[i].to_base for i in indices] +
+                [hits[i] if hit else j % self.chunk_blocks for j,i in enumerate(indices)] +
+                [resident_index[i] if reuse else j % self.chunk_blocks for j,i in enumerate(indices)])
+            host_seconds += time.perf_counter() - clock
             for begin in range(0,len(indices),self.chunk_blocks):
                 chunk=indices[begin:begin+self.chunk_blocks]
                 clock=time.perf_counter()
-                bases=self._upload_metadata([pending[i].to_base for i in chunk])
-                raw_indices=self._upload_metadata([hits[i] if hit else j for j,i in enumerate(chunk)])
-                value_indices=self._upload_metadata([resident_index[i] if reuse else j for j,i in enumerate(chunk)])
+                end = begin + len(chunk)
+                bases=metadata[begin:end]
+                raw_indices=metadata[count+begin:count+end]
+                value_indices=metadata[2*count+begin:2*count+end]
                 gpu=None
                 slot=None
                 stride=raw_bytes

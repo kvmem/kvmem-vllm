@@ -206,11 +206,18 @@ class KVMemScheduler(Scheduler):
             if self.draft_contract is not None and self.draft_contract.method != 'mtp':
                 raise ValueError('Idle active residency currently qualifies target-only or native MTP')
             from .active_residency import ActiveResidency
+            tool_grace = None
+            if options.active_tool_grace_ms:
+                from .tool_grace import ToolGrace
+                tool_grace = ToolGrace(options.active_tool_grace_ms, options.active_tool_max_wait_ms,
+                    output=Path(os.environ['KVMEM_RUNNER_PROBE_DIR']) / 'tool_grace.jsonl')
             residency = ActiveResidency(self.window_managers, self.kv_cache_manager.block_pool,
                 options.active_resident_ttl_ms, options.active_resident_max_fraction,
-                pressure_only=options.active_resident_pressure_only)
+                pressure_only=options.active_resident_pressure_only, tool_grace=tool_grace)
             self.connector.active_residency = self.kv_cache_manager.active_residency = residency
             self.kv_cache_manager.resident_entry = self.connector.sessions.requests.get
+            if tool_grace is not None:
+                self.connector.tool_grace_allows = self.kv_cache_manager.tool_grace_allows
         if options.async_restore:
             from .restore_admission import RestoreAdmission
             self.connector.restore_admission = self.kv_cache_manager.restore_admission = RestoreAdmission(

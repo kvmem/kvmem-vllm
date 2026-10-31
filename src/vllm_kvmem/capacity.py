@@ -146,6 +146,33 @@ class ReservedKVCacheManager:
         revocable = sum(len(v.blocks) for v in residency.entries.values()) if residency is not None else 0
         return 'gpu_lifetime_budget' if required > self.block_pool.get_num_free_blocks() + revocable else None
 
+    def tool_grace_allows(self, request):
+        """Skip a cold waiter before native allocation, so hot peers can pass.
+
+        Reserve all admitted requests' future growth. A grace period delays
+        only a new admission that would need protected idle attention pages.
+        Native allocation remains authoritative and running growth never waits.
+        """
+        residency = self.active_residency
+        policy = residency.tool_grace if residency is not None else None
+        rid = request.request_id
+        if policy is None or rid in self.reservations:
+            return True
+        residency.expire()
+        arrival = policy.arrivals.get(rid)
+        if arrival is None or arrival.namespace in residency.entries:
+            return True
+        protected = [v for v in residency.entries.values() if policy.protected(v)]
+        if not protected:
+            return True
+        tokens = min(self.native.max_model_len, request.num_prompt_tokens + request.max_tokens +
+                     2 * self.lookahead + getattr(self, 'guided_reserve', 0))
+        needed = self._remaining(rid, self._demand(tokens)) + sum(
+            self._remaining(key, quota) for key, (_, quota) in self.reservations.items() if key != rid)
+        available = self.block_pool.get_num_free_blocks() + sum(
+            len(v.blocks) for v in residency.entries.values() if not policy.protected(v))
+        return needed <= available or not policy.defer(rid)
+
     def allocate_slots(self, request, num_new_tokens, *args, **kwargs):
         gate = self.restore_admission
         permit = (gate.before_allocate(request, kwargs['num_external_computed_tokens'])

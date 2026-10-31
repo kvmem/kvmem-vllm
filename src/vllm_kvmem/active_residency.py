@@ -19,6 +19,7 @@ class ActiveView:
     window: int
     groups: tuple
     expires: float
+    protected_until: float = 0.
 
     @property
     def blocks(self):
@@ -26,13 +27,15 @@ class ActiveView:
 
 
 class ActiveResidency:
-    def __init__(self, managers, pool, ttl_ms, max_fraction, *, pressure_only=False, clock=time.monotonic):
+    def __init__(self, managers, pool, ttl_ms, max_fraction, *, pressure_only=False,
+                 clock=time.monotonic, tool_grace=None):
         self.managers, self.pool, self.clock = managers, pool, clock
         self.ttl = None if pressure_only else ttl_ms / 1000
         self.max_blocks = int((pool.num_gpu_blocks - 1) * max_fraction)
         self.entries = OrderedDict()
         self.hits = self.retained = self.expired = self.pressure_evictions = self.mismatches = 0
         self.reused_tokens = 0
+        self.tool_grace = tool_grace
 
     def _drop(self, namespace, reason):
         view = self.entries.pop(namespace)
@@ -72,7 +75,8 @@ class ActiveResidency:
                 raise ValueError('Durable active view differs from terminal native allocation')
             groups.append((group, blocks))
         view = ActiveView(notice.namespace, notice.generation, notice.history, notice.window,
-                          tuple(groups), float('inf') if self.ttl is None else self.clock() + self.ttl)
+                          tuple(groups), float('inf') if self.ttl is None else self.clock() + self.ttl,
+                          self.tool_grace.retired(notice.namespace, notice.generation) if self.tool_grace else 0.)
         if len(view.blocks) > self.max_blocks:
             return
         while self.entries and sum(len(v.blocks) for v in self.entries.values()) + len(view.blocks) > self.max_blocks:
@@ -99,7 +103,12 @@ class ActiveResidency:
         return view
 
     def make_room(self, required_free, *, protect=None):
-        for key, view in list(self.entries.items()):
+        entries = list(self.entries.items())
+        if self.tool_grace is not None:
+            # Cold admission was checked before the native allocation loop.
+            # Running growth and fairness overrides may still revoke idle KV.
+            entries.sort(key=lambda item: self.tool_grace.protected(item[1]))
+        for key, view in entries:
             if self.pool.get_num_free_blocks() >= required_free:
                 break
             if view is not protect:
@@ -142,4 +151,5 @@ class ActiveResidency:
         return dict(retention_policy='pressure' if self.ttl is None else 'ttl',
             idle_views=len(self.entries), idle_blocks=sum(len(v.blocks) for v in self.entries.values()),
             max_blocks=self.max_blocks, retained=self.retained, hits=self.hits, reused_tokens=self.reused_tokens,
-            expired=self.expired, pressure_evictions=self.pressure_evictions, mismatches=self.mismatches)
+            expired=self.expired, pressure_evictions=self.pressure_evictions, mismatches=self.mismatches,
+            tool_grace=self.tool_grace.snapshot() if self.tool_grace else None)

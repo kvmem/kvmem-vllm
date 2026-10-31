@@ -1,0 +1,1890 @@
+{
+  "date": "2026-10-31",
+  "scope": "Real DeepSWE active-KV handoff profiling; eight agents and a GPU request limit of four. This is a separate workload from the earlier four-agent native-vLLM comparison.",
+  "hardware": {
+    "GPU": "NVIDIA GeForce RTX 5090",
+    "total_memory_mib": 32607,
+    "driver": "595.91.07"
+  },
+  "fixed": {
+    "model": "Qwen3.8-27B NVFP4",
+    "model_architecture": "Qwen3_5ForConditionalGeneration",
+    "vllm": "0.30.0",
+    "torch": "2.13.0+cu130",
+    "flashinfer": "0.6.18.post1",
+    "KV_dtype": "FP8 E4M3",
+    "context_limit": 262144,
+    "K": 36864,
+    "G": 12288,
+    "MTP": 4,
+    "agents": 8,
+    "GPU_request_limit": 4,
+    "task_queue": 16,
+    "window_seconds": 900,
+    "query_replay_budget": 2304,
+    "effective_batch_tokens": 2324,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "seed": 1000,
+    "thinking_token_budget": 4096,
+    "MLP_offload": false,
+    "input_embedding": "Same BF16 CPU UVA mapping in both arms",
+    "host_stage_timing": true,
+    "restore_stage_timing": true,
+    "Torch_profiler_during_timed_windows": false
+  },
+  "definitions": {
+    "generation_throughput": "Accepted server output-token counter delta / actual elapsed counter-sampling interval; includes unfinished requests, prefill, tools, restores and queueing.",
+    "model_turn_QPS": "Model calls completed before the 900-second cutoff / 900; not completed-task QPS.",
+    "memory": "Whole-device NVML used plus reserved, sampled at 20 Hz.",
+    "restore_time": "Restore suspension to ready; excludes scheduler admission wait. Includes host preparation, transfer and completion observation.",
+    "host_prepare": "Host wall intervals inside KV assembly; includes waits and overlaps other activity. Not exclusive CPU execution or PCIe bandwidth.",
+    "GPU_spans": "CUDA event spans include host launch gaps and overlapping background work; not exclusive GPU busy time."
+  },
+  "changes": {
+    "common": [
+      "Private Query capture uses one owned allocation rather than concatenating another full-size tensor.",
+      "MeanK FP16 conversion uses bounded Query chunks (64 MiB for this geometry), preserving the full eligible-page softmax domain.",
+      "Query and batch budgets raised equally to accommodate the intact 2203-token instruction in task eight."
+    ],
+    "candidate": [
+      "Coalesce immutable KV assembly metadata uploads per group.",
+      "Increase assembly_chunk_blocks from 4 to 16."
+    ]
+  },
+  "runs": {
+    "baseline-bounded": {
+      "measurements": {
+        "generated_tokens": 99045.0,
+        "generation_tokens_per_second": 109.88751194414297,
+        "counter_measurement_seconds": 901.3308086395264,
+        "completed_model_turns": 251,
+        "model_turn_qps": 0.2788888888888889,
+        "prompt_length": {
+          "n": 259,
+          "mean": 62993.74903474903,
+          "median": 60302,
+          "p95": 125586,
+          "max": 163227
+        },
+        "request_queue_ms": {
+          "n": 251,
+          "mean": 13194.605700305267,
+          "median": 15413.234462961555,
+          "p95": 34147.18850608915,
+          "max": 58497.83129803836
+        },
+        "ttft_ms": {
+          "n": 251,
+          "mean": 5184.9277124358005,
+          "median": 3643.637899076566,
+          "p95": 17338.30095315352,
+          "max": 39601.48192709312
+        },
+        "preemptions": 0.0,
+        "task_admissions": 8,
+        "completed_tasks": [],
+        "naturally_completed_tasks": [],
+        "never_admitted_tasks": 8
+      },
+      "tool_results": 372,
+      "memory": {
+        "all_peak_gib": 31.7943115234375,
+        "window_peak_gib": 31.3236083984375,
+        "device_gib": 31.8427734375
+      },
+      "KV_handoff": {
+        "retirement_scope": "Matched completion records retained by the bounded archive log; coverage and dropped records are explicit. This may omit early-window acknowledgments.",
+        "finished_to_retirement_ack_seconds": {
+          "n": 248,
+          "mean": 0.12331445001238477,
+          "median": 0.08723803237080574,
+          "p95": 0.305583565030247,
+          "max": 0.816581015009433
+        },
+        "finished_requests": 251,
+        "retirement_records_retained": 256,
+        "retirement_records_dropped": 13,
+        "resident": {
+          "completed_restores": 113,
+          "restore_seconds": {
+            "n": 113,
+            "mean": 0.36072699694103044,
+            "median": 0.13757198792882264,
+            "p95": 1.4007051968947053,
+            "max": 1.9828986269421875
+          },
+          "host_prepare_seconds": {
+            "n": 113,
+            "mean": 0.0,
+            "median": 0.0,
+            "p95": 0.0,
+            "max": 0.0
+          },
+          "KV_uploaded_bytes": 0,
+          "model_uploaded_bytes": 17840013312,
+          "active_tokens": {
+            "n": 113,
+            "mean": 39056.63716814159,
+            "median": 40868,
+            "p95": 48134,
+            "max": 49037
+          },
+          "admission_wait_seconds": {
+            "n": 113,
+            "mean": 0.037134814479973466,
+            "median": 0.0009932240936905146,
+            "p95": 0.16051351511850953,
+            "max": 1.4842107079457492
+          },
+          "arrival_to_ready_seconds": {
+            "n": 113,
+            "mean": 0.46029138021517246,
+            "median": 0.20838848920539021,
+            "p95": 1.6263344299513847,
+            "max": 2.603699645958841
+          },
+          "with_public_peers": 111
+        },
+        "assembly": {
+          "completed_restores": 134,
+          "restore_seconds": {
+            "n": 134,
+            "mean": 2.8969797935274277,
+            "median": 2.9159506923751906,
+            "p95": 3.916195117868483,
+            "max": 4.631266446085647
+          },
+          "host_prepare_seconds": {
+            "n": 134,
+            "mean": 1.6158960497409884,
+            "median": 1.632342279306613,
+            "p95": 2.2612563364673406,
+            "max": 2.427506687119603
+          },
+          "KV_uploaded_bytes": 174456117248,
+          "model_uploaded_bytes": 21155414016,
+          "active_tokens": {
+            "n": 134,
+            "mean": 37394.05223880597,
+            "median": 39579.0,
+            "p95": 47321,
+            "max": 48993
+          },
+          "admission_wait_seconds": {
+            "n": 134,
+            "mean": 18.010261884784505,
+            "median": 18.808735401486047,
+            "p95": 32.934263840084895,
+            "max": 42.78106941608712
+          },
+          "arrival_to_ready_seconds": {
+            "n": 134,
+            "mean": 20.94872323988499,
+            "median": 22.329653844470158,
+            "p95": 36.142450666986406,
+            "max": 45.73825130495243
+          },
+          "with_public_peers": 134
+        },
+        "refresh": {
+          "pressure": {
+            "completed": 32,
+            "seconds": {
+              "n": 32,
+              "mean": 1.2671126795103191,
+              "median": 0.9604166685603559,
+              "p95": 3.0154332760721445,
+              "max": 3.365170310018584
+            },
+            "query_host_seconds": {
+              "n": 32,
+              "mean": 0,
+              "median": 0.0,
+              "p95": 0,
+              "max": 0
+            },
+            "selection_seconds": {
+              "n": 32,
+              "mean": 0.024068048180197366,
+              "median": 0.024737842031754553,
+              "p95": 0.03138794586993754,
+              "max": 0.060699930880218744
+            },
+            "assembly_submit_seconds": {
+              "n": 32,
+              "mean": 0.6737149275868433,
+              "median": 0.6867235135287046,
+              "p95": 1.1402279559988528,
+              "max": 1.1670462239999324
+            },
+            "lane_wait_seconds": {
+              "n": 32,
+              "mean": 0.45662933938001515,
+              "median": 0.1706482395529747,
+              "p95": 1.9981129430234432,
+              "max": 2.1153054509777576
+            }
+          }
+        }
+      },
+      "steps": {
+        "scope": "CUDA-event spans include host submission gaps, sampling, MTP and capture; not pure kernel time. Attribution by actual batch composition, exclusive groups. First/last batches are selected by host start; boundary slop is reported.",
+        "window_seconds": 900.0,
+        "offset_seconds": 1791877460.0699587,
+        "clock_offset_range_seconds": 4.410743713378906e-05,
+        "sampled_call_indices": [
+          562,
+          9817
+        ],
+        "missing_call_indices": 0,
+        "all": {
+          "batches": 9256,
+          "model_span_seconds": 765.5080063266754,
+          "maintenance_span_seconds": 105.58894175783544,
+          "mean_model_span_ms": 82.70397648300296,
+          "prefill_tokens": 649127
+        },
+        "pure_decode": {
+          "batches": 7347,
+          "model_span_seconds": 264.42599886512755,
+          "maintenance_span_seconds": 49.22543661753088,
+          "mean_model_span_ms": 35.99101658705969,
+          "prefill_tokens": 0
+        },
+        "prefill_or_mixed": {
+          "batches": 1909,
+          "model_span_seconds": 501.08200746154785,
+          "maintenance_span_seconds": 56.36350514030457,
+          "mean_model_span_ms": 262.48402695733256,
+          "prefill_tokens": 649127
+        },
+        "outside_sampled_spans_seconds": 28.903051553726186,
+        "first_batch_seconds": 11.652474641799927,
+        "last_batch_seconds": 899.9467244148254,
+        "groups": {
+          "prefill=0,decode=1": {
+            "batches": 167,
+            "model_span_seconds": 5.950857765197754,
+            "maintenance_span_seconds": 3.732299436509609,
+            "mean_model_span_ms": 35.63387883351948,
+            "prefill_tokens": 0
+          },
+          "prefill=0,decode=2": {
+            "batches": 1304,
+            "model_span_seconds": 46.27844134712219,
+            "maintenance_span_seconds": 16.06282116702199,
+            "mean_model_span_ms": 35.48960226006303,
+            "prefill_tokens": 0
+          },
+          "prefill=0,decode=3": {
+            "batches": 3336,
+            "model_span_seconds": 124.96436463928222,
+            "maintenance_span_seconds": 25.658520518735052,
+            "mean_model_span_ms": 37.45934191825007,
+            "prefill_tokens": 0
+          },
+          "prefill=0,decode=4": {
+            "batches": 2540,
+            "model_span_seconds": 87.2323351135254,
+            "maintenance_span_seconds": 3.7717954952642323,
+            "mean_model_span_ms": 34.34343902107299,
+            "prefill_tokens": 0
+          },
+          "prefill=1,decode=0": {
+            "batches": 6,
+            "model_span_seconds": 2.1366112518310545,
+            "maintenance_span_seconds": 0.4835517101287842,
+            "mean_model_span_ms": 356.1018753051758,
+            "prefill_tokens": 1333
+          },
+          "prefill=1,decode=1": {
+            "batches": 83,
+            "model_span_seconds": 32.72604666900635,
+            "maintenance_span_seconds": 5.281309731960297,
+            "mean_model_span_ms": 394.2897189036909,
+            "prefill_tokens": 18953
+          },
+          "prefill=1,decode=2": {
+            "batches": 412,
+            "model_span_seconds": 145.09749571990966,
+            "maintenance_span_seconds": 14.888850365161895,
+            "mean_model_span_ms": 352.1783876696837,
+            "prefill_tokens": 96267
+          },
+          "prefill=1,decode=3": {
+            "batches": 878,
+            "model_span_seconds": 147.6243486328125,
+            "maintenance_span_seconds": 19.818740636348725,
+            "mean_model_span_ms": 168.13707133577734,
+            "prefill_tokens": 212245
+          },
+          "prefill=2,decode=0": {
+            "batches": 2,
+            "model_span_seconds": 0.8532097778320312,
+            "maintenance_span_seconds": 0.12328508758544922,
+            "mean_model_span_ms": 426.6048889160156,
+            "prefill_tokens": 2347
+          },
+          "prefill=2,decode=1": {
+            "batches": 61,
+            "model_span_seconds": 25.414038787841797,
+            "maintenance_span_seconds": 3.3123239874839783,
+            "mean_model_span_ms": 416.6235866859311,
+            "prefill_tokens": 29271
+          },
+          "prefill=2,decode=2": {
+            "batches": 301,
+            "model_span_seconds": 89.51827810668945,
+            "maintenance_span_seconds": 9.350868613243103,
+            "mean_model_span_ms": 297.4029172979716,
+            "prefill_tokens": 141544
+          },
+          "prefill=3,decode=0": {
+            "batches": 5,
+            "model_span_seconds": 1.9333645324707032,
+            "maintenance_span_seconds": 0.2660828456878662,
+            "mean_model_span_ms": 386.67290649414065,
+            "prefill_tokens": 4302
+          },
+          "prefill=3,decode=1": {
+            "batches": 87,
+            "model_span_seconds": 29.56188244628906,
+            "maintenance_span_seconds": 2.0959482617378233,
+            "mean_model_span_ms": 339.7917522561961,
+            "prefill_tokens": 67313
+          },
+          "prefill=4,decode=0": {
+            "batches": 74,
+            "model_span_seconds": 26.216731536865236,
+            "maintenance_span_seconds": 0.7425439009666442,
+            "mean_model_span_ms": 354.2801559035843,
+            "prefill_tokens": 75552
+          }
+        },
+        "checkpoint_host_seconds": {
+          "accepted_counter_read": 0.0020370951388031244,
+          "page_table_gpu_read": 0.31235902989283204,
+          "recurrent_views": 0.6362587185576558,
+          "draft_views": 0.0072751776315271854,
+          "pinned_payload_allocation": 0.8728536334820092,
+          "direct_payload_d2h_submit": 0.22158958041109145,
+          "direct_payload_d2h_wait": 0.5872677867300808,
+          "canonicalize_submit": 1.6509265284985304,
+          "canonicalize_wait": 0.008596159284934402
+        },
+        "checkpoint_count": 259
+      },
+      "gpu_utilization_percent": {
+        "n": 17852,
+        "mean": 47.11460900739413,
+        "median": 45.0,
+        "p95": 92,
+        "max": 100
+      },
+      "sm_clock_mhz": {
+        "n": 17852,
+        "mean": 2826.464877884831,
+        "median": 2835.0,
+        "p95": 2865,
+        "max": 2887
+      },
+      "power_watts": {
+        "n": 17852,
+        "mean": 250.9718574389424,
+        "median": 244.915,
+        "p95": 381.971,
+        "max": 444.703
+      },
+      "host_timing": {
+        "scope": "Complete spans within the formal window. Inclusive stages overlap; self times subtract direct child spans on the same thread. Parallel threads overlap and totals are not exclusive GPU time. Tracing/export adds overhead in both arms.",
+        "export_status": {
+          "recorded": 1039957,
+          "written": 1039957,
+          "dropped": 0,
+          "pending": 0,
+          "export_seconds": 61.8626603637822,
+          "error": null,
+          "stopping": false
+        },
+        "span_count": 454318,
+        "groups": [
+          {
+            "thread": 52434,
+            "stage": "runner.execute_model",
+            "calls": 9336,
+            "wall_seconds": 626.6161135374568,
+            "cpu_seconds": 492.3834605370031,
+            "self_wall_seconds": 533.7125430572778,
+            "self_cpu_seconds": 441.47226667599705
+          },
+          {
+            "thread": 52869,
+            "stage": "transfer.upload",
+            "calls": 42478,
+            "wall_seconds": 222.64713025395758,
+            "cpu_seconds": 25.14245187000087,
+            "self_wall_seconds": 222.64713025395758,
+            "self_cpu_seconds": 25.14245187000087
+          },
+          {
+            "thread": 52869,
+            "stage": "window.assemble",
+            "calls": 166,
+            "wall_seconds": 367.25038395798765,
+            "cpu_seconds": 125.16625773000007,
+            "self_wall_seconds": 144.78108970238827,
+            "self_cpu_seconds": 100.05814640299924
+          },
+          {
+            "thread": 52434,
+            "stage": "action.capture",
+            "calls": 9255,
+            "wall_seconds": 41.19939647777937,
+            "cpu_seconds": 36.39269791300279,
+            "self_wall_seconds": 41.02985104289837,
+            "self_cpu_seconds": 36.23816663199693
+          },
+          {
+            "thread": 52646,
+            "stage": "capture.copy_source_owners",
+            "calls": 6615,
+            "wall_seconds": 76.54034113674425,
+            "cpu_seconds": 58.86826723499965,
+            "self_wall_seconds": 26.481795382220298,
+            "self_cpu_seconds": 21.22887020899993
+          },
+          {
+            "thread": 52646,
+            "stage": "authority.commit_append",
+            "calls": 6615,
+            "wall_seconds": 25.952328184153885,
+            "cpu_seconds": 21.200955262000587,
+            "self_wall_seconds": 23.557786899618804,
+            "self_cpu_seconds": 19.47920015900026
+          },
+          {
+            "thread": 52434,
+            "stage": "action.prepare",
+            "calls": 9256,
+            "wall_seconds": 31.770093532744795,
+            "cpu_seconds": 12.716529485000478,
+            "self_wall_seconds": 23.012977794278413,
+            "self_cpu_seconds": 11.459040024997307
+          },
+          {
+            "thread": 52434,
+            "stage": "window.prepare",
+            "calls": 9256,
+            "wall_seconds": 22.211663042660803,
+            "cpu_seconds": 10.131306968001468,
+            "self_wall_seconds": 22.211663042660803,
+            "self_cpu_seconds": 10.131306968001468
+          },
+          {
+            "thread": 52434,
+            "stage": "capture.copy_source_owners",
+            "calls": 8002,
+            "wall_seconds": 34.18173773866147,
+            "cpu_seconds": 28.985314171995697,
+            "self_wall_seconds": 16.617747235577554,
+            "self_cpu_seconds": 16.14358951400277
+          },
+          {
+            "thread": 52434,
+            "stage": "capture.pack_fp8",
+            "calls": 11077,
+            "wall_seconds": 11.821330693783239,
+            "cpu_seconds": 8.206386486997644,
+            "self_wall_seconds": 11.821330693783239,
+            "self_cpu_seconds": 8.206386486997644
+          },
+          {
+            "thread": 52434,
+            "stage": "runner.add_requests",
+            "calls": 9336,
+            "wall_seconds": 11.15513415262103,
+            "cpu_seconds": 7.018178643998851,
+            "self_wall_seconds": 11.15513415262103,
+            "self_cpu_seconds": 7.018178643998851
+          },
+          {
+            "thread": 52434,
+            "stage": "authority.append_batch",
+            "calls": 8002,
+            "wall_seconds": 17.563990503083915,
+            "cpu_seconds": 12.841724657992927,
+            "self_wall_seconds": 10.578759232303128,
+            "self_cpu_seconds": 7.631905291005012
+          },
+          {
+            "thread": 52646,
+            "stage": "authority.append_batch",
+            "calls": 6615,
+            "wall_seconds": 50.05854575452395,
+            "cpu_seconds": 37.63939702599971,
+            "self_wall_seconds": 10.42679869895801,
+            "self_cpu_seconds": 6.187846949999145
+          },
+          {
+            "thread": 52434,
+            "stage": "capture.drain_requests",
+            "calls": 51816,
+            "wall_seconds": 46.98310999921523,
+            "cpu_seconds": 32.68454262001546,
+            "self_wall_seconds": 9.899791443254799,
+            "self_cpu_seconds": 1.2805965310163856
+          },
+          {
+            "thread": 52646,
+            "stage": "append.scatter",
+            "calls": 6615,
+            "wall_seconds": 7.891630239551887,
+            "cpu_seconds": 7.075311083999743,
+            "self_wall_seconds": 7.891630239551887,
+            "self_cpu_seconds": 7.075311083999743
+          },
+          {
+            "thread": 52434,
+            "stage": "runner.prepare_attn",
+            "calls": 9256,
+            "wall_seconds": 61.41375975986011,
+            "cpu_seconds": 27.05787389000534,
+            "self_wall_seconds": 6.90075202123262,
+            "self_cpu_seconds": 3.811081038007046
+          },
+          {
+            "thread": 52434,
+            "stage": "capture.finish",
+            "calls": 9336,
+            "wall_seconds": 12.23075248929672,
+            "cpu_seconds": 10.823888725005702,
+            "self_wall_seconds": 6.523403747705743,
+            "self_cpu_seconds": 6.1475807060071475
+          },
+          {
+            "thread": 52646,
+            "stage": "authority.prepare_append",
+            "calls": 6615,
+            "wall_seconds": 5.787788631860167,
+            "cpu_seconds": 3.175283730000242,
+            "self_wall_seconds": 4.899301971308887,
+            "self_cpu_seconds": 2.4138951170005107
+          },
+          {
+            "thread": 52646,
+            "stage": "capture.publish_claim",
+            "calls": 6615,
+            "wall_seconds": 80.80529255024157,
+            "cpu_seconds": 62.08454024699989,
+            "self_wall_seconds": 4.237865688977763,
+            "self_cpu_seconds": 3.1976539810006166
+          },
+          {
+            "thread": 52434,
+            "stage": "transfer.download",
+            "calls": 11077,
+            "wall_seconds": 3.3966272703837603,
+            "cpu_seconds": 1.7015373040032387,
+            "self_wall_seconds": 3.3966272703837603,
+            "self_cpu_seconds": 1.7015373040032387
+          },
+          {
+            "thread": 52646,
+            "stage": "authority.flush",
+            "calls": 13230,
+            "wall_seconds": 3.28302794508636,
+            "cpu_seconds": 2.4831437160000576,
+            "self_wall_seconds": 3.28302794508636,
+            "self_cpu_seconds": 2.4831437160000576
+          },
+          {
+            "thread": 52434,
+            "stage": "restore.step",
+            "calls": 9773,
+            "wall_seconds": 6.523012733086944,
+            "cpu_seconds": 5.2001409219972174,
+            "self_wall_seconds": 3.204499082872644,
+            "self_cpu_seconds": 1.9940168859976097
+          },
+          {
+            "thread": 52434,
+            "stage": "session.capture",
+            "calls": 259,
+            "wall_seconds": 4.468906776979566,
+            "cpu_seconds": 3.5281182249991616,
+            "self_wall_seconds": 2.4899691480677575,
+            "self_cpu_seconds": 2.048534355996537
+          },
+          {
+            "thread": 52434,
+            "stage": "authority.commit_append",
+            "calls": 23292,
+            "wall_seconds": 2.8439778480678797,
+            "cpu_seconds": 2.2146700609953314,
+            "self_wall_seconds": 2.34059889591299,
+            "self_cpu_seconds": 1.7635236690067018
+          },
+          {
+            "thread": 52646,
+            "stage": "capture.drain_requests",
+            "calls": 1818,
+            "wall_seconds": 82.99317286745645,
+            "cpu_seconds": 63.03978294800005,
+            "self_wall_seconds": 2.1878803172148764,
+            "self_cpu_seconds": 0.9552427010001594
+          },
+          {
+            "thread": 52434,
+            "stage": "append.scatter",
+            "calls": 8002,
+            "wall_seconds": 2.0355257221963257,
+            "cpu_seconds": 1.3514659669997968,
+            "self_wall_seconds": 2.0355257221963257,
+            "self_cpu_seconds": 1.3514659669997968
+          },
+          {
+            "thread": 52434,
+            "stage": "session.prepare_claim_window",
+            "calls": 247,
+            "wall_seconds": 3.1684927868191153,
+            "cpu_seconds": 3.056727459999763,
+            "self_wall_seconds": 1.8662762404419482,
+            "self_cpu_seconds": 1.7964184649994763
+          },
+          {
+            "thread": 52434,
+            "stage": "refresh.step",
+            "calls": 10368,
+            "wall_seconds": 8.340442747343332,
+            "cpu_seconds": 6.155137605003517,
+            "self_wall_seconds": 1.817176828160882,
+            "self_cpu_seconds": 0.9547719810061039
+          },
+          {
+            "thread": 52434,
+            "stage": "capture.publish_claim",
+            "calls": 8002,
+            "wall_seconds": 36.012219943106174,
+            "cpu_seconds": 30.79999504099584,
+            "self_wall_seconds": 1.790687444852665,
+            "self_cpu_seconds": 1.7886880710041737
+          },
+          {
+            "thread": 52434,
+            "stage": "authority.prepare_append",
+            "calls": 23292,
+            "wall_seconds": 2.1057277005165815,
+            "cpu_seconds": 1.643683338992787,
+            "self_wall_seconds": 1.748974401736632,
+            "self_cpu_seconds": 1.3340096929917422
+          },
+          {
+            "thread": 52434,
+            "stage": "capture.submit",
+            "calls": 9255,
+            "wall_seconds": 94.97951572714373,
+            "cpu_seconds": 78.27014445399914,
+            "self_wall_seconds": 1.6535855666734278,
+            "self_cpu_seconds": 1.6659121299935578
+          },
+          {
+            "thread": 52434,
+            "stage": "capture.progress",
+            "calls": 1549,
+            "wall_seconds": 1.3653377152513713,
+            "cpu_seconds": 0.7990737850031451,
+            "self_wall_seconds": 1.3653377152513713,
+            "self_cpu_seconds": 0.7990737850031451
+          },
+          {
+            "thread": 52434,
+            "stage": "recurrent.canonicalize",
+            "calls": 257,
+            "wall_seconds": 1.6904160832054913,
+            "cpu_seconds": 1.2050001520020146,
+            "self_wall_seconds": 1.0343953585252166,
+            "self_cpu_seconds": 0.6640037440018887
+          },
+          {
+            "thread": 52434,
+            "stage": "recurrent.borrow",
+            "calls": 516,
+            "wall_seconds": 0.9901661502663046,
+            "cpu_seconds": 0.8387901470009069,
+            "self_wall_seconds": 0.9901661502663046,
+            "self_cpu_seconds": 0.8387901470009069
+          },
+          {
+            "thread": 52434,
+            "stage": "authority.flush",
+            "calls": 46835,
+            "wall_seconds": 0.8631471551489085,
+            "cpu_seconds": 0.7636543329902565,
+            "self_wall_seconds": 0.8631471551489085,
+            "self_cpu_seconds": 0.7636543329902565
+          },
+          {
+            "thread": 52434,
+            "stage": "action.restore",
+            "calls": 247,
+            "wall_seconds": 1.302216546377167,
+            "cpu_seconds": 1.2603089950002868,
+            "self_wall_seconds": 0.6684742115903646,
+            "self_cpu_seconds": 0.6476261320007666
+          },
+          {
+            "thread": 52434,
+            "stage": "prefill.restore",
+            "calls": 247,
+            "wall_seconds": 0.6337423347868025,
+            "cpu_seconds": 0.6126828629995202,
+            "self_wall_seconds": 0.6337423347868025,
+            "self_cpu_seconds": 0.6126828629995202
+          },
+          {
+            "thread": 52434,
+            "stage": "checkpoint.capture",
+            "calls": 259,
+            "wall_seconds": 5.897127304924652,
+            "cpu_seconds": 4.857590362998394,
+            "self_wall_seconds": 0.547602360136807,
+            "self_cpu_seconds": 0.5395997599992484
+          },
+          {
+            "thread": 52434,
+            "stage": "capture.advance_publication",
+            "calls": 9336,
+            "wall_seconds": 7.142861056607217,
+            "cpu_seconds": 5.158064141994316,
+            "self_wall_seconds": 0.44444894627667964,
+            "self_cpu_seconds": 0.4471769049891918
+          },
+          {
+            "thread": 52434,
+            "stage": "checkpoint.validate",
+            "calls": 259,
+            "wall_seconds": 0.3096841056831181,
+            "cpu_seconds": 0.30828111500073874,
+            "self_wall_seconds": 0.3096841056831181,
+            "self_cpu_seconds": 0.30828111500073874
+          },
+          {
+            "thread": 52434,
+            "stage": "checkpoint.token_bytes",
+            "calls": 506,
+            "wall_seconds": 0.26526199164800346,
+            "cpu_seconds": 0.2643232469997656,
+            "self_wall_seconds": 0.26526199164800346,
+            "self_cpu_seconds": 0.2643232469997656
+          },
+          {
+            "thread": 52434,
+            "stage": "checkpoint.remove",
+            "calls": 243,
+            "wall_seconds": 0.18520062509924173,
+            "cpu_seconds": 0.10009841000066899,
+            "self_wall_seconds": 0.18520062509924173,
+            "self_cpu_seconds": 0.10009841000066899
+          },
+          {
+            "thread": 52434,
+            "stage": "action.snapshot",
+            "calls": 259,
+            "wall_seconds": 0.15035114740021527,
+            "cpu_seconds": 0.1463974520001443,
+            "self_wall_seconds": 0.15035114740021527,
+            "self_cpu_seconds": 0.1463974520001443
+          },
+          {
+            "thread": 52434,
+            "stage": "maintenance.pump",
+            "calls": 5035,
+            "wall_seconds": 6.565024303738028,
+            "cpu_seconds": 4.602794164001409,
+            "self_wall_seconds": 0.10279618529602885,
+            "self_cpu_seconds": 0.10318442600095068
+          },
+          {
+            "thread": 52434,
+            "stage": "checkpoint.window",
+            "calls": 259,
+            "wall_seconds": 0.4298252670560032,
+            "cpu_seconds": 0.42844984499924976,
+            "self_wall_seconds": 0.0898358307313174,
+            "self_cpu_seconds": 0.09026949099774129
+          },
+          {
+            "thread": 52434,
+            "stage": "session.before_attention",
+            "calls": 9289,
+            "wall_seconds": 0.4794711503200233,
+            "cpu_seconds": 0.37038210099626667,
+            "self_wall_seconds": 0.0736077013425529,
+            "self_cpu_seconds": 0.06686380899640199
+          },
+          {
+            "thread": 52646,
+            "stage": "capture.drain",
+            "calls": 1818,
+            "wall_seconds": 83.03845528955571,
+            "cpu_seconds": 63.08304010199991,
+            "self_wall_seconds": 0.045282422099262476,
+            "self_cpu_seconds": 0.04325715399986407
+          },
+          {
+            "thread": 52434,
+            "stage": "capture.query_history",
+            "calls": 23292,
+            "wall_seconds": 0.03979475959204137,
+            "cpu_seconds": 0.02599279799596843,
+            "self_wall_seconds": 0.03979475959204137,
+            "self_cpu_seconds": 0.02599279799596843
+          },
+          {
+            "thread": 52434,
+            "stage": "checkpoint.prefix",
+            "calls": 259,
+            "wall_seconds": 0.029465754749253392,
+            "cpu_seconds": 0.02926255700111824,
+            "self_wall_seconds": 0.029465754749253392,
+            "self_cpu_seconds": 0.02926255700111824
+          },
+          {
+            "thread": 52646,
+            "stage": "capture.query_history",
+            "calls": 6615,
+            "wall_seconds": 0.0270857245195657,
+            "cpu_seconds": 0.01861903099962703,
+            "self_wall_seconds": 0.0270857245195657,
+            "self_cpu_seconds": 0.01861903099962703
+          },
+          {
+            "thread": 52434,
+            "stage": "session.detach",
+            "calls": 251,
+            "wall_seconds": 5.564113548723981,
+            "cpu_seconds": 4.580570887999386,
+            "self_wall_seconds": 0.015514947939664125,
+            "self_cpu_seconds": 0.01550007100087214
+          },
+          {
+            "thread": 52869,
+            "stage": "authority.flush",
+            "calls": 33,
+            "wall_seconds": 0.008724711835384369,
+            "cpu_seconds": 0.008587321000135262,
+            "self_wall_seconds": 0.008724711835384369,
+            "self_cpu_seconds": 0.008587321000135262
+          },
+          {
+            "thread": 52434,
+            "stage": "capture.join_cpu_scatter",
+            "calls": 1818,
+            "wall_seconds": 0.007682922994717956,
+            "cpu_seconds": 0.006863418000534693,
+            "self_wall_seconds": 0.007682922994717956,
+            "self_cpu_seconds": 0.006863418000534693
+          },
+          {
+            "thread": 52434,
+            "stage": "checkpoint.protect",
+            "calls": 259,
+            "wall_seconds": 0.0008395758923143148,
+            "cpu_seconds": 0.0006366819996515005,
+            "self_wall_seconds": 0.0008395758923143148,
+            "self_cpu_seconds": 0.0006366819996515005
+          }
+        ]
+      },
+      "effective_profile_sha256": "887cd6a145bab217987ec8df7e24b549b2fa99ef478f073ab98bc8159a60d50d",
+      "runtime_inventory_sha256": "839d2f08bed107e63bc35c24eaf2a9c835f67ca9a1497e6472647ed569338d57"
+    },
+    "optimized-bounded": {
+      "measurements": {
+        "generated_tokens": 139585.0,
+        "generation_tokens_per_second": 155.03774694634717,
+        "counter_measurement_seconds": 900.3291311264038,
+        "completed_model_turns": 290,
+        "model_turn_qps": 0.32222222222222224,
+        "prompt_length": {
+          "n": 298,
+          "mean": 62446.842281879195,
+          "median": 61612.5,
+          "p95": 108890,
+          "max": 123774
+        },
+        "request_queue_ms": {
+          "n": 290,
+          "mean": 11609.581823306607,
+          "median": 11559.757365495898,
+          "p95": 28842.887306120247,
+          "max": 35915.6466179993
+        },
+        "ttft_ms": {
+          "n": 290,
+          "mean": 3530.673243799889,
+          "median": 2039.4157939590514,
+          "p95": 12654.897946864367,
+          "max": 30788.265449926257
+        },
+        "preemptions": 0.0,
+        "task_admissions": 8,
+        "completed_tasks": [],
+        "naturally_completed_tasks": [],
+        "never_admitted_tasks": 8
+      },
+      "tool_results": 364,
+      "memory": {
+        "all_peak_gib": 31.8021240234375,
+        "window_peak_gib": 31.3450927734375,
+        "device_gib": 31.8427734375
+      },
+      "KV_handoff": {
+        "retirement_scope": "Matched completion records retained by the bounded archive log; coverage and dropped records are explicit. This may omit early-window acknowledgments.",
+        "finished_to_retirement_ack_seconds": {
+          "n": 248,
+          "mean": 0.10736738689968572,
+          "median": 0.07850596506614238,
+          "p95": 0.23072117986157537,
+          "max": 0.9588747050147504
+        },
+        "finished_requests": 290,
+        "retirement_records_retained": 256,
+        "retirement_records_dropped": 52,
+        "resident": {
+          "completed_restores": 69,
+          "restore_seconds": {
+            "n": 69,
+            "mean": 0.3134112534437167,
+            "median": 0.17530521797016263,
+            "p95": 0.8656998409423977,
+            "max": 1.99473912618123
+          },
+          "host_prepare_seconds": {
+            "n": 69,
+            "mean": 0.0,
+            "median": 0.0,
+            "p95": 0.0,
+            "max": 0.0
+          },
+          "KV_uploaded_bytes": 0,
+          "model_uploaded_bytes": 10893459456,
+          "active_tokens": {
+            "n": 69,
+            "mean": 36915.92753623189,
+            "median": 39829,
+            "p95": 48031,
+            "max": 49032
+          },
+          "admission_wait_seconds": {
+            "n": 69,
+            "mean": 0.023399589991574918,
+            "median": 0.0010423471685498953,
+            "p95": 0.11697915196418762,
+            "max": 0.25193617795594037
+          },
+          "arrival_to_ready_seconds": {
+            "n": 69,
+            "mean": 0.39903766323434375,
+            "median": 0.2686985230538994,
+            "p95": 1.0222100650426,
+            "max": 2.1243165128398687
+          },
+          "with_public_peers": 69
+        },
+        "assembly": {
+          "completed_restores": 217,
+          "restore_seconds": {
+            "n": 217,
+            "mean": 1.013270854527208,
+            "median": 1.0090265481267124,
+            "p95": 1.367797028971836,
+            "max": 1.7353232100140303
+          },
+          "host_prepare_seconds": {
+            "n": 217,
+            "mean": 0.4640386920606863,
+            "median": 0.4656741959042847,
+            "p95": 0.6577834796626121,
+            "max": 0.7325559183955193
+          },
+          "KV_uploaded_bytes": 293860827136,
+          "model_uploaded_bytes": 34259140608,
+          "active_tokens": {
+            "n": 217,
+            "mean": 38895.83410138249,
+            "median": 40266,
+            "p95": 47956,
+            "max": 48820
+          },
+          "admission_wait_seconds": {
+            "n": 217,
+            "mean": 7.545536056537533,
+            "median": 7.23811125010252,
+            "p95": 20.06597682205029,
+            "max": 27.82605488714762
+          },
+          "arrival_to_ready_seconds": {
+            "n": 217,
+            "mean": 8.594589748537846,
+            "median": 8.34636166295968,
+            "p95": 21.20573108107783,
+            "max": 28.779985011089593
+          },
+          "with_public_peers": 217
+        },
+        "refresh": {
+          "pressure": {
+            "completed": 36,
+            "seconds": {
+              "n": 36,
+              "mean": 0.3726149570559048,
+              "median": 0.3347109613241628,
+              "p95": 0.8333766111172736,
+              "max": 1.066158943111077
+            },
+            "query_host_seconds": {
+              "n": 36,
+              "mean": 0,
+              "median": 0.0,
+              "p95": 0,
+              "max": 0
+            },
+            "selection_seconds": {
+              "n": 36,
+              "mean": 0.023713134145105466,
+              "median": 0.02259522001259029,
+              "p95": 0.04774382011964917,
+              "max": 0.05481103202328086
+            },
+            "assembly_submit_seconds": {
+              "n": 36,
+              "mean": 0.22121016340356114,
+              "median": 0.22886325407307595,
+              "p95": 0.32387838582508266,
+              "max": 0.3498603191692382
+            },
+            "lane_wait_seconds": {
+              "n": 36,
+              "mean": 0.042014728119182915,
+              "median": 0.0015709295403212309,
+              "p95": 0.25268713594414294,
+              "max": 0.356509102974087
+            }
+          }
+        }
+      },
+      "steps": {
+        "scope": "CUDA-event spans include host submission gaps, sampling, MTP and capture; not pure kernel time. Attribution by actual batch composition, exclusive groups. First/last batches are selected by host start; boundary slop is reported.",
+        "window_seconds": 900.0,
+        "offset_seconds": 1791877460.0699587,
+        "clock_offset_range_seconds": 4.5299530029296875e-05,
+        "sampled_call_indices": [
+          548,
+          11924
+        ],
+        "missing_call_indices": 0,
+        "all": {
+          "batches": 11377,
+          "model_span_seconds": 768.4320674819946,
+          "maintenance_span_seconds": 104.9858466086015,
+          "mean_model_span_ms": 67.54259185039946,
+          "prefill_tokens": 631137
+        },
+        "pure_decode": {
+          "batches": 9510,
+          "model_span_seconds": 349.13558583068846,
+          "maintenance_span_seconds": 55.4069871449098,
+          "mean_model_span_ms": 36.71246959313233,
+          "prefill_tokens": 0
+        },
+        "prefill_or_mixed": {
+          "batches": 1867,
+          "model_span_seconds": 419.2964816513062,
+          "maintenance_span_seconds": 49.578859463691714,
+          "mean_model_span_ms": 224.5830110612245,
+          "prefill_tokens": 631137
+        },
+        "outside_sampled_spans_seconds": 26.58208606910705,
+        "first_batch_seconds": 8.337588787078857,
+        "last_batch_seconds": 899.9758431911469,
+        "groups": {
+          "prefill=0,decode=1": {
+            "batches": 36,
+            "model_span_seconds": 1.4455402050018311,
+            "maintenance_span_seconds": 1.4744209928512573,
+            "mean_model_span_ms": 40.153894583384194,
+            "prefill_tokens": 0
+          },
+          "prefill=0,decode=2": {
+            "batches": 591,
+            "model_span_seconds": 23.460159999847413,
+            "maintenance_span_seconds": 11.86167404924333,
+            "mean_model_span_ms": 39.69570219940341,
+            "prefill_tokens": 0
+          },
+          "prefill=0,decode=3": {
+            "batches": 2741,
+            "model_span_seconds": 110.99782339096069,
+            "maintenance_span_seconds": 31.40508336186409,
+            "mean_model_span_ms": 40.49537518823812,
+            "prefill_tokens": 0
+          },
+          "prefill=0,decode=4": {
+            "batches": 6142,
+            "model_span_seconds": 213.23206223487853,
+            "maintenance_span_seconds": 10.665808740951121,
+            "mean_model_span_ms": 34.717040415968505,
+            "prefill_tokens": 0
+          },
+          "prefill=1,decode=0": {
+            "batches": 1,
+            "model_span_seconds": 0.18852963256835936,
+            "maintenance_span_seconds": 0.021090560913085938,
+            "mean_model_span_ms": 188.52963256835938,
+            "prefill_tokens": 256
+          },
+          "prefill=1,decode=1": {
+            "batches": 20,
+            "model_span_seconds": 7.32732553100586,
+            "maintenance_span_seconds": 1.2718766937255859,
+            "mean_model_span_ms": 366.366276550293,
+            "prefill_tokens": 4563
+          },
+          "prefill=1,decode=2": {
+            "batches": 266,
+            "model_span_seconds": 69.02929607391357,
+            "maintenance_span_seconds": 9.987691939115525,
+            "mean_model_span_ms": 259.50863185681794,
+            "prefill_tokens": 60461
+          },
+          "prefill=1,decode=3": {
+            "batches": 1095,
+            "model_span_seconds": 183.53751347351073,
+            "maintenance_span_seconds": 24.433256525754928,
+            "mean_model_span_ms": 167.6141675557176,
+            "prefill_tokens": 255044
+          },
+          "prefill=2,decode=0": {
+            "batches": 2,
+            "model_span_seconds": 0.7894685821533203,
+            "maintenance_span_seconds": 0.1829147481918335,
+            "mean_model_span_ms": 394.73429107666016,
+            "prefill_tokens": 2815
+          },
+          "prefill=2,decode=1": {
+            "batches": 43,
+            "model_span_seconds": 16.313044555664064,
+            "maintenance_span_seconds": 2.265738389968872,
+            "mean_model_span_ms": 379.3731292014898,
+            "prefill_tokens": 19620
+          },
+          "prefill=2,decode=2": {
+            "batches": 283,
+            "model_span_seconds": 83.55868591308594,
+            "maintenance_span_seconds": 8.609808738946915,
+            "mean_model_span_ms": 295.26037425118705,
+            "prefill_tokens": 134071
+          },
+          "prefill=3,decode=0": {
+            "batches": 5,
+            "model_span_seconds": 1.3028633728027343,
+            "maintenance_span_seconds": 0.1456762845516205,
+            "mean_model_span_ms": 260.5726745605469,
+            "prefill_tokens": 4643
+          },
+          "prefill=3,decode=1": {
+            "batches": 29,
+            "model_span_seconds": 10.521633544921874,
+            "maintenance_span_seconds": 1.3151014642715455,
+            "mean_model_span_ms": 362.81494982489227,
+            "prefill_tokens": 22997
+          },
+          "prefill=4,decode=0": {
+            "batches": 123,
+            "model_span_seconds": 46.72812097167969,
+            "maintenance_span_seconds": 1.3457041182518006,
+            "mean_model_span_ms": 379.9034225339812,
+            "prefill_tokens": 126667
+          }
+        },
+        "checkpoint_host_seconds": {
+          "accepted_counter_read": 0.0022153002209961414,
+          "page_table_gpu_read": 0.35993791790679097,
+          "recurrent_views": 0.6500268646050245,
+          "draft_views": 0.0067704045213758945,
+          "pinned_payload_allocation": 0.7693063921760768,
+          "direct_payload_d2h_submit": 0.23041426669806242,
+          "direct_payload_d2h_wait": 0.7029356232378632,
+          "canonicalize_submit": 1.8403294084127992,
+          "canonicalize_wait": 0.012320416746661067
+        },
+        "checkpoint_count": 298
+      },
+      "gpu_utilization_percent": {
+        "n": 17849,
+        "mean": 55.282704913440526,
+        "median": 52,
+        "p95": 97,
+        "max": 100
+      },
+      "sm_clock_mhz": {
+        "n": 17849,
+        "mean": 2825.187629559079,
+        "median": 2827,
+        "p95": 2865,
+        "max": 2880
+      },
+      "power_watts": {
+        "n": 17849,
+        "mean": 282.1844992436551,
+        "median": 266.788,
+        "p95": 404.789,
+        "max": 448.221
+      },
+      "host_timing": {
+        "scope": "Complete spans within the formal window. Inclusive stages overlap; self times subtract direct child spans on the same thread. Parallel threads overlap and totals are not exclusive GPU time. Tracing/export adds overhead in both arms.",
+        "export_status": {
+          "recorded": 1063290,
+          "written": 1063290,
+          "dropped": 0,
+          "pending": 0,
+          "export_seconds": 60.16106418916024,
+          "error": null,
+          "stopping": false
+        },
+        "span_count": 524229,
+        "groups": [
+          {
+            "thread": 56114,
+            "stage": "runner.execute_model",
+            "calls": 11377,
+            "wall_seconds": 562.3493666811846,
+            "cpu_seconds": 456.3309279389961,
+            "self_wall_seconds": 465.6794030976016,
+            "self_cpu_seconds": 402.9318413850141
+          },
+          {
+            "thread": 56528,
+            "stage": "transfer.upload",
+            "calls": 17588,
+            "wall_seconds": 94.20275296107866,
+            "cpu_seconds": 15.360407339000687,
+            "self_wall_seconds": 94.20275296107866,
+            "self_cpu_seconds": 15.360407339000687
+          },
+          {
+            "thread": 56528,
+            "stage": "window.assemble",
+            "calls": 253,
+            "wall_seconds": 174.48362156981602,
+            "cpu_seconds": 69.46668474099992,
+            "self_wall_seconds": 80.28086860873736,
+            "self_cpu_seconds": 54.106277401999236
+          },
+          {
+            "thread": 56114,
+            "stage": "action.capture",
+            "calls": 11377,
+            "wall_seconds": 46.753665626747534,
+            "cpu_seconds": 41.908837440996365,
+            "self_wall_seconds": 46.524281301070005,
+            "self_cpu_seconds": 41.70119944099349
+          },
+          {
+            "thread": 56114,
+            "stage": "action.prepare",
+            "calls": 11377,
+            "wall_seconds": 36.35205142409541,
+            "cpu_seconds": 14.982813969997892,
+            "self_wall_seconds": 25.752011444885284,
+            "self_cpu_seconds": 13.354081477002296
+          },
+          {
+            "thread": 56325,
+            "stage": "capture.copy_source_owners",
+            "calls": 6649,
+            "wall_seconds": 74.62117466446944,
+            "cpu_seconds": 58.39253975299973,
+            "self_wall_seconds": 25.234144158195704,
+            "self_cpu_seconds": 20.633117857999657
+          },
+          {
+            "thread": 56325,
+            "stage": "authority.commit_append",
+            "calls": 6649,
+            "wall_seconds": 25.569150565890595,
+            "cpu_seconds": 21.16240092799925,
+            "self_wall_seconds": 23.10585880628787,
+            "self_cpu_seconds": 19.47964680499897
+          },
+          {
+            "thread": 56114,
+            "stage": "window.prepare",
+            "calls": 11377,
+            "wall_seconds": 17.8898641935084,
+            "cpu_seconds": 8.470764591004524,
+            "self_wall_seconds": 17.8898641935084,
+            "self_cpu_seconds": 8.470764591004524
+          },
+          {
+            "thread": 56114,
+            "stage": "capture.copy_source_owners",
+            "calls": 10429,
+            "wall_seconds": 40.146247094264254,
+            "cpu_seconds": 34.12204078799823,
+            "self_wall_seconds": 16.609483994776383,
+            "self_cpu_seconds": 16.14649932799648
+          },
+          {
+            "thread": 56114,
+            "stage": "authority.append_batch",
+            "calls": 10429,
+            "wall_seconds": 23.53676309948787,
+            "cpu_seconds": 17.97554146000175,
+            "self_wall_seconds": 14.009395917877555,
+            "self_cpu_seconds": 10.60154616501768
+          },
+          {
+            "thread": 56114,
+            "stage": "capture.pack_fp8",
+            "calls": 13113,
+            "wall_seconds": 12.521703538484871,
+            "cpu_seconds": 8.774842864005507,
+            "self_wall_seconds": 12.521703538484871,
+            "self_cpu_seconds": 8.774842864005507
+          },
+          {
+            "thread": 56114,
+            "stage": "runner.add_requests",
+            "calls": 11377,
+            "wall_seconds": 12.231590482406318,
+            "cpu_seconds": 7.303372470993281,
+            "self_wall_seconds": 12.231590482406318,
+            "self_cpu_seconds": 7.303372470993281
+          },
+          {
+            "thread": 56114,
+            "stage": "capture.drain_requests",
+            "calls": 65377,
+            "wall_seconds": 55.79095756052993,
+            "cpu_seconds": 38.83206414099055,
+            "self_wall_seconds": 11.918280584737659,
+            "self_cpu_seconds": 1.5388167989888188
+          },
+          {
+            "thread": 56325,
+            "stage": "authority.append_batch",
+            "calls": 6649,
+            "wall_seconds": 49.38703050627373,
+            "cpu_seconds": 37.759421895000074,
+            "self_wall_seconds": 10.372514423681423,
+            "self_cpu_seconds": 6.388893393000817
+          },
+          {
+            "thread": 56325,
+            "stage": "append.scatter",
+            "calls": 6649,
+            "wall_seconds": 7.962206683587283,
+            "cpu_seconds": 7.079865202999958,
+            "self_wall_seconds": 7.962206683587283,
+            "self_cpu_seconds": 7.079865202999958
+          },
+          {
+            "thread": 56114,
+            "stage": "runner.prepare_attn",
+            "calls": 11377,
+            "wall_seconds": 62.28714674082585,
+            "cpu_seconds": 28.406771105997905,
+            "self_wall_seconds": 7.378995639970526,
+            "self_cpu_seconds": 4.377007401988692
+          },
+          {
+            "thread": 56114,
+            "stage": "capture.finish",
+            "calls": 11377,
+            "wall_seconds": 13.391082832356915,
+            "cpu_seconds": 11.721722441999475,
+            "self_wall_seconds": 7.25921789300628,
+            "self_cpu_seconds": 6.915130433000968
+          },
+          {
+            "thread": 56325,
+            "stage": "authority.prepare_append",
+            "calls": 6649,
+            "wall_seconds": 5.48315883311443,
+            "cpu_seconds": 3.128262371000048,
+            "self_wall_seconds": 4.630171506898478,
+            "self_cpu_seconds": 2.3867232240001606
+          },
+          {
+            "thread": 56114,
+            "stage": "restore.step",
+            "calls": 5675,
+            "wall_seconds": 7.66834785300307,
+            "cpu_seconds": 5.738616608997688,
+            "self_wall_seconds": 4.3881078970152885,
+            "self_cpu_seconds": 2.544722149999018
+          },
+          {
+            "thread": 56325,
+            "stage": "capture.publish_claim",
+            "calls": 6649,
+            "wall_seconds": 78.7822681190446,
+            "cpu_seconds": 61.577911415999814,
+            "self_wall_seconds": 4.133019169559702,
+            "self_cpu_seconds": 3.166091176999881
+          },
+          {
+            "thread": 56114,
+            "stage": "transfer.download",
+            "calls": 13113,
+            "wall_seconds": 3.9415277717635036,
+            "cpu_seconds": 1.9562939609910472,
+            "self_wall_seconds": 3.9415277717635036,
+            "self_cpu_seconds": 1.9562939609910472
+          },
+          {
+            "thread": 56325,
+            "stage": "authority.flush",
+            "calls": 13298,
+            "wall_seconds": 3.316279085818678,
+            "cpu_seconds": 2.4242932700001667,
+            "self_wall_seconds": 3.316279085818678,
+            "self_cpu_seconds": 2.4242932700001667
+          },
+          {
+            "thread": 56114,
+            "stage": "authority.commit_append",
+            "calls": 34463,
+            "wall_seconds": 3.903733888408169,
+            "cpu_seconds": 3.13277803599226,
+            "self_wall_seconds": 3.1984435508493334,
+            "self_cpu_seconds": 2.506246461990827
+          },
+          {
+            "thread": 56114,
+            "stage": "session.capture",
+            "calls": 298,
+            "wall_seconds": 4.924027966801077,
+            "cpu_seconds": 3.6871167759988452,
+            "self_wall_seconds": 2.7447504673618823,
+            "self_cpu_seconds": 2.114961175996541
+          },
+          {
+            "thread": 56114,
+            "stage": "append.scatter",
+            "calls": 10429,
+            "wall_seconds": 2.7421705431770533,
+            "cpu_seconds": 1.9705786570016244,
+            "self_wall_seconds": 2.7421705431770533,
+            "self_cpu_seconds": 1.9705786570016244
+          },
+          {
+            "thread": 56114,
+            "stage": "authority.prepare_append",
+            "calls": 34463,
+            "wall_seconds": 2.8814627500250936,
+            "cpu_seconds": 2.2706386019901856,
+            "self_wall_seconds": 2.416520395781845,
+            "self_cpu_seconds": 1.8535519519857644
+          },
+          {
+            "thread": 56114,
+            "stage": "capture.publish_claim",
+            "calls": 10429,
+            "wall_seconds": 42.5759227364324,
+            "cpu_seconds": 36.53357827200267,
+            "self_wall_seconds": 2.369763260241598,
+            "self_cpu_seconds": 2.3715980159943797
+          },
+          {
+            "thread": 56325,
+            "stage": "capture.drain_requests",
+            "calls": 1743,
+            "wall_seconds": 80.95690547535196,
+            "cpu_seconds": 62.514452085999984,
+            "self_wall_seconds": 2.1746373563073575,
+            "self_cpu_seconds": 0.9365406700001699
+          },
+          {
+            "thread": 56114,
+            "stage": "session.prepare_claim_window",
+            "calls": 286,
+            "wall_seconds": 3.127266440540552,
+            "cpu_seconds": 3.0444300219997444,
+            "self_wall_seconds": 1.8874161003623158,
+            "self_cpu_seconds": 1.849996549998366
+          },
+          {
+            "thread": 56114,
+            "stage": "capture.submit",
+            "calls": 11377,
+            "wall_seconds": 108.94264933629893,
+            "cpu_seconds": 90.54533952099752,
+            "self_wall_seconds": 1.8394880641717464,
+            "self_cpu_seconds": 1.852332250005702
+          },
+          {
+            "thread": 56114,
+            "stage": "refresh.step",
+            "calls": 5914,
+            "wall_seconds": 9.416370046092197,
+            "cpu_seconds": 6.580604352998364,
+            "self_wall_seconds": 1.7477792103309184,
+            "self_cpu_seconds": 0.8417739380007561
+          },
+          {
+            "thread": 56114,
+            "stage": "capture.progress",
+            "calls": 1917,
+            "wall_seconds": 1.5686679636128247,
+            "cpu_seconds": 0.9595296190000226,
+            "self_wall_seconds": 1.5686679636128247,
+            "self_cpu_seconds": 0.9595296190000226
+          },
+          {
+            "thread": 56114,
+            "stage": "authority.flush",
+            "calls": 69216,
+            "wall_seconds": 1.172958322800696,
+            "cpu_seconds": 1.0461599010053533,
+            "self_wall_seconds": 1.172958322800696,
+            "self_cpu_seconds": 1.0461599010053533
+          },
+          {
+            "thread": 56114,
+            "stage": "recurrent.canonicalize",
+            "calls": 300,
+            "wall_seconds": 1.899995552841574,
+            "cpu_seconds": 1.3185512660008953,
+            "self_wall_seconds": 1.1243462588172406,
+            "self_cpu_seconds": 0.6978807059996939
+          },
+          {
+            "thread": 56114,
+            "stage": "recurrent.borrow",
+            "calls": 598,
+            "wall_seconds": 1.1210754555650055,
+            "cpu_seconds": 0.9256867430028706,
+            "self_wall_seconds": 1.1210754555650055,
+            "self_cpu_seconds": 0.9256867430028706
+          },
+          {
+            "thread": 56114,
+            "stage": "action.restore",
+            "calls": 286,
+            "wall_seconds": 1.2398503401782364,
+            "cpu_seconds": 1.1944334720013785,
+            "self_wall_seconds": 0.7001269971951842,
+            "self_cpu_seconds": 0.6769682480007191
+          },
+          {
+            "thread": 56114,
+            "stage": "checkpoint.capture",
+            "calls": 298,
+            "wall_seconds": 6.420826230430976,
+            "cpu_seconds": 5.093433574000528,
+            "self_wall_seconds": 0.5550282634794712,
+            "self_cpu_seconds": 0.5474539920023176
+          },
+          {
+            "thread": 56114,
+            "stage": "prefill.restore",
+            "calls": 286,
+            "wall_seconds": 0.5397233429830521,
+            "cpu_seconds": 0.5174652240006594,
+            "self_wall_seconds": 0.5397233429830521,
+            "self_cpu_seconds": 0.5174652240006594
+          },
+          {
+            "thread": 56114,
+            "stage": "capture.advance_publication",
+            "calls": 11377,
+            "wall_seconds": 7.87638301984407,
+            "cpu_seconds": 5.1595334249985285,
+            "self_wall_seconds": 0.3457258779089898,
+            "self_cpu_seconds": 0.3438878129915679
+          },
+          {
+            "thread": 56114,
+            "stage": "checkpoint.validate",
+            "calls": 298,
+            "wall_seconds": 0.3248969882261008,
+            "cpu_seconds": 0.3244579749988361,
+            "self_wall_seconds": 0.3248969882261008,
+            "self_cpu_seconds": 0.3244579749988361
+          },
+          {
+            "thread": 56114,
+            "stage": "checkpoint.token_bytes",
+            "calls": 584,
+            "wall_seconds": 0.28920748294331133,
+            "cpu_seconds": 0.2850249369997755,
+            "self_wall_seconds": 0.28920748294331133,
+            "self_cpu_seconds": 0.2850249369997755
+          },
+          {
+            "thread": 56114,
+            "stage": "checkpoint.remove",
+            "calls": 282,
+            "wall_seconds": 0.1870666502509266,
+            "cpu_seconds": 0.10609298899987607,
+            "self_wall_seconds": 0.1870666502509266,
+            "self_cpu_seconds": 0.10609298899987607
+          },
+          {
+            "thread": 56114,
+            "stage": "action.snapshot",
+            "calls": 298,
+            "wall_seconds": 0.17163967876695096,
+            "cpu_seconds": 0.17069229099956829,
+            "self_wall_seconds": 0.17163967876695096,
+            "self_cpu_seconds": 0.17069229099956829
+          },
+          {
+            "thread": 56114,
+            "stage": "checkpoint.window",
+            "calls": 298,
+            "wall_seconds": 0.44682970363646746,
+            "cpu_seconds": 0.4465170259990714,
+            "self_wall_seconds": 0.09292153036221862,
+            "self_cpu_seconds": 0.0934233430000404
+          },
+          {
+            "thread": 56114,
+            "stage": "session.before_attention",
+            "calls": 11413,
+            "wall_seconds": 0.5913526902440935,
+            "cpu_seconds": 0.5167860190064175,
+            "self_wall_seconds": 0.08385964692570269,
+            "self_cpu_seconds": 0.07575511800638424
+          },
+          {
+            "thread": 56114,
+            "stage": "maintenance.pump",
+            "calls": 3048,
+            "wall_seconds": 7.414113458245993,
+            "cpu_seconds": 4.724830953004016,
+            "self_wall_seconds": 0.0641321768052876,
+            "self_cpu_seconds": 0.06424571500662069
+          },
+          {
+            "thread": 56114,
+            "stage": "capture.query_history",
+            "calls": 34463,
+            "wall_seconds": 0.05991238192655146,
+            "cpu_seconds": 0.03993946801006132,
+            "self_wall_seconds": 0.05991238192655146,
+            "self_cpu_seconds": 0.03993946801006132
+          },
+          {
+            "thread": 56325,
+            "stage": "capture.drain",
+            "calls": 1743,
+            "wall_seconds": 81.0005238391459,
+            "cpu_seconds": 62.556675869000195,
+            "self_wall_seconds": 0.04361836379393935,
+            "self_cpu_seconds": 0.042223783000210346
+          },
+          {
+            "thread": 56114,
+            "stage": "checkpoint.prefix",
+            "calls": 298,
+            "wall_seconds": 0.028263836167752743,
+            "cpu_seconds": 0.02808807300010585,
+            "self_wall_seconds": 0.028263836167752743,
+            "self_cpu_seconds": 0.02808807300010585
+          },
+          {
+            "thread": 56325,
+            "stage": "capture.query_history",
+            "calls": 6649,
+            "wall_seconds": 0.02807428501546383,
+            "cpu_seconds": 0.019280486000202046,
+            "self_wall_seconds": 0.02807428501546383,
+            "self_cpu_seconds": 0.019280486000202046
+          },
+          {
+            "thread": 56114,
+            "stage": "session.detach",
+            "calls": 290,
+            "wall_seconds": 6.000587648944929,
+            "cpu_seconds": 4.708841764998567,
+            "self_wall_seconds": 0.01618838170543313,
+            "self_cpu_seconds": 0.016024928998035648
+          },
+          {
+            "thread": 56114,
+            "stage": "capture.join_cpu_scatter",
+            "calls": 1743,
+            "wall_seconds": 0.006930708885192871,
+            "cpu_seconds": 0.006182077001540165,
+            "self_wall_seconds": 0.006930708885192871,
+            "self_cpu_seconds": 0.006182077001540165
+          },
+          {
+            "thread": 56528,
+            "stage": "authority.flush",
+            "calls": 36,
+            "wall_seconds": 0.005787686677649617,
+            "cpu_seconds": 0.005668466999935617,
+            "self_wall_seconds": 0.005787686677649617,
+            "self_cpu_seconds": 0.005668466999935617
+          },
+          {
+            "thread": 56114,
+            "stage": "checkpoint.protect",
+            "calls": 298,
+            "wall_seconds": 0.0007473488803952932,
+            "cpu_seconds": 0.0005476350000890307,
+            "self_wall_seconds": 0.0007473488803952932,
+            "self_cpu_seconds": 0.0005476350000890307
+          }
+        ]
+      },
+      "effective_profile_sha256": "fdcfae36dff745b9a5e54c5e0b2d53b615839b6af92282c3edd9abfa53d5c691",
+      "runtime_inventory_sha256": "df4ebb70e1bd0ec4f2fc6850ad1bd3b1149c7978b0469280cf97a06f4c161945"
+    }
+  },
+  "ratios": {
+    "generation_tokens_per_second": 1.4108768521863937,
+    "model_turn_qps": 1.155378486055777
+  },
+  "audit": {
+    "at": 1793441229.8787282,
+    "runs": {
+      "baseline-bounded": {
+        "generated_tokens": 99045.0,
+        "measurement_seconds": 901.3308086395264,
+        "generation_tokens_per_second": 109.88751194414297,
+        "completed_model_turns": 251,
+        "model_turn_qps": 0.2788888888888889,
+        "preemptions": 0,
+        "memory_peak_bytes": 34138882048,
+        "cleanup_passed": true,
+        "capacity_passed": true
+      },
+      "optimized-bounded": {
+        "generated_tokens": 139585.0,
+        "measurement_seconds": 900.3291311264038,
+        "generation_tokens_per_second": 155.03774694634717,
+        "completed_model_turns": 290,
+        "model_turn_qps": 0.32222222222222224,
+        "preemptions": 0,
+        "memory_peak_bytes": 34147270656,
+        "cleanup_passed": true,
+        "capacity_passed": true
+      }
+    },
+    "effective_profile_differences": [
+      {
+        "path": "kvmem.assembly_chunk_blocks",
+        "before": 4,
+        "after": 16
+      }
+    ],
+    "generated_test_cache_differences": [
+      ".pytest_cache/.gitignore",
+      ".pytest_cache/CACHEDIR.TAG",
+      ".pytest_cache/README.md",
+      ".pytest_cache/v/cache/nodeids"
+    ],
+    "runtime_different_files": [
+      "src/vllm_kvmem/window_assembly.py",
+      "tests/test_window_assembly_chunks_gpu.py",
+      "tests/test_window_assembly_staging.py"
+    ],
+    "same_task_manifest": true,
+    "passed": true
+  },
+  "limitations": [
+    "One 900-second run per arm; stochastic trajectories and task progress diverge. No confidence interval or maximum sustainable QPS claim.",
+    "Both timed arms include the same host tracing. These are instrumented real-agent rates; a trace-free production speedup has not been established by this pair.",
+    "The frozen qualified 5090 runtime plus the focused patches was tested, not every unrelated change in the current worktree.",
+    "Unfinished task workspaces are preserved and unscored; model-turn throughput is not task-solving quality.",
+    "The historical four-agent 239.25 tokens/s result uses different agents, query/batch budgets and instrumentation, so it is not the before value for this optimization.",
+    "Retirement-ack timing uses the bounded retained log; sample coverage and dropped records are reported.",
+    "KV reconstruction GPU checks are byte-exact. Query capture preserves values; bounded MeanK accumulation is checked against the full FP16 reference with floating-point tolerance."
+  ],
+  "excluded_trials": [
+    {
+      "label": "profile-baseline",
+      "reason": "Three heavy Torch-profiler samples; diagnostic only. Workspaces recovered after snapshot commit timeout."
+    },
+    {
+      "label": "baseline",
+      "reason": "Task-eight Query exceeded the original 1856-token budget; HTTP 400; not a valid throughput run."
+    },
+    {
+      "label": "baseline-q2304",
+      "reason": "Capacity check OOM at full-size Query concatenation; real-agent window did not start."
+    },
+    {
+      "label": "baseline-buffer",
+      "reason": "Capacity check OOM at full-size FP16 Query conversion; real-agent window did not start."
+    }
+  ],
+  "validation": {
+    "CPU_checks": 120,
+    "GPU_assembly_and_raw_checks": {
+      "passed": 50,
+      "skipped": 10
+    },
+    "GPU_Query_and_scoring_suite": {
+      "passed": 17
+    },
+    "maximum_Query_capacity": "Four simultaneous 67584-token inputs, each with a 2304-token Query, passed in each arm; excluded from timed results."
+  },
+  "evidence_sha256": {
+    "live-baseline-bounded/manifest.json": "e4c1b8f93b0d18fce185049f3bc9f8f38720451c2d11b9a48e0e906cc2c89b6b",
+    "live-baseline-bounded/run.json": "cc85aa47f6c181ac2f9af1e79e8afd3ceb571ed518ff8953ff090ddc41ef6a4e",
+    "live-baseline-bounded/window-end-metrics.json": "e3d203ed7b8e50940c79bf460db4248899c35496f1c636756cace43060d1d09c",
+    "live-baseline-bounded/metrics-before-formal.txt": "47d2ddf1bfb037bcd6a3f7d365705fd528a71b1a3a7d3586f421fa47cf5b2c1a",
+    "remote-evidence/baseline-bounded/profile.json": "887cd6a145bab217987ec8df7e24b549b2fa99ef478f073ab98bc8159a60d50d",
+    "remote-evidence/baseline-bounded/runtime-sha256.json": "839d2f08bed107e63bc35c24eaf2a9c835f67ca9a1497e6472647ed569338d57",
+    "remote-evidence/baseline-bounded/cleanup.json": "9fcd3d4c64bfd419b0c4470365a44bf99b092ca1b10402ad53ab86907fb4fbb5",
+    "live-baseline-bounded/window-workspaces.json": "4527b28d4b180e05ad98bc67f6ba20ebba714f70640a566a04dd45193e367e5f",
+    "live-optimized-bounded/manifest.json": "e4c1b8f93b0d18fce185049f3bc9f8f38720451c2d11b9a48e0e906cc2c89b6b",
+    "live-optimized-bounded/run.json": "0620dd8730b7ca8a52649b3c9ed1440ae687ff10717958910195ef9f2dea864c",
+    "live-optimized-bounded/window-end-metrics.json": "d10c587d3d848a682dd98b5de309d7182c4baea67ec2b0af7dec8ee9f1134dd1",
+    "live-optimized-bounded/metrics-before-formal.txt": "8f7aec2340d87bb2a017bf991c869f61ab288ae1f5aeab805165c7b7df54db16",
+    "remote-evidence/optimized-bounded/profile.json": "fdcfae36dff745b9a5e54c5e0b2d53b615839b6af92282c3edd9abfa53d5c691",
+    "remote-evidence/optimized-bounded/runtime-sha256.json": "df4ebb70e1bd0ec4f2fc6850ad1bd3b1149c7978b0469280cf97a06f4c161945",
+    "remote-evidence/optimized-bounded/cleanup.json": "c8876e3222b151324137e860400689e197111ef800ef59d5fe477c9681e9b61e",
+    "live-optimized-bounded/window-workspaces.json": "4842da3dd6946bcd78668a6e8dca48f7a1e50ac43d142218f35221023ac6a36a",
+    "protocol.json": "c8b5dc1377b9dbcf28fde41a3990af245399204b70c7013f2f484f145dfb57f7",
+    "real-agent-comparison.json": "6bd25f18f12cc4343051bce57671db039502fdc08bf5329666252852005a7d21",
+    "independent-pair-audit.json": "c3f650f01c0a816be85129548ab5886690c4f09c5048d0dd7fab28019ed37923",
+    "clock-sync-check.json": "115f8350d3ebbe23fa4e4a294623bd1a04b9b757414799fbbea117b94c6bd3a1",
+    "agent-runtime-sha256.json": "97e03b47dfae3016ac85a125e89095a86c8dd1e0354d3a156a35635f211eb612",
+    "workspace-patch-sha256.json": "114f046c7a77328197a37498c36f45a98fc939f4d463cb54096710f3cf941592",
+    "gpu-checks/result.json": "d04b73790cd334b4125efe633ae92f5dbfc89432cbda0d20cd75de40bb1ae01b",
+    "gpu-query-scoring-checks/result.json": "ce70d3b7a6aad2c184b68f32b15ca30b091ead4a04444ceeb9ddaf62b32912c1",
+    "empty-query-validation.json": "01ef918435f7eac6f9c34196df2ae258c80f4f9f9372bd8fb9c4a9344b12d90b",
+    "empty-query-validation-tests.log": "a550855b7186377044302e8c3ff2d93d28f3b892113c143333cd1b941d139400",
+    "analyze_real.py": "cfa391f8c04808d533f9cfd70ed5c09d9feeeb29bb7d822289cf8c2edece8429",
+    "analyze_steps.py": "cf6f15003e4c872a0f9e18991db262faf6a9ba244a2c485e833e6e211377bd34",
+    "analyze_host.py": "2df9194e64a735a6f16629d305ab76b77423d4b7b6c6bef932bc2c14b826465b",
+    "audit_pair.py": "ec638b8af1c2b576513cd60431222c624f98755ec3d72c54674ac3d28364c328",
+    "local-cleanup-audit.json": "bab1546a39292e00af75ee4a2105cfaeb200c87ee6a7481fb6b19b6df4fcb56d"
+  },
+  "artifact_campaign": "kvmem-5090-profile-20261031-r1",
+  "final_source_validation": {
+    "scope": "Final source rejects empty Query geometry before chunking. This check is absent from the frozen timed runtimes; valid benchmark inputs take the same scoring path.",
+    "changed_files": [
+      "src/vllm_kvmem/cuda_scoring.py",
+      "src/vllm_kvmem/window_assembly.py",
+      "tests/test_original_cuda_scoring.py"
+    ],
+    "tests": "4 CPU tests passed; no local GPU used"
+  },
+  "interpretation_update_20261031": {
+    "scope": "Later source-path audit; original observed counters and evidence hashes are unchanged.",
+    "metadata_path": "The immutable metadata batching change is in _assemble_split_chunks. The measured raw-cache=0, resident-V-reuse=false configuration uses _assemble_generic, so this hunk cannot independently explain the observed pair.",
+    "chunking": "Changing assembly_chunk_blocks from 4 to 16 reduces submissions and increases a gather payload from 4.25 MiB to 17 MiB, crossing the 8 MiB parallel-gather threshold. These effects were not separately isolated.",
+    "causal_limit": "The 1.41x ratio is a single instrumented, live-task observation, not a validated production or metadata-only speedup."
+  }
+}

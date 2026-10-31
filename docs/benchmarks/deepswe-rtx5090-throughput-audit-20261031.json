@@ -1,0 +1,238 @@
+{
+  "scope": "Descriptive cross-run audit. Different live task trajectories and warmup/profiling protocols prevent causal attribution of cross-run rate differences.",
+  "runs": {
+    "four_agents": {
+      "generation_tokens_per_second": 239.25388681704612,
+      "generated_tokens": 215599.0,
+      "completed_turns": 320,
+      "model_turn_qps": 0.35555555555555557,
+      "mean_output_per_completed_turn": 666.95625,
+      "mean_queue_seconds": 0.017040406484738924,
+      "actual_prefill_tokens": 368691,
+      "prefill_tokens_per_generated_token": 1.7100775049977042,
+      "prefill_or_mixed_batch_span_seconds": 287.76966127586365,
+      "pure_decode_batch_span_seconds": 588.7335108980014,
+      "four_decode_batches": 10215,
+      "four_decode_model_ms": 33.82500964933555,
+      "cold_restores": 0,
+      "hot_restores": 318,
+      "cold_KV_GiB": 0.0,
+      "MTP_acceptance_rate": 0.6264626828099751,
+      "MTP_verification_rounds": 61583.0,
+      "accepted_drafts_per_verification": 2.5054641703067406,
+      "identical_input_warmup": {
+        "input_tokens": 67584,
+        "input_sha256": "1bc29c9d13bd6ba101985c33bda99abc4af78474c5bc7ac88b7e39cf6dbe8197",
+        "seconds": 49.99598956108093,
+        "passed": true
+      },
+      "extra_four_request_query_qualification": false,
+      "completed_tasks": 0,
+      "evidence_sha256": {
+        "kvmem-5090-queue-20261031-r1/live-kvmem/run.json": "59f224e0432cabdb049751857af1a297ed710c93662f48e989429f45be38453d",
+        "kvmem-5090-queue-20261031-r1/live-kvmem/window-end-metrics.json": "bb8a5e46de12708a509ec1f4dfcad46b6860f157709e41bad404e9350a37ea17",
+        "kvmem-5090-queue-20261031-r1/live-kvmem/metrics-before-formal.txt": "42c56dbbc4939a1e680b4a2573604d3a5471cdba3d97d7705e63ae6ea30d2be6",
+        "kvmem-5090-queue-20261031-r1/remote-evidence/kvmem-1/profile.json": "38800c5fe5e2a8af0c02a92e17e494d1747a56e77c1bab2c0b5a3ea9b001e325"
+      }
+    },
+    "previous_eight": {
+      "generation_tokens_per_second": 155.03774694634717,
+      "generated_tokens": 139585.0,
+      "completed_turns": 290,
+      "model_turn_qps": 0.32222222222222224,
+      "mean_output_per_completed_turn": 454.61034482758623,
+      "mean_queue_seconds": 11.609581823306607,
+      "actual_prefill_tokens": 631137,
+      "prefill_tokens_per_generated_token": 4.52152451911022,
+      "prefill_or_mixed_batch_span_seconds": 468.8753411149979,
+      "pure_decode_batch_span_seconds": 404.54257297559826,
+      "four_decode_batches": 6142,
+      "four_decode_model_ms": 34.717040415968505,
+      "cold_restores": 217,
+      "hot_restores": 69,
+      "cold_KV_GiB": 273.6792221069336,
+      "MTP_acceptance_rate": 0.6583062122009368,
+      "MTP_verification_rounds": 38490.0,
+      "accepted_drafts_per_verification": 2.6328656793972463,
+      "identical_input_warmup": {
+        "input_tokens": 67584,
+        "input_sha256": "1bc29c9d13bd6ba101985c33bda99abc4af78474c5bc7ac88b7e39cf6dbe8197",
+        "seconds": 46.043179512023926,
+        "passed": true
+      },
+      "extra_four_request_query_qualification": true,
+      "completed_tasks": 0,
+      "evidence_sha256": {
+        "kvmem-5090-profile-20261031-r1/live-optimized-bounded/run.json": "0620dd8730b7ca8a52649b3c9ed1440ae687ff10717958910195ef9f2dea864c",
+        "kvmem-5090-profile-20261031-r1/live-optimized-bounded/window-end-metrics.json": "d10c587d3d848a682dd98b5de309d7182c4baea67ec2b0af7dec8ee9f1134dd1",
+        "kvmem-5090-profile-20261031-r1/live-optimized-bounded/metrics-before-formal.txt": "8f7aec2340d87bb2a017bf991c869f61ab288ae1f5aeab805165c7b7df54db16",
+        "kvmem-5090-profile-20261031-r1/remote-evidence/optimized-bounded/profile.json": "fdcfae36dff745b9a5e54c5e0b2d53b615839b6af92282c3edd9abfa53d5c691"
+      }
+    },
+    "fresh_baseline": {
+      "generation_tokens_per_second": 131.7001316102022,
+      "generated_tokens": 118668.0,
+      "completed_turns": 216,
+      "model_turn_qps": 0.24,
+      "mean_output_per_completed_turn": 544.6435185185185,
+      "mean_queue_seconds": 15.38908145326207,
+      "actual_prefill_tokens": 571594,
+      "prefill_tokens_per_generated_token": 4.816749250008427,
+      "prefill_or_mixed_batch_span_seconds": 507.9220182423592,
+      "pure_decode_batch_span_seconds": 361.2664494088404,
+      "four_decode_batches": 5193,
+      "four_decode_model_ms": 34.32254936376932,
+      "cold_restores": 173,
+      "hot_restores": 39,
+      "cold_KV_GiB": 215.57855224609375,
+      "MTP_acceptance_rate": 0.6417428886571174,
+      "MTP_verification_rounds": 33322.0,
+      "accepted_drafts_per_verification": 2.566682672108517,
+      "identical_input_warmup": {
+        "input_tokens": 67584,
+        "input_sha256": "1bc29c9d13bd6ba101985c33bda99abc4af78474c5bc7ac88b7e39cf6dbe8197",
+        "seconds": 63.7796630859375,
+        "passed": true
+      },
+      "extra_four_request_query_qualification": false,
+      "completed_tasks": 0,
+      "evidence_sha256": {
+        "kvmem-5090-tool-ttl-20261031-r1/live-baseline/run.json": "a8f977022e1eb45dfb00c6acce2bfd1825b71d3fec37d0313e944e2900a3c0f4",
+        "kvmem-5090-tool-ttl-20261031-r1/live-baseline/window-end-metrics.json": "e3efd6cb710e3a028d00351e010455610b81364fcff1e949d65d424576797701",
+        "kvmem-5090-tool-ttl-20261031-r1/live-baseline/metrics-before-formal.txt": "c8f789afbedfd287b5b802a7ebf9a477f42e4ad42e6fe168efec12edce8ed1b8",
+        "kvmem-5090-tool-ttl-20261031-r1/remote-evidence/baseline/profile.json": "370e2f2956fee7da45eac9372365cb396e3358d8c7082ea3646b292f62105240"
+      }
+    },
+    "adaptive_ttl": {
+      "generation_tokens_per_second": 147.35044185543507,
+      "generated_tokens": 132662.0,
+      "completed_turns": 334,
+      "model_turn_qps": 0.3711111111111111,
+      "mean_output_per_completed_turn": 390.23353293413174,
+      "mean_queue_seconds": 10.173565763604413,
+      "actual_prefill_tokens": 731236,
+      "prefill_tokens_per_generated_token": 5.51202303598619,
+      "prefill_or_mixed_batch_span_seconds": 513.7409173784256,
+      "pure_decode_batch_span_seconds": 357.5157733065262,
+      "four_decode_batches": 5212,
+      "four_decode_model_ms": 33.71529841477928,
+      "cold_restores": 193,
+      "hot_restores": 137,
+      "cold_KV_GiB": 244.28686904907227,
+      "MTP_acceptance_rate": 0.65567518608563,
+      "MTP_verification_rounds": 36714.0,
+      "accepted_drafts_per_verification": 2.622432859399684,
+      "identical_input_warmup": {
+        "input_tokens": 67584,
+        "input_sha256": "1bc29c9d13bd6ba101985c33bda99abc4af78474c5bc7ac88b7e39cf6dbe8197",
+        "seconds": 44.97159957885742,
+        "passed": true
+      },
+      "extra_four_request_query_qualification": false,
+      "completed_tasks": 0,
+      "evidence_sha256": {
+        "kvmem-5090-tool-ttl-20261031-r1/live-ttl/run.json": "bbe11f36477f98f6485dcc20b2925a85557986b5b316fcfbe8e696d1d04c1f49",
+        "kvmem-5090-tool-ttl-20261031-r1/live-ttl/window-end-metrics.json": "c0dbf828cba2a47a989073bfc97836608d7638546ca9494d2fdcd2b2c09b9499",
+        "kvmem-5090-tool-ttl-20261031-r1/live-ttl/metrics-before-formal.txt": "cd6d4db4da0eab7f5c40ab22cbbb869d00928ab9846714c59817467f56986a67",
+        "kvmem-5090-tool-ttl-20261031-r1/remote-evidence/ttl/profile.json": "f8925457d789b40c1977fa542e3066d58d56a7e579fc2314bbcb89429a1d98b2"
+      }
+    }
+  },
+  "profile_differences_old_eight_to_fresh_baseline": [
+    {
+      "path": "kvmem.host_stage_timing",
+      "before": true,
+      "after": false
+    },
+    {
+      "path": "kvmem.restore_stage_timing",
+      "before": true,
+      "after": false
+    }
+  ],
+  "runtime_source_changes_old_eight_to_fresh_baseline": [],
+  "profile_differences_four_agents_to_ttl": [
+    {
+      "path": "kvmem.active_tool_grace_ms",
+      "before": null,
+      "after": 1000.0
+    },
+    {
+      "path": "kvmem.active_tool_max_wait_ms",
+      "before": null,
+      "after": 15000.0
+    },
+    {
+      "path": "kvmem.assembly_chunk_blocks",
+      "before": 4,
+      "after": 16
+    },
+    {
+      "path": "max_num_batched_tokens",
+      "before": 1876,
+      "after": 2324
+    },
+    {
+      "path": "port",
+      "before": 18975,
+      "after": 18979
+    },
+    {
+      "path": "query_replay_budget",
+      "before": 1856,
+      "after": 2304
+    }
+  ],
+  "interpretation": [
+    "Four-agent versus eight-agent windows use different task mixes, actual prefill volume and restore pressure. They are not an isolated scheduling-policy comparison.",
+    "Previous eight-agent versus TTL: prefill/mixed batch spans grow while four-decode model steps remain similar. MTP acceptance rates are similar.",
+    "The old eight-agent runtime and the fresh baseline have identical source hashes (generated pytest cache excluded); only detailed host/restore timing flags differ in saved server profiles.",
+    "The older run also executed a four-request maximum-Query qualification before standard warmup; the latest pair did not. This potential warm-state effect has not been isolated.",
+    "One fresh before/after pair is an observed live-window outcome; it does not establish a repeatable causal speedup.",
+    "CUDA-event spans include mixed decode and host launch gaps. Do not label them isolated prefill GPU time or add overlapping restore latencies."
+  ],
+  "same_input_single_request_warmup_audit": {
+    "same_batch_geometry": true,
+    "runs": {
+      "baseline": {
+        "input_sha256": "1bc29c9d13bd6ba101985c33bda99abc4af78474c5bc7ac88b7e39cf6dbe8197",
+        "output_token_ids": [
+          198
+        ],
+        "time_to_first_token_ms": 62587.836038088426,
+        "wall_seconds": 63.7796630859375,
+        "public_batches": 267,
+        "model_span_seconds": 45.2230443649292,
+        "maintenance_span_seconds": 1.4558511631377042,
+        "model_span_by_64_batches_seconds": [
+          14.992148223876953,
+          11.461637603759765,
+          8.501099815368653,
+          8.81126554107666,
+          1.456893180847168
+        ],
+        "batch_geometry_sha256": "21d3ec79c19d2ca77f4670a98d37f0310f35847543b29d99f2589e9f700d0d65"
+      },
+      "ttl": {
+        "input_sha256": "1bc29c9d13bd6ba101985c33bda99abc4af78474c5bc7ac88b7e39cf6dbe8197",
+        "output_token_ids": [
+          198
+        ],
+        "time_to_first_token_ms": 43941.1172750406,
+        "wall_seconds": 44.97159957885742,
+        "public_batches": 267,
+        "model_span_seconds": 36.99490474700928,
+        "maintenance_span_seconds": 0.21893066021800042,
+        "model_span_by_64_batches_seconds": [
+          8.914960205078126,
+          8.967392730712891,
+          8.79701922607422,
+          8.78651033782959,
+          1.529022247314453
+        ],
+        "batch_geometry_sha256": "21d3ec79c19d2ca77f4670a98d37f0310f35847543b29d99f2589e9f700d0d65"
+      }
+    },
+    "interpretation": "The baseline is slower on identical single-request prefill before multi-session TTL contention. This is an uncontrolled warm-state/performance difference, not evidence of a TTL speedup. The exact source has not been isolated."
+  }
+}

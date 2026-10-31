@@ -10,6 +10,7 @@ import torch
 
 
 _SOURCE_NAMES = ('qw3_mean_k.cu', 'qw3_mean_k_kernel.cuh', 'qw3_mean_k_tiled.cuh')
+QUERY_CONVERSION_BYTES = 64 * 1024 * 1024
 
 
 def _publish_source(path, content):
@@ -81,14 +82,31 @@ def mean_key_scores(queries, means, eligible, *, scale=None):
         raise ValueError('Invalid MeanK Query/index/mask')
     if queries.device != means.device or eligible.device != queries.device:
         raise ValueError('MeanK tensors must share a device')
+    if any(size <= 0 for size in queries.shape):
+        raise ValueError('MeanK queries must have nonempty geometry')
     indices = eligible.nonzero().flatten()
     scores = torch.zeros(means.shape[1], device=queries.device, dtype=torch.float32)
     if not indices.numel():
         return scores
     # Compact only eligible pages before softmax, exactly excluding sink/recent
     # and mandatory pages. Scatter scores back without changing history order.
-    values = kernel().score(queries.to(torch.float16).contiguous(),
-        means.index_select(1, indices).to(torch.float16).contiguous(),
-        queries.shape[-1] ** -.5 if scale is None else scale)
+    compact_means = means.index_select(1, indices).to(
+        dtype=torch.float16, memory_format=torch.contiguous_format)
+    attention_scale = queries.shape[-1] ** -.5 if scale is None else scale
+    scorer = kernel()
+    if queries.dtype == torch.float16 and queries.is_contiguous():
+        values = scorer.score(queries, compact_means, attention_scale)
+    else:
+        # The kernel sums over Query tokens and averages only layers/heads.
+        # Keep its full page softmax domain while bounding dtype/layout copies;
+        # a 2304-token BF16 Query otherwise duplicates 432 MiB at handoff.
+        bytes_per_token = queries.shape[0] * queries.shape[2] * queries.shape[3] * 2
+        chunk_tokens = max(1, QUERY_CONVERSION_BYTES // bytes_per_token)
+        values = torch.zeros(indices.numel(), device=queries.device, dtype=torch.float32)
+        for begin in range(0, queries.shape[1], chunk_tokens):
+            chunk = queries[:, begin:begin+chunk_tokens].to(
+                dtype=torch.float16, memory_format=torch.contiguous_format)
+            values.add_(scorer.score(chunk, compact_means, attention_scale))
+            del chunk
     scores.index_copy_(0, indices, values)
     return scores

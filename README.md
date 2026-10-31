@@ -8,7 +8,7 @@ KVMem for vLLM brings [KVMem](https://github.com/kvmem/kvmem)'s memory managemen
 
 ![Native vLLM and KVMem: eight requests merged into one terminal per side, with measured generation throughput and GPU memory](docs/assets/deepswe-generation-throughput.gif)
 
-Recorded output and GPU memory samples, looping at the same 2.5× playback speed on both sides. **3.70× measured generation throughput.** [Measurement conditions](docs/benchmarks.md).
+Historical fixed-length output and GPU memory recording, looping at the same 2.5× playback speed on both sides. This replay does not execute new agent tasks. [Measurement conditions](docs/benchmarks.md#long-history-generation-throughput).
 
 ## Why KVMem?
 
@@ -21,7 +21,27 @@ Long agent histories consume GPU memory even between turns. KVMem separates reta
 
 Selection changes the model's active attention context. This is not a guarantee of identical outputs or task quality relative to native full-context attention. The current integration is experimental and focused on a single NVIDIA GPU, text-only Qwen3.5-family hybrid models and FP8 KV; see the [support matrix](docs/support.md).
 
-## Measured generation throughput
+## Real DeepSWE agent throughput
+
+On one **RTX 5090 32 GB**, a measured 15-minute window with **16 queued tasks and four real agents** reached **239.25 generated tokens/s with KVMem**, compared with **71.84 tokens/s for the best measured native vLLM admission setting**. Agents executed actual tools and model turns respected EOS; output was not extended to a fixed token quota.
+
+| Measurement | Native vLLM | vLLM + KVMem |
+| --- | ---: | ---: |
+| Window-average generation throughput | 71.84 tokens/s | 239.25 tokens/s |
+| Completed model turns in 15 minutes | 84 | 320 |
+| GPU request limit | 1 | 4 |
+| Concurrent agents | 4 | 4 |
+| Completed tasks | 0 | 0 |
+
+This is **3.33× generation throughput in one real-agent window**, including prefill, tool execution and queueing time in the denominator. Both used Qwen3.8-27B NVFP4, MTP4 and a 256K context limit; KVMem used K=36K/G=12K. Native admission limits of 1, 2 and 4 were measured. Neither backend completed a whole task within the window, so this is not a task-completion or quality speedup. Scheduling, prefix caching and autotuning differed between the backends; this is not a controlled CPU-offload-only comparison. See [all configurations, limits and evidence](docs/benchmarks.md#real-deepswe-agents-on-rtx-5090).
+
+A separate [active-KV handoff profiling run](docs/profiling-rtx5090-active-kv-20261031.md) used **eight real agents sharing four GPU request slots**. The configuration pair observed generation throughput of **109.89 and 155.04 tokens/s (1.41×)** and mean cold restoration of **2.90 and 1.01 seconds**, with K=36K/G=12K/MTP4 unchanged. Both 15-minute windows include the same host tracing; this is a separate instrumented comparison, not the before/after for the four-agent result above.
+
+A subsequent [adaptive tool-return grace trial](docs/profiling-rtx5090-active-kv-20261031.md#adaptive-tool-return-grace) briefly protected hot KV during short tool waits. With eight agents and four GPU slots, two 15-minute windows observed **131.70 → 147.35 generation tokens/s**, while mean request queue wait changed from **15.39 → 10.17 seconds**. **The 11.9% difference is not a validated policy speedup:** a later audit found substantially different same-input single-request warmup times before multi-task contention. Detailed host/restore tracing was disabled equally, but warm-state effects and divergent task trajectories remain uncontrolled. This policy remains opt-in.
+
+A [four-agent regression investigation](docs/profiling-rtx5090-active-kv-20261031.md#four-agent-regression-investigation-paused) subsequently measured **201.44 tokens/s with a later runtime snapshot** and **223.36 tokens/s when repeating the old runtime**, using the historical task/configuration setup. Core step timings in the old repeat remained close to the historical run, while executed prefill and response-delivery delays differed. The alternating old/current comparison was paused before completion; these observations do not yet establish a code regression or a new optimization speedup.
+
+## Historical fixed-length generation throughput
 
 On one RTX PRO 6000 Blackwell 96 GB, with a 256K context limit and eight real DeepSWE histories of approximately 229K input tokens each:
 

@@ -20,6 +20,7 @@ class RestorePermit:
     view: object = None
     allocated: bool = False
     command_id: int | None = None
+    dispatched_at: float | None = None
     cancelled: bool = False
 
     @property
@@ -152,6 +153,7 @@ class RestoreAdmission:
                 (command.generation, command.history_end, command.window_tokens, command.resident)):
             raise ValueError('Restore command differs from its admitted native allocation')
         permit.command_id = command.command_id
+        permit.dispatched_at = self.clock()
 
     def complete(self, request_id, command_id):
         permit = self.permits.get(request_id)
@@ -159,6 +161,9 @@ class RestoreAdmission:
             raise ValueError('Stale or foreign restore admission completion')
         # The worker ACK follows the CUDA fence and scheduler import commit.
         # Cancellation is deliberately not a completion signal.
+        if (permit.view is None and not permit.cancelled and permit.dispatched_at is not None and
+                self.residency is not None and self.residency.tool_grace is not None):
+            self.residency.tool_grace.observe_restore(self.clock() - permit.dispatched_at)
         self._record(request_id, 'ready', permit.lane, command_id=command_id,
                      total_wait_seconds=self.clock()-self.waiting[request_id]['first_seen'],
                      cancelled=permit.cancelled)

@@ -123,6 +123,7 @@ class KVMemConnector(KVConnectorBase_V1, SupportsHMA):
         self.restore_completion_poll = None
         self.scheduler_restore_feedback = None
         self.active_residency = None
+        self.tool_grace_allows = None
         self.restore_admission = None
         self.publication_snapshot = None
         self.publication_sequence = 0
@@ -259,7 +260,21 @@ class KVMemConnector(KVConnectorBase_V1, SupportsHMA):
                 self.history_admission.observe(metadata.cpu_archive_bytes)
         self.cancelled.difference_update(connector_output.finished_sending or ())
 
+    def on_new_request(self, request):
+        super().on_new_request(request)
+        residency = self.active_residency
+        if residency is not None and residency.tool_grace is not None:
+            namespace = self.sessions.namespace(request) if self.sessions is not None else None
+            if (getattr(request, 'kv_transfer_params', None) or {}).get('kvmem_release_session'):
+                namespace = None
+            residency.tool_grace.arrival(request.request_id, namespace)
+
     def request_finished_all_groups(self, request, block_ids):
+        residency = self.active_residency
+        if residency is not None and residency.tool_grace is not None:
+            successful = (getattr(request, 'num_output_tokens', 0) > 0 and
+                          getattr(getattr(request, 'status', None), 'name', '') != 'FINISHED_ABORTED')
+            residency.tool_grace.finished(request.request_id, successful=successful)
         self.capacity_rejections.pop(request.request_id, None)
         self.publication_blocked.discard(request.request_id)
         if self.restore_admission is not None:
@@ -294,6 +309,8 @@ class KVMemConnector(KVConnectorBase_V1, SupportsHMA):
             return None, False
 
     def _get_matched_tokens(self, request, num_computed_tokens):
+        if self.tool_grace_allows is not None and not self.tool_grace_allows(request):
+            return None, False
         matched = getattr(self.history_admission, 'matched_admission', False)
         if self.history_admission is not None and not matched and not self.history_admission.allows(request):
             return None, False  # Native waiting loop skips only this request.

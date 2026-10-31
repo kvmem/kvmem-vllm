@@ -1,0 +1,1376 @@
+{
+  "scope": "Real DeepSWE with tool execution: eight agents, four GPU request slots, fixed 900-second windows",
+  "date": "2026-10-31",
+  "hardware": "RTX 5090 (32607 MiB)",
+  "fixed": {
+    "K": 36864,
+    "G": 12288,
+    "MTP": 4,
+    "context_limit": 262144,
+    "agents": 8,
+    "GPU_request_limit": 4,
+    "queued_tasks": 16,
+    "seed": 1000,
+    "assembly_chunk_blocks": 16,
+    "query_replay_budget": 2304,
+    "model": "Qwen3.8-27B mixed NVFP4 / FP8",
+    "KV_dtype": "FP8 E4M3",
+    "MLP_offload": false,
+    "input_embedding": "Same exact BF16 CPU UVA mapping in both arms",
+    "host_stage_timing": false,
+    "restore_stage_timing": false
+  },
+  "policy": {
+    "active_tool_grace_ms": 1000,
+    "active_tool_max_wait_ms": 15000,
+    "default_enabled": false,
+    "measurement": "Server model completion to next engine request arrival; includes response transport, tools and client processing. Excludes subsequent native queue waiting.",
+    "aging": "After 15 seconds this policy stops protecting idle KV against the waiter; this is not a maximum request-latency guarantee."
+  },
+  "runs": {
+    "baseline": {
+      "real_agent": {
+        "status": "window_complete",
+        "seconds": 900.0,
+        "started_at": 1793445838.897681,
+        "ended_at": 1793446738.897681,
+        "counter_sample_interval": {
+          "begin": 1793446739.7717288,
+          "end": 1793446739.9446166,
+          "overshoot_seconds": 1.0469355583190918
+        },
+        "generated_tokens": 118668.0,
+        "generation_tokens_per_second": 131.7001316102022,
+        "counter_measurement_seconds": 901.0469355583191,
+        "nominal_window_generation_tokens_per_second": 131.85333333333332,
+        "completed_model_turns": 216,
+        "model_turn_qps": 0.24,
+        "delivered_tokens": 117643,
+        "delivered_tokens_per_second": 130.71444444444444,
+        "prompt_length": {
+          "n": 224,
+          "mean": 56819.86607142857,
+          "median": 54704.0,
+          "p95": 97284,
+          "max": 141026
+        },
+        "request_queue_ms": {
+          "n": 216,
+          "mean": 15389.08145326207,
+          "median": 13684.988834080286,
+          "p95": 37463.7094961945,
+          "max": 46652.12472807616
+        },
+        "ttft_ms": {
+          "n": 216,
+          "mean": 5030.630310689082,
+          "median": 2452.4162774905562,
+          "p95": 22694.730267161503,
+          "max": 38331.74594398588
+        },
+        "preemptions": 0.0,
+        "counter_delta": {
+          "vllm:generation_tokens_total": 118668.0,
+          "vllm:prompt_tokens_total": 12312736.0,
+          "vllm:num_preemptions_total": 0.0,
+          "vllm:request_success_total": 216.0
+        },
+        "real_tools": {
+          "drizzle-orm-window-function-builders": {
+            "tool_uses": 39,
+            "tool_results": 39,
+            "matched_results": 39,
+            "names": {
+              "Bash": 17,
+              "Read": 11,
+              "Grep": 4,
+              "TaskCreate": 6,
+              "TaskUpdate": 1
+            }
+          },
+          "superjson-error-stack-serialization": {
+            "tool_uses": 33,
+            "tool_results": 33,
+            "matched_results": 33,
+            "names": {
+              "Bash": 7,
+              "Read": 10,
+              "Grep": 2,
+              "TaskCreate": 7,
+              "TaskUpdate": 3,
+              "Write": 4
+            }
+          },
+          "awilix-async-container-initialization": {
+            "tool_uses": 32,
+            "tool_results": 32,
+            "matched_results": 32,
+            "names": {
+              "Bash": 8,
+              "Glob": 1,
+              "Read": 14,
+              "Grep": 1,
+              "TaskCreate": 6,
+              "TaskUpdate": 1,
+              "Edit": 1
+            }
+          },
+          "arcane-drift-detection-baselines": {
+            "tool_uses": 57,
+            "tool_results": 57,
+            "matched_results": 57,
+            "names": {
+              "Bash": 17,
+              "Read": 21,
+              "TaskCreate": 8,
+              "TaskUpdate": 1,
+              "Glob": 5,
+              "Grep": 5
+            }
+          },
+          "wasmi-trap-coredumps": {
+            "tool_uses": 45,
+            "tool_results": 45,
+            "matched_results": 45,
+            "names": {
+              "Bash": 9,
+              "Read": 21,
+              "TaskCreate": 5,
+              "TaskUpdate": 1,
+              "Grep": 9
+            }
+          },
+          "koota-composite-trait-aspects": {
+            "tool_uses": 54,
+            "tool_results": 54,
+            "matched_results": 54,
+            "names": {
+              "Bash": 8,
+              "Read": 34,
+              "TaskCreate": 6,
+              "TaskUpdate": 1,
+              "Grep": 5
+            }
+          },
+          "mashumaro-flattened-dataclass-fields": {
+            "tool_uses": 47,
+            "tool_results": 47,
+            "matched_results": 47,
+            "names": {
+              "Bash": 10,
+              "Read": 24,
+              "Grep": 6,
+              "TaskCreate": 6,
+              "TaskUpdate": 1
+            }
+          },
+          "textual-richlog-follow-state": {
+            "tool_uses": 43,
+            "tool_results": 43,
+            "matched_results": 43,
+            "names": {
+              "Bash": 6,
+              "Glob": 2,
+              "Read": 12,
+              "Grep": 16,
+              "TaskCreate": 5,
+              "TaskUpdate": 1,
+              "WebFetch": 1
+            }
+          }
+        },
+        "task_admissions": 8,
+        "completed_tasks": [],
+        "naturally_completed_tasks": [],
+        "admitted_task_queue_wait_seconds": {
+          "n": 8,
+          "mean": 0.00570639967918396,
+          "median": 0.006190657615661621,
+          "p95": 0.007920503616333008,
+          "max": 0.007920503616333008
+        },
+        "never_admitted_tasks": 8,
+        "never_admitted_wait_lower_bound_seconds": 900.0,
+        "task_states": {
+          "textual-richlog-follow-state": "window_truncated",
+          "superjson-error-stack-serialization": "window_truncated",
+          "koota-composite-trait-aspects": "window_truncated",
+          "awilix-async-container-initialization": "window_truncated",
+          "drizzle-orm-window-function-builders": "window_truncated",
+          "wasmi-trap-coredumps": "window_truncated",
+          "mashumaro-flattened-dataclass-fields": "window_truncated",
+          "arcane-drift-detection-baselines": "window_truncated"
+        },
+        "errors": [],
+        "cleanup_errors": [],
+        "quality_scope": "Only original hidden verifier for naturally finished tasks; window-censored attempts remain unscored."
+      },
+      "KV_handoff": {
+        "retirement_scope": "Matched completion records retained by the bounded archive log; coverage and dropped records are explicit. This may omit early-window acknowledgments.",
+        "finished_to_retirement_ack_seconds": {
+          "n": 216,
+          "mean": 0.1236493771656468,
+          "median": 0.08131147758103907,
+          "p95": 0.37293099402450025,
+          "max": 0.6532032559625804
+        },
+        "finished_requests": 216,
+        "retirement_records_retained": 226,
+        "retirement_records_dropped": 0,
+        "resident": {
+          "completed_restores": 39,
+          "restore_seconds": {
+            "n": 39,
+            "mean": 0.4490141468301702,
+            "median": 0.20914177503436804,
+            "p95": 2.8804028120357543,
+            "max": 3.9917596001178026
+          },
+          "host_prepare_seconds": {
+            "n": 39,
+            "mean": 0.0,
+            "median": 0.0,
+            "p95": 0.0,
+            "max": 0.0
+          },
+          "KV_uploaded_bytes": 0,
+          "model_uploaded_bytes": 6157172736,
+          "active_tokens": {
+            "n": 39,
+            "mean": 36815.333333333336,
+            "median": 38619,
+            "p95": 47464,
+            "max": 48012
+          },
+          "admission_wait_seconds": {
+            "n": 39,
+            "mean": 0.027484759497336853,
+            "median": 0.0014120771083980799,
+            "p95": 0.12489285506308079,
+            "max": 0.17255665315315127
+          },
+          "arrival_to_ready_seconds": {
+            "n": 39,
+            "mean": 0.5452672285445703,
+            "median": 0.2876072069630027,
+            "p95": 3.250103286933154,
+            "max": 4.339842244051397
+          },
+          "with_public_peers": 39
+        },
+        "assembly": {
+          "completed_restores": 173,
+          "restore_seconds": {
+            "n": 173,
+            "mean": 1.3108328086326728,
+            "median": 0.9851756470743567,
+            "p95": 3.0508680660277605,
+            "max": 4.2712975312024355
+          },
+          "host_prepare_seconds": {
+            "n": 173,
+            "mean": 0.5853291700104241,
+            "median": 0.45953102922067046,
+            "p95": 1.405410319333896,
+            "max": 1.919135378440842
+          },
+          "KV_uploaded_bytes": 231475707904,
+          "model_uploaded_bytes": 27312586752,
+          "active_tokens": {
+            "n": 173,
+            "mean": 38430.89017341041,
+            "median": 40366,
+            "p95": 47656,
+            "max": 48993
+          },
+          "admission_wait_seconds": {
+            "n": 173,
+            "mean": 9.475102065022055,
+            "median": 7.85865382803604,
+            "p95": 28.239187673898414,
+            "max": 40.04737337701954
+          },
+          "arrival_to_ready_seconds": {
+            "n": 173,
+            "mean": 10.828783779589438,
+            "median": 9.111597375012934,
+            "p95": 30.011522190878168,
+            "max": 40.942223463905975
+          },
+          "with_public_peers": 173
+        },
+        "refresh": {
+          "pressure": {
+            "completed": 27,
+            "seconds": {
+              "n": 27,
+              "mean": 0.5437923390849458,
+              "median": 0.365214372985065,
+              "p95": 1.3978856110479683,
+              "max": 1.4918916439637542
+            },
+            "query_host_seconds": {
+              "n": 27,
+              "mean": 0,
+              "median": 0,
+              "p95": 0,
+              "max": 0
+            },
+            "selection_seconds": {
+              "n": 27,
+              "mean": 0.038759883113757325,
+              "median": 0.021576120052486658,
+              "p95": 0.10813024011440575,
+              "max": 0.11050073290243745
+            },
+            "assembly_submit_seconds": {
+              "n": 27,
+              "mean": 0.29960389539633914,
+              "median": 0.2290512688923627,
+              "p95": 0.7012426748406142,
+              "max": 0.9170465799979866
+            },
+            "lane_wait_seconds": {
+              "n": 27,
+              "mean": 0.10261306037298507,
+              "median": 0.031244553858414292,
+              "p95": 0.9270522419828922,
+              "max": 1.002555700019002
+            }
+          }
+        }
+      },
+      "memory": {
+        "all_peak_gib": 31.3099365234375,
+        "window_peak_gib": 31.3099365234375,
+        "device_gib": 31.8427734375
+      },
+      "gpu_utilization_percent": {
+        "n": 17863,
+        "mean": 48.11638582544925,
+        "median": 43,
+        "p95": 95,
+        "max": 100
+      },
+      "sm_clock_mhz": {
+        "n": 17863,
+        "mean": 2813.472876896378,
+        "median": 2827,
+        "p95": 2865,
+        "max": 2887
+      },
+      "power_watts": {
+        "n": 17863,
+        "mean": 253.54601343559312,
+        "median": 241.413,
+        "p95": 413.668,
+        "max": 447.15
+      },
+      "steps": {
+        "scope": "CUDA-event spans include host submission gaps, sampling, MTP and capture; not pure kernel time. Attribution by actual batch composition, exclusive groups. First/last batches are selected by host start; boundary slop is reported.",
+        "window_seconds": 900.0,
+        "offset_seconds": 1791877460.0699587,
+        "clock_offset_range_seconds": 2.4318695068359375e-05,
+        "sampled_call_indices": [
+          269,
+          10098
+        ],
+        "missing_call_indices": 0,
+        "all": {
+          "batches": 9830,
+          "model_span_seconds": 772.5405876293182,
+          "maintenance_span_seconds": 96.6478800218813,
+          "mean_model_span_ms": 78.59009029799779,
+          "prefill_tokens": 571594
+        },
+        "pure_decode": {
+          "batches": 8183,
+          "model_span_seconds": 311.2875964946747,
+          "maintenance_span_seconds": 49.97885291416571,
+          "mean_model_span_ms": 38.04076701633566,
+          "prefill_tokens": 0
+        },
+        "prefill_or_mixed": {
+          "batches": 1647,
+          "model_span_seconds": 461.25299113464354,
+          "maintenance_span_seconds": 46.66902710771561,
+          "mean_model_span_ms": 280.05646091963786,
+          "prefill_tokens": 571594
+        },
+        "outside_sampled_spans_seconds": 30.811532199859585,
+        "first_batch_seconds": 10.975163459777832,
+        "last_batch_seconds": 899.9947986602783,
+        "groups": {
+          "prefill=0,decode=1": {
+            "batches": 14,
+            "model_span_seconds": 0.9998789291381835,
+            "maintenance_span_seconds": 0.5728265930116176,
+            "mean_model_span_ms": 71.41992350987026,
+            "prefill_tokens": 0
+          },
+          "prefill=0,decode=2": {
+            "batches": 367,
+            "model_span_seconds": 15.20775623512268,
+            "maintenance_span_seconds": 8.677046480875463,
+            "mean_model_span_ms": 41.43802788861766,
+            "prefill_tokens": 0
+          },
+          "prefill=0,decode=3": {
+            "batches": 2609,
+            "model_span_seconds": 116.84296248435975,
+            "maintenance_span_seconds": 34.17811445640773,
+            "mean_model_span_ms": 44.784577418305766,
+            "prefill_tokens": 0
+          },
+          "prefill=0,decode=4": {
+            "batches": 5193,
+            "model_span_seconds": 178.23699884605406,
+            "maintenance_span_seconds": 6.5508653838708994,
+            "mean_model_span_ms": 34.32254936376932,
+            "prefill_tokens": 0
+          },
+          "prefill=1,decode=0": {
+            "batches": 1,
+            "model_span_seconds": 0.21043600463867188,
+            "maintenance_span_seconds": 0.018172639846801758,
+            "mean_model_span_ms": 210.43600463867188,
+            "prefill_tokens": 256
+          },
+          "prefill=1,decode=1": {
+            "batches": 15,
+            "model_span_seconds": 8.60090884399414,
+            "maintenance_span_seconds": 1.2706968059539796,
+            "mean_model_span_ms": 573.3939229329427,
+            "prefill_tokens": 3382
+          },
+          "prefill=1,decode=2": {
+            "batches": 195,
+            "model_span_seconds": 65.00587349700928,
+            "maintenance_span_seconds": 8.490140122890473,
+            "mean_model_span_ms": 333.3634538308168,
+            "prefill_tokens": 42886
+          },
+          "prefill=1,decode=3": {
+            "batches": 1019,
+            "model_span_seconds": 211.79468419647216,
+            "maintenance_span_seconds": 25.076147006988524,
+            "mean_model_span_ms": 207.84561746464394,
+            "prefill_tokens": 238923
+          },
+          "prefill=2,decode=1": {
+            "batches": 33,
+            "model_span_seconds": 14.287327911376954,
+            "maintenance_span_seconds": 1.980869884490967,
+            "mean_model_span_ms": 432.94933064778644,
+            "prefill_tokens": 17331
+          },
+          "prefill=2,decode=2": {
+            "batches": 223,
+            "model_span_seconds": 86.59637530517578,
+            "maintenance_span_seconds": 6.722868059158325,
+            "mean_model_span_ms": 388.32455293800797,
+            "prefill_tokens": 109273
+          },
+          "prefill=3,decode=0": {
+            "batches": 2,
+            "model_span_seconds": 0.76946142578125,
+            "maintenance_span_seconds": 0.3041642837524414,
+            "mean_model_span_ms": 384.730712890625,
+            "prefill_tokens": 2610
+          },
+          "prefill=3,decode=1": {
+            "batches": 24,
+            "model_span_seconds": 9.158455261230468,
+            "maintenance_span_seconds": 0.8915873689651489,
+            "mean_model_span_ms": 381.60230255126953,
+            "prefill_tokens": 16948
+          },
+          "prefill=4,decode=0": {
+            "batches": 135,
+            "model_span_seconds": 64.82946868896484,
+            "maintenance_span_seconds": 1.9143809356689454,
+            "mean_model_span_ms": 480.2182865849248,
+            "prefill_tokens": 139985
+          }
+        },
+        "checkpoint_host_seconds": {
+          "accepted_counter_read": 0.0009434721432626247,
+          "page_table_gpu_read": 0.1803395957686007,
+          "recurrent_views": 0.4399033677764237,
+          "draft_views": 0.005899983923882246,
+          "pinned_payload_allocation": 1.5115149938501418,
+          "direct_payload_d2h_submit": 0.2710476934444159,
+          "direct_payload_d2h_wait": 0.48817811044864357,
+          "canonicalize_submit": 1.439717911183834,
+          "canonicalize_wait": 0.0015634170267730951
+        },
+        "checkpoint_count": 224
+      },
+      "policy": {
+        "events": {},
+        "observed_tool_and_client_gap_seconds": {
+          "n": 0,
+          "mean": null,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "grace_seconds": {
+          "n": 0,
+          "mean": null,
+          "p50": null,
+          "p95": null,
+          "max": null
+        },
+        "zero_grace_retirements": 0,
+        "per_task": {
+          "arcane-drift-detection-baselines": {
+            "completed_turns": 32,
+            "delivered_tokens": 9388,
+            "queue_ms": {
+              "n": 32,
+              "mean": 15518.706482369453,
+              "p50": 14014.21312999446,
+              "p95": 39375.40212296881,
+              "max": 40070.68434590474
+            },
+            "longest_without_completed_turn_seconds": 92.44794392585754
+          },
+          "awilix-async-container-initialization": {
+            "completed_turns": 17,
+            "delivered_tokens": 22954,
+            "queue_ms": {
+              "n": 17,
+              "mean": 14892.089140176882,
+              "p50": 11177.456026896834,
+              "p95": 40899.424866074696,
+              "max": 40899.424866074696
+            },
+            "longest_without_completed_turn_seconds": 168.98968124389648
+          },
+          "drizzle-orm-window-function-builders": {
+            "completed_turns": 26,
+            "delivered_tokens": 10738,
+            "queue_ms": {
+              "n": 26,
+              "mean": 18423.39978419925,
+              "p50": 16988.23994048871,
+              "p95": 35434.59413200617,
+              "max": 39976.11756785773
+            },
+            "longest_without_completed_turn_seconds": 101.25352621078491
+          },
+          "koota-composite-trait-aspects": {
+            "completed_turns": 35,
+            "delivered_tokens": 8715,
+            "queue_ms": {
+              "n": 35,
+              "mean": 14516.304574720562,
+              "p50": 13878.180159023032,
+              "p95": 31445.065450156108,
+              "max": 42565.64538809471
+            },
+            "longest_without_completed_turn_seconds": 59.70662260055542
+          },
+          "mashumaro-flattened-dataclass-fields": {
+            "completed_turns": 30,
+            "delivered_tokens": 14014,
+            "queue_ms": {
+              "n": 30,
+              "mean": 13702.759063686244,
+              "p50": 11910.048405523412,
+              "p95": 31116.57380196266,
+              "max": 42092.59443287738
+            },
+            "longest_without_completed_turn_seconds": 146.5896246433258
+          },
+          "superjson-error-stack-serialization": {
+            "completed_turns": 20,
+            "delivered_tokens": 23025,
+            "queue_ms": {
+              "n": 20,
+              "mean": 16615.76670211507,
+              "p50": 14124.143869965337,
+              "p95": 46652.12472807616,
+              "max": 46652.12472807616
+            },
+            "longest_without_completed_turn_seconds": 119.62233972549438
+          },
+          "textual-richlog-follow-state": {
+            "completed_turns": 25,
+            "delivered_tokens": 15476,
+            "queue_ms": {
+              "n": 25,
+              "mean": 17128.07738139294,
+              "p50": 12686.149111017585,
+              "p95": 36899.2393380031,
+              "max": 38891.01935108192
+            },
+            "longest_without_completed_turn_seconds": 118.55431461334229
+          },
+          "wasmi-trap-coredumps": {
+            "completed_turns": 31,
+            "delivered_tokens": 13333,
+            "queue_ms": {
+              "n": 31,
+              "mean": 13406.399228827908,
+              "p50": 11871.35475105606,
+              "p95": 37463.7094961945,
+              "max": 42515.443694079295
+            },
+            "longest_without_completed_turn_seconds": 105.63477873802185
+          }
+        }
+      },
+      "evidence_sha256": {
+        "live-baseline/manifest.json": "e4c1b8f93b0d18fce185049f3bc9f8f38720451c2d11b9a48e0e906cc2c89b6b",
+        "live-baseline/run.json": "a8f977022e1eb45dfb00c6acce2bfd1825b71d3fec37d0313e944e2900a3c0f4",
+        "live-baseline/window-end-metrics.json": "e3efd6cb710e3a028d00351e010455610b81364fcff1e949d65d424576797701",
+        "live-baseline/metrics-before-formal.txt": "c8f789afbedfd287b5b802a7ebf9a477f42e4ad42e6fe168efec12edce8ed1b8",
+        "remote-evidence/baseline/profile.json": "370e2f2956fee7da45eac9372365cb396e3358d8c7082ea3646b292f62105240",
+        "remote-evidence/baseline/runtime-sha256.json": "a7d08685f7ccfd5394827055cabbb114761cce320fb56cfe98241c0c21bec83a",
+        "remote-evidence/baseline/cleanup.json": "7ef93c06f3c848f569d6e73b215b4e12db4d8bd547161bb4c751cd5098ca24af",
+        "live-baseline/window-workspaces.json": "072ab54ff5190177bd430fd98b9b47aac5bca9315993bc13ae1f0966667efef7"
+      }
+    },
+    "ttl": {
+      "real_agent": {
+        "status": "window_complete",
+        "seconds": 900.0,
+        "started_at": 1793446976.9142947,
+        "ended_at": 1793447876.9142947,
+        "counter_sample_interval": {
+          "begin": 1793447877.1338754,
+          "end": 1793447877.2305634,
+          "overshoot_seconds": 0.3162686824798584
+        },
+        "generated_tokens": 132662.0,
+        "generation_tokens_per_second": 147.35044185543507,
+        "counter_measurement_seconds": 900.3162686824799,
+        "nominal_window_generation_tokens_per_second": 147.40222222222224,
+        "completed_model_turns": 334,
+        "model_turn_qps": 0.3711111111111111,
+        "delivered_tokens": 130338,
+        "delivered_tokens_per_second": 144.82,
+        "prompt_length": {
+          "n": 342,
+          "mean": 75371.22222222222,
+          "median": 72353.5,
+          "p95": 126704,
+          "max": 133038
+        },
+        "request_queue_ms": {
+          "n": 334,
+          "mean": 10173.565763604414,
+          "median": 11764.133700518869,
+          "p95": 24733.222268987447,
+          "max": 39156.51602903381
+        },
+        "ttft_ms": {
+          "n": 334,
+          "mean": 3324.9924235341477,
+          "median": 1811.0374888638034,
+          "p95": 9877.764162840322,
+          "max": 51139.77516395971
+        },
+        "preemptions": 0.0,
+        "counter_delta": {
+          "vllm:generation_tokens_total": 132662.0,
+          "vllm:prompt_tokens_total": 25275030.0,
+          "vllm:num_preemptions_total": 0.0,
+          "vllm:request_success_total": 335.0
+        },
+        "real_tools": {
+          "drizzle-orm-window-function-builders": {
+            "tool_uses": 57,
+            "tool_results": 57,
+            "matched_results": 57,
+            "names": {
+              "Bash": 17,
+              "Read": 27,
+              "TaskCreate": 7,
+              "TaskUpdate": 1,
+              "Grep": 5
+            }
+          },
+          "superjson-error-stack-serialization": {
+            "tool_uses": 45,
+            "tool_results": 45,
+            "matched_results": 45,
+            "names": {
+              "Bash": 6,
+              "Read": 26,
+              "TaskCreate": 10,
+              "Grep": 3
+            }
+          },
+          "awilix-async-container-initialization": {
+            "tool_uses": 47,
+            "tool_results": 47,
+            "matched_results": 47,
+            "names": {
+              "Bash": 5,
+              "Glob": 1,
+              "Read": 26,
+              "Grep": 2,
+              "TaskCreate": 5,
+              "TaskUpdate": 3,
+              "Edit": 5
+            }
+          },
+          "arcane-drift-detection-baselines": {
+            "tool_uses": 86,
+            "tool_results": 86,
+            "matched_results": 86,
+            "names": {
+              "Bash": 64,
+              "Read": 12,
+              "TaskCreate": 9,
+              "TaskUpdate": 1
+            }
+          },
+          "wasmi-trap-coredumps": {
+            "tool_uses": 59,
+            "tool_results": 59,
+            "matched_results": 59,
+            "names": {
+              "Bash": 32,
+              "Read": 18,
+              "TaskCreate": 7,
+              "Grep": 2
+            }
+          },
+          "koota-composite-trait-aspects": {
+            "tool_uses": 80,
+            "tool_results": 80,
+            "matched_results": 80,
+            "names": {
+              "Bash": 7,
+              "Read": 63,
+              "Grep": 10
+            }
+          },
+          "mashumaro-flattened-dataclass-fields": {
+            "tool_uses": 43,
+            "tool_results": 43,
+            "matched_results": 43,
+            "names": {
+              "Bash": 4,
+              "Read": 32,
+              "Grep": 7
+            }
+          },
+          "textual-richlog-follow-state": {
+            "tool_uses": 49,
+            "tool_results": 49,
+            "matched_results": 49,
+            "names": {
+              "Bash": 30,
+              "Glob": 1,
+              "Read": 7,
+              "Grep": 5,
+              "TaskCreate": 5,
+              "TaskUpdate": 1
+            }
+          }
+        },
+        "task_admissions": 8,
+        "completed_tasks": [],
+        "naturally_completed_tasks": [],
+        "admitted_task_queue_wait_seconds": {
+          "n": 8,
+          "mean": 0.0052024126052856445,
+          "median": 0.005493879318237305,
+          "p95": 0.007165431976318359,
+          "max": 0.007165431976318359
+        },
+        "never_admitted_tasks": 8,
+        "never_admitted_wait_lower_bound_seconds": 900.0,
+        "task_states": {
+          "koota-composite-trait-aspects": "window_truncated",
+          "superjson-error-stack-serialization": "window_truncated",
+          "textual-richlog-follow-state": "window_truncated",
+          "awilix-async-container-initialization": "window_truncated",
+          "drizzle-orm-window-function-builders": "window_truncated",
+          "wasmi-trap-coredumps": "window_truncated",
+          "mashumaro-flattened-dataclass-fields": "window_truncated",
+          "arcane-drift-detection-baselines": "window_truncated"
+        },
+        "errors": [],
+        "cleanup_errors": [],
+        "quality_scope": "Only original hidden verifier for naturally finished tasks; window-censored attempts remain unscored."
+      },
+      "KV_handoff": {
+        "retirement_scope": "Matched completion records retained by the bounded archive log; coverage and dropped records are explicit. This may omit early-window acknowledgments.",
+        "finished_to_retirement_ack_seconds": {
+          "n": 247,
+          "mean": 0.10826876128247,
+          "median": 0.07830153312534094,
+          "p95": 0.2546516868751496,
+          "max": 0.5025213840417564
+        },
+        "finished_requests": 335,
+        "retirement_records_retained": 256,
+        "retirement_records_dropped": 90,
+        "resident": {
+          "completed_restores": 137,
+          "restore_seconds": {
+            "n": 137,
+            "mean": 0.2941671442461411,
+            "median": 0.12890392495319247,
+            "p95": 1.0464199120178819,
+            "max": 1.6607186931651086
+          },
+          "host_prepare_seconds": {
+            "n": 137,
+            "mean": 0.0,
+            "median": 0.0,
+            "p95": 0.0,
+            "max": 0.0
+          },
+          "KV_uploaded_bytes": 0,
+          "model_uploaded_bytes": 21629042688,
+          "active_tokens": {
+            "n": 137,
+            "mean": 40612.55474452555,
+            "median": 41860,
+            "p95": 48197,
+            "max": 48953
+          },
+          "admission_wait_seconds": {
+            "n": 137,
+            "mean": 0.016863478806522423,
+            "median": 0.0005403291434049606,
+            "p95": 0.14438283606432378,
+            "max": 0.35433854605071247
+          },
+          "arrival_to_ready_seconds": {
+            "n": 137,
+            "mean": 0.3655706646896382,
+            "median": 0.1943147610872984,
+            "p95": 1.124656914966181,
+            "max": 1.9372556218877435
+          },
+          "with_public_peers": 137
+        },
+        "assembly": {
+          "completed_restores": 193,
+          "restore_seconds": {
+            "n": 193,
+            "mean": 0.9740144677998237,
+            "median": 0.9345674179494381,
+            "p95": 1.4164552427828312,
+            "max": 1.8032190329395235
+          },
+          "host_prepare_seconds": {
+            "n": 193,
+            "mean": 0.44648352059188245,
+            "median": 0.4561320620123297,
+            "p95": 0.6391010908409953,
+            "max": 0.7287753357086331
+          },
+          "KV_uploaded_bytes": 262301028352,
+          "model_uploaded_bytes": 30470111232,
+          "active_tokens": {
+            "n": 193,
+            "mean": 39035.86528497409,
+            "median": 40768,
+            "p95": 48414,
+            "max": 49080
+          },
+          "admission_wait_seconds": {
+            "n": 194,
+            "mean": 8.57171304995487,
+            "median": 7.701762295910157,
+            "p95": 20.26896204194054,
+            "max": 26.261394419008866
+          },
+          "arrival_to_ready_seconds": {
+            "n": 193,
+            "mean": 9.553280062160402,
+            "median": 8.765995705965906,
+            "p95": 21.301092717098072,
+            "max": 27.352862117113546
+          },
+          "with_public_peers": 193
+        },
+        "refresh": {
+          "pressure": {
+            "completed": 43,
+            "seconds": {
+              "n": 43,
+              "mean": 0.5113050509514937,
+              "median": 0.3948380630463362,
+              "p95": 1.333228083094582,
+              "max": 1.4283733628690243
+            },
+            "query_host_seconds": {
+              "n": 43,
+              "mean": 0,
+              "median": 0,
+              "p95": 0,
+              "max": 0
+            },
+            "selection_seconds": {
+              "n": 43,
+              "mean": 0.02215940803072827,
+              "median": 0.023067591013386846,
+              "p95": 0.02886789385229349,
+              "max": 0.0362799521535635
+            },
+            "assembly_submit_seconds": {
+              "n": 43,
+              "mean": 0.22201306086445097,
+              "median": 0.21913016610778868,
+              "p95": 0.32196161802858114,
+              "max": 0.36565118399448693
+            },
+            "lane_wait_seconds": {
+              "n": 43,
+              "mean": 0.13788586887422688,
+              "median": 0.03148607793264091,
+              "p95": 0.608110792003572,
+              "max": 0.8425529850646853
+            }
+          }
+        }
+      },
+      "memory": {
+        "all_peak_gib": 31.3099365234375,
+        "window_peak_gib": 31.3099365234375,
+        "device_gib": 31.8427734375
+      },
+      "gpu_utilization_percent": {
+        "n": 17869,
+        "mean": 57.586938272986735,
+        "median": 53,
+        "p95": 100,
+        "max": 100
+      },
+      "sm_clock_mhz": {
+        "n": 17869,
+        "mean": 2818.9579159438135,
+        "median": 2827,
+        "p95": 2857,
+        "max": 2887
+      },
+      "power_watts": {
+        "n": 17869,
+        "mean": 291.6122612905031,
+        "median": 277.052,
+        "p95": 424.467,
+        "max": 450.449
+      },
+      "steps": {
+        "scope": "CUDA-event spans include host submission gaps, sampling, MTP and capture; not pure kernel time. Attribution by actual batch composition, exclusive groups. First/last batches are selected by host start; boundary slop is reported.",
+        "window_seconds": 900.0,
+        "offset_seconds": 1791877460.0699587,
+        "clock_offset_range_seconds": 1.9073486328125e-05,
+        "sampled_call_indices": [
+          269,
+          11591
+        ],
+        "missing_call_indices": 0,
+        "all": {
+          "batches": 11323,
+          "model_span_seconds": 781.7229961280823,
+          "maintenance_span_seconds": 89.53369455686956,
+          "mean_model_span_ms": 69.03850535441865,
+          "prefill_tokens": 731236
+        },
+        "pure_decode": {
+          "batches": 9161,
+          "model_span_seconds": 316.90561280441284,
+          "maintenance_span_seconds": 40.6101605021134,
+          "mean_model_span_ms": 34.592906102435634,
+          "prefill_tokens": 0
+        },
+        "prefill_or_mixed": {
+          "batches": 2162,
+          "model_span_seconds": 464.81738332366945,
+          "maintenance_span_seconds": 48.92353405475617,
+          "mean_model_span_ms": 214.99416434952332,
+          "prefill_tokens": 731236
+        },
+        "outside_sampled_spans_seconds": 28.743309534072864,
+        "first_batch_seconds": 10.785123109817505,
+        "last_batch_seconds": 899.9838645458221,
+        "groups": {
+          "prefill=0,decode=1": {
+            "batches": 83,
+            "model_span_seconds": 3.0203553409576416,
+            "maintenance_span_seconds": 1.9577381445169448,
+            "mean_model_span_ms": 36.389823385031825,
+            "prefill_tokens": 0
+          },
+          "prefill=0,decode=2": {
+            "batches": 824,
+            "model_span_seconds": 29.312913467407228,
+            "maintenance_span_seconds": 11.542774777971209,
+            "mean_model_span_ms": 35.5739241109311,
+            "prefill_tokens": 0
+          },
+          "prefill=0,decode=3": {
+            "batches": 3042,
+            "model_span_seconds": 108.84820865821838,
+            "maintenance_span_seconds": 22.848032472200693,
+            "mean_model_span_ms": 35.78179114339855,
+            "prefill_tokens": 0
+          },
+          "prefill=0,decode=4": {
+            "batches": 5212,
+            "model_span_seconds": 175.72413533782958,
+            "maintenance_span_seconds": 4.261615107424557,
+            "mean_model_span_ms": 33.71529841477928,
+            "prefill_tokens": 0
+          },
+          "prefill=1,decode=0": {
+            "batches": 2,
+            "model_span_seconds": 0.33435655212402343,
+            "maintenance_span_seconds": 0.03171955108642578,
+            "mean_model_span_ms": 167.17827606201172,
+            "prefill_tokens": 512
+          },
+          "prefill=1,decode=1": {
+            "batches": 55,
+            "model_span_seconds": 15.1444575881958,
+            "maintenance_span_seconds": 2.9199535446166993,
+            "mean_model_span_ms": 275.3537743308327,
+            "prefill_tokens": 13163
+          },
+          "prefill=1,decode=2": {
+            "batches": 363,
+            "model_span_seconds": 81.4234539642334,
+            "maintenance_span_seconds": 11.496763857603073,
+            "mean_model_span_ms": 224.3070357141416,
+            "prefill_tokens": 80862
+          },
+          "prefill=1,decode=3": {
+            "batches": 1181,
+            "model_span_seconds": 191.79931823730467,
+            "maintenance_span_seconds": 20.810520166397094,
+            "mean_model_span_ms": 162.40416446850523,
+            "prefill_tokens": 275205
+          },
+          "prefill=2,decode=0": {
+            "batches": 11,
+            "model_span_seconds": 3.4560826873779296,
+            "maintenance_span_seconds": 0.43699270343780516,
+            "mean_model_span_ms": 314.18933521617544,
+            "prefill_tokens": 5546
+          },
+          "prefill=2,decode=1": {
+            "batches": 54,
+            "model_span_seconds": 16.389159118652344,
+            "maintenance_span_seconds": 2.718650043964386,
+            "mean_model_span_ms": 303.5029466417101,
+            "prefill_tokens": 26513
+          },
+          "prefill=2,decode=2": {
+            "batches": 289,
+            "model_span_seconds": 77.44500369262695,
+            "maintenance_span_seconds": 6.569032869577407,
+            "mean_model_span_ms": 267.9757913239687,
+            "prefill_tokens": 137065
+          },
+          "prefill=3,decode=0": {
+            "batches": 15,
+            "model_span_seconds": 5.83833869934082,
+            "maintenance_span_seconds": 0.44961257553100586,
+            "mean_model_span_ms": 389.2225799560547,
+            "prefill_tokens": 11489
+          },
+          "prefill=3,decode=1": {
+            "batches": 55,
+            "model_span_seconds": 19.612611068725585,
+            "maintenance_span_seconds": 1.691732159614563,
+            "mean_model_span_ms": 356.5929285222834,
+            "prefill_tokens": 41306
+          },
+          "prefill=4,decode=0": {
+            "batches": 137,
+            "model_span_seconds": 53.37460171508789,
+            "maintenance_span_seconds": 1.798556582927704,
+            "mean_model_span_ms": 389.5956329568459,
+            "prefill_tokens": 139575
+          }
+        },
+        "checkpoint_host_seconds": {
+          "accepted_counter_read": 0.0010714270174503326,
+          "page_table_gpu_read": 0.1597802008036524,
+          "recurrent_views": 0.540508562931791,
+          "draft_views": 0.006727044703438878,
+          "pinned_payload_allocation": 1.195440955227241,
+          "direct_payload_d2h_submit": 0.20950480154715478,
+          "direct_payload_d2h_wait": 0.8137414320372045,
+          "canonicalize_submit": 1.5276966725941747,
+          "canonicalize_wait": 0.001343429321423173
+        },
+        "checkpoint_count": 343
+      },
+      "policy": {
+        "events": {
+          "retain": 335,
+          "queue_yield": 108,
+          "return": 334,
+          "defer": 174
+        },
+        "observed_tool_and_client_gap_seconds": {
+          "n": 334,
+          "mean": 0.5938821920963328,
+          "p50": 0.5670409019803628,
+          "p95": 0.8387374109588563,
+          "max": 3.5764640350826085
+        },
+        "grace_seconds": {
+          "n": 335,
+          "mean": 0.5944866104157999,
+          "p50": 0.7221090641695302,
+          "p95": 0.9664345928254465,
+          "max": 0.9978862010493015
+        },
+        "zero_grace_retirements": 72,
+        "per_task": {
+          "arcane-drift-detection-baselines": {
+            "completed_turns": 49,
+            "delivered_tokens": 11808,
+            "queue_ms": {
+              "n": 49,
+              "mean": 9786.262197624323,
+              "p50": 12880.167728988454,
+              "p95": 23394.600027007982,
+              "max": 33494.06696599908
+            },
+            "longest_without_completed_turn_seconds": 71.50396466255188
+          },
+          "awilix-async-container-initialization": {
+            "completed_turns": 28,
+            "delivered_tokens": 24287,
+            "queue_ms": {
+              "n": 28,
+              "mean": 10463.667303057653,
+              "p50": 10969.001401565038,
+              "p95": 28421.56004603021,
+              "max": 31848.886821884662
+            },
+            "longest_without_completed_turn_seconds": 154.0177025794983
+          },
+          "drizzle-orm-window-function-builders": {
+            "completed_turns": 52,
+            "delivered_tokens": 8294,
+            "queue_ms": {
+              "n": 52,
+              "mean": 10285.976310569542,
+              "p50": 12990.57267443277,
+              "p95": 22841.685489052907,
+              "max": 34190.75717194937
+            },
+            "longest_without_completed_turn_seconds": 88.54570627212524
+          },
+          "koota-composite-trait-aspects": {
+            "completed_turns": 47,
+            "delivered_tokens": 14230,
+            "queue_ms": {
+              "n": 47,
+              "mean": 10047.721512432388,
+              "p50": 10111.053813016042,
+              "p95": 23138.33413203247,
+              "max": 33771.9356410671
+            },
+            "longest_without_completed_turn_seconds": 78.97213554382324
+          },
+          "mashumaro-flattened-dataclass-fields": {
+            "completed_turns": 42,
+            "delivered_tokens": 21061,
+            "queue_ms": {
+              "n": 42,
+              "mean": 8695.314493085745,
+              "p50": 10176.194082014263,
+              "p95": 19769.069647882134,
+              "max": 33993.64700890146
+            },
+            "longest_without_completed_turn_seconds": 80.54153656959534
+          },
+          "superjson-error-stack-serialization": {
+            "completed_turns": 26,
+            "delivered_tokens": 28939,
+            "queue_ms": {
+              "n": 26,
+              "mean": 9308.808228036818,
+              "p50": 6881.264193565585,
+              "p95": 25208.676801994443,
+              "max": 35189.58862684667
+            },
+            "longest_without_completed_turn_seconds": 127.29154920578003
+          },
+          "textual-richlog-follow-state": {
+            "completed_turns": 36,
+            "delivered_tokens": 11870,
+            "queue_ms": {
+              "n": 36,
+              "mean": 14632.301170236638,
+              "p50": 15393.751362455077,
+              "p95": 34021.71899797395,
+              "max": 38554.83941989951
+            },
+            "longest_without_completed_turn_seconds": 84.9660952091217
+          },
+          "wasmi-trap-coredumps": {
+            "completed_turns": 54,
+            "delivered_tokens": 9849,
+            "queue_ms": {
+              "n": 54,
+              "mean": 8969.49423840097,
+              "p50": 966.6524549247697,
+              "p95": 24733.222268987447,
+              "max": 39156.51602903381
+            },
+            "longest_without_completed_turn_seconds": 80.41479015350342
+          }
+        }
+      },
+      "evidence_sha256": {
+        "live-ttl/manifest.json": "e4c1b8f93b0d18fce185049f3bc9f8f38720451c2d11b9a48e0e906cc2c89b6b",
+        "live-ttl/run.json": "bbe11f36477f98f6485dcc20b2925a85557986b5b316fcfbe8e696d1d04c1f49",
+        "live-ttl/window-end-metrics.json": "c0dbf828cba2a47a989073bfc97836608d7638546ca9494d2fdcd2b2c09b9499",
+        "live-ttl/metrics-before-formal.txt": "cd6d4db4da0eab7f5c40ab22cbbb869d00928ab9846714c59817467f56986a67",
+        "remote-evidence/ttl/profile.json": "f8925457d789b40c1977fa542e3066d58d56a7e579fc2314bbcb89429a1d98b2",
+        "remote-evidence/ttl/runtime-sha256.json": "50f0218a1d8ce5c6a5beccf377f54b4765fd2f19d4ddc32e661dfbbee2ef558b",
+        "remote-evidence/ttl/cleanup.json": "98ed7c4ee08174348c7534527aed79e21f193a8986f538a5a7f16f837500da0a",
+        "live-ttl/window-workspaces.json": "fccbe25b616f1ffe20f55cd6de48610d83716aa3f47c4816a498ed7bbf451d9b"
+      }
+    }
+  },
+  "ratios": {
+    "generation_tokens_per_second": 1.1188329127229248,
+    "model_turn_qps": 1.5462962962962963
+  },
+  "audit": {
+    "at": 1793448029.5778627,
+    "runs": {
+      "baseline": {
+        "generated_tokens": 118668.0,
+        "measurement_seconds": 901.0469355583191,
+        "generation_tokens_per_second": 131.7001316102022,
+        "completed_model_turns": 216,
+        "model_turn_qps": 0.24,
+        "preemptions": 0,
+        "memory_peak_bytes": 33618788352,
+        "cleanup_passed": true,
+        "capacity_scope": "Previous qualified geometry; real-window warmup and peak checked"
+      },
+      "ttl": {
+        "generated_tokens": 132662.0,
+        "measurement_seconds": 900.3162686824799,
+        "generation_tokens_per_second": 147.35044185543507,
+        "completed_model_turns": 334,
+        "model_turn_qps": 0.3711111111111111,
+        "preemptions": 0,
+        "memory_peak_bytes": 33618788352,
+        "cleanup_passed": true,
+        "capacity_scope": "Previous qualified geometry; real-window warmup and peak checked"
+      }
+    },
+    "effective_profile_differences": [
+      {
+        "path": "kvmem.active_tool_grace_ms",
+        "before": null,
+        "after": 1000.0
+      },
+      {
+        "path": "kvmem.active_tool_max_wait_ms",
+        "before": null,
+        "after": 15000.0
+      }
+    ],
+    "generated_test_cache_differences": [],
+    "runtime_different_files": [
+      "src/vllm_kvmem/active_residency.py",
+      "src/vllm_kvmem/capacity.py",
+      "src/vllm_kvmem/connector.py",
+      "src/vllm_kvmem/default_profile.py",
+      "src/vllm_kvmem/options.py",
+      "src/vllm_kvmem/restore_admission.py",
+      "src/vllm_kvmem/scheduler.py",
+      "src/vllm_kvmem/tool_grace.py",
+      "tests/test_tool_grace.py"
+    ],
+    "same_task_manifest": true,
+    "passed": true
+  },
+  "validation": {
+    "current_worktree_focused_suite": {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "135",
+      "time": "7.122",
+      "timestamp": "2026-10-31T19:29:06.147793+08:00",
+      "hostname": "user-Rack-Server"
+    },
+    "frozen_candidate_focused_suite": {
+      "passed": 55,
+      "failed": 0
+    },
+    "additional_suite_limitation": {
+      "test": "tests/test_agent_handoff.py::test_repeated_cancellation_keeps_host_slot_until_producer_finishes",
+      "result": "Timed out twice in an additional broader suite; stack in pre-existing scripts.dsh_bridge.bounded_host_work / asyncio. Not included among passing tests.",
+      "changed_by_this_task": false,
+      "impact": "The formal experiment reuses the previously frozen agent runtime, not the dirty worktree bridge."
+    }
+  },
+  "limitations": [
+    "A subsequent audit found identical single-request warmup took 63.780 seconds in the baseline and 44.972 seconds in the TTL arm, with identical token IDs and batch geometry. The observed 11.9% rate difference is not an isolated causal policy gain. See deepswe-rtx5090-throughput-audit-20261031.json.",
+    "One matched window per arm; real stochastic trajectories and output lengths differ. No confidence interval or sustainable maximum-QPS claim.",
+    "Completed model turns are not completed tasks. Unfinished task workspaces are preserved and unscored.",
+    "Common lightweight step/checkpoint timing and NVML sampling remain enabled in both arms.",
+    "The tested runtime is the previous qualified frozen 5090 runtime plus this focused policy patch; unrelated worktree changes were not deployed.",
+    "The earlier 155.04 tokens/s profiling result and 239.25 tokens/s four-agent result are different experiments, not denominators for this pair."
+  ],
+  "causal_speedup_validated": false,
+  "warmup_control_audit": {
+    "same_batch_geometry": true,
+    "runs": {
+      "baseline": {
+        "input_sha256": "1bc29c9d13bd6ba101985c33bda99abc4af78474c5bc7ac88b7e39cf6dbe8197",
+        "output_token_ids": [
+          198
+        ],
+        "time_to_first_token_ms": 62587.836038088426,
+        "wall_seconds": 63.7796630859375,
+        "public_batches": 267,
+        "model_span_seconds": 45.2230443649292,
+        "maintenance_span_seconds": 1.4558511631377042,
+        "model_span_by_64_batches_seconds": [
+          14.992148223876953,
+          11.461637603759765,
+          8.501099815368653,
+          8.81126554107666,
+          1.456893180847168
+        ],
+        "batch_geometry_sha256": "21d3ec79c19d2ca77f4670a98d37f0310f35847543b29d99f2589e9f700d0d65"
+      },
+      "ttl": {
+        "input_sha256": "1bc29c9d13bd6ba101985c33bda99abc4af78474c5bc7ac88b7e39cf6dbe8197",
+        "output_token_ids": [
+          198
+        ],
+        "time_to_first_token_ms": 43941.1172750406,
+        "wall_seconds": 44.97159957885742,
+        "public_batches": 267,
+        "model_span_seconds": 36.99490474700928,
+        "maintenance_span_seconds": 0.21893066021800042,
+        "model_span_by_64_batches_seconds": [
+          8.914960205078126,
+          8.967392730712891,
+          8.79701922607422,
+          8.78651033782959,
+          1.529022247314453
+        ],
+        "batch_geometry_sha256": "21d3ec79c19d2ca77f4670a98d37f0310f35847543b29d99f2589e9f700d0d65"
+      }
+    },
+    "interpretation": "The baseline is slower on identical single-request prefill before multi-session TTL contention. This is an uncontrolled warm-state/performance difference, not evidence of a TTL speedup. The exact source has not been isolated."
+  }
+}

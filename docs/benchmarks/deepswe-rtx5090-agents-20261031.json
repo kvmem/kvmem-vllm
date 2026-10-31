@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "measured_date": "2026-10-31",
+  "scope": "Real DeepSWE agent windows; each configuration measured once",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "device_memory_mib": 32607
+  },
+  "model": "Qwen3.8-27B NVFP4 with original FP8 attention/GDN",
+  "software": {
+    "vllm": "0.30.0",
+    "torch": "2.13.0+cu130",
+    "flashinfer": "0.6.18.post1"
+  },
+  "context_limit": 262144,
+  "mtp_draft_tokens": 4,
+  "kvmem": {
+    "select_budget_tokens": 36864,
+    "growth_budget_tokens": 12288
+  },
+  "live": {
+    "seconds_per_configuration": 900,
+    "queue_tasks": 16,
+    "agent_workers": 4,
+    "seed": 1000,
+    "ignore_eos": false,
+    "forced_token_replay": false,
+    "fresh_task_containers": true,
+    "completed_tasks": 0
+  },
+  "memory": {
+    "kv_pool_bytes": 10408591360,
+    "input_embedding": "Same exact BF16 CPU UVA mapping for target and MTP",
+    "mlp_attention_lm_head": "GPU resident"
+  },
+  "configuration_differences": {
+    "native": {
+      "async_scheduling": true,
+      "prefix_caching": true,
+      "flashinfer_autotune": true
+    },
+    "kvmem": {
+      "async_scheduling": false,
+      "prefix_caching": false,
+      "flashinfer_autotune": false
+    }
+  },
+  "generation_rate_definition": "Accepted output counter delta divided by measured window seconds; includes prefill, tools, queueing and generation",
+  "model_turn_qps_definition": "Model calls completed before the deadline divided by 900; not task completions",
+  "results": [
+    {
+      "configuration": "native-c1",
+      "label": "Native vLLM, GPU request limit 1",
+      "generation_tokens_per_second": 71.84013132362502,
+      "completed_model_turns": 84,
+      "model_turn_qps": 0.09333333333333334,
+      "real_tool_results": 166,
+      "verified_completed_tasks": 0,
+      "natural_completed_tasks": 0,
+      "prompt_mean": 44872.568181818184,
+      "prompt_max": 79827,
+      "actual_counter_seconds": 900.9309811592102,
+      "gpu_peak_gib": 31.3861083984375,
+      "preemptions": 0.0,
+      "generated_tokens": 64723
+    },
+    {
+      "configuration": "native-c2",
+      "label": "Native vLLM, GPU request limit 2",
+      "generation_tokens_per_second": 59.97065610530519,
+      "completed_model_turns": 73,
+      "model_turn_qps": 0.0811111111111111,
+      "real_tool_results": 153,
+      "verified_completed_tasks": 0,
+      "natural_completed_tasks": 0,
+      "prompt_mean": 46252.22077922078,
+      "prompt_max": 88825,
+      "actual_counter_seconds": 900.5904471874237,
+      "gpu_peak_gib": 31.4486083984375,
+      "preemptions": 0.0,
+      "generated_tokens": 54009
+    },
+    {
+      "configuration": "native",
+      "label": "Native vLLM, GPU request limit 4",
+      "generation_tokens_per_second": 58.62904699382211,
+      "completed_model_turns": 84,
+      "model_turn_qps": 0.09333333333333334,
+      "real_tool_results": 140,
+      "verified_completed_tasks": 0,
+      "natural_completed_tasks": 0,
+      "prompt_mean": 44043.35227272727,
+      "prompt_max": 92137,
+      "actual_counter_seconds": 900.4580955505371,
+      "gpu_peak_gib": 31.5189208984375,
+      "preemptions": 14.0,
+      "generated_tokens": 52793
+    },
+    {
+      "configuration": "kvmem",
+      "label": "KVMem, GPU request limit 4",
+      "generation_tokens_per_second": 239.25388681704612,
+      "completed_model_turns": 320,
+      "model_turn_qps": 0.35555555555555557,
+      "real_tool_results": 391,
+      "verified_completed_tasks": 0,
+      "natural_completed_tasks": 0,
+      "prompt_mean": 95771.85139318886,
+      "prompt_max": 189675,
+      "actual_counter_seconds": 901.1306059360504,
+      "gpu_peak_gib": 31.11651611328125,
+      "preemptions": 0.0,
+      "generated_tokens": 215599
+    }
+  ],
+  "kvmem_over_best_measured_native": {
+    "generation_tokens_per_second": 3.330365387825595,
+    "model_turn_qps": 3.8095238095238093
+  },
+  "limitations": [
+    "No complete tasks or task-quality comparison within the measured window",
+    "No repeated-run confidence interval or maximum sustainable QPS claim",
+    "Actual context lengths and agent trajectories differ; 256K is the supported limit",
+    "Native admission limits tested: 1, 2, 4; all configurations used four agents",
+    "Scheduling, caching and autotuning were not identical; not a CPU-offload-only ablation"
+  ],
+  "source_artifact": "kvmem-5090-queue-20261031-r1",
+  "source_evidence_sha256": {
+    "results.json": "8c7a50901b613b9e8d09863fb67984dee330de0c6d840b74db34bb48c8c9aee3",
+    "independent-audit.json": "eb267e380a8a35ff612b7f081ebc5271a64230307ede901ea96ded0b9129d7d2",
+    "protocol.json": "fd5bd9e01d44703963fecbe20bc9a73ccc9261ac2043e359833037a2dc9043de",
+    "live-summary.csv": "7c438d865f43f24a2982e934bbe7c752ef09804a332110dd399fe8c86ea8486b"
+  }
+}

@@ -256,7 +256,7 @@ def test_runner_reuses_fixed_staging_across_request_views(cuda_oracle, monkeypat
     runner = SimpleNamespace(model=SimpleNamespace(named_modules=lambda: [("module", module)]),
         kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=["attention"])]),
         req_states=SimpleNamespace(req_id_to_index={"a": 0, "b": 1}),
-        block_tables=SimpleNamespace(num_blocks=SimpleNamespace(np=np.array([[2, 2]])),
+        block_tables=SimpleNamespace(blocks_per_kv_block=(1,), num_blocks=SimpleNamespace(np=np.array([[2, 2]])),
             block_tables=[SimpleNamespace(gpu=torch.tensor([[1, 2], [2, 1]], dtype=torch.int32))]))
     monkeypatch.setattr(window, "native_vllm_fp8_views", lambda *_: (layer.key, layer.value))
     with pytest.raises(ValueError, match="geometry"):
@@ -292,7 +292,7 @@ def test_read_only_oracle_views_do_not_activate_split_assembly(cuda_oracle,monke
         _kvmem_assembly_staging=staging,
         kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=['attention'])]),
         req_states=SimpleNamespace(req_id_to_index={'a':0}),
-        block_tables=SimpleNamespace(num_blocks=SimpleNamespace(np=np.array([[2]])),
+        block_tables=SimpleNamespace(blocks_per_kv_block=(1,), num_blocks=SimpleNamespace(np=np.array([[2]])),
             block_tables=[SimpleNamespace(gpu=torch.tensor([[1,2]],dtype=torch.int32))]))
     monkeypatch.setattr(window,'native_vllm_fp8_views',lambda *_:(layer.key,layer.value))
     observer=window.NativeWindowAssembler.from_runner(runner,'a',['module'],4)

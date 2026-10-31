@@ -349,8 +349,8 @@ class AsyncRefresh:
 
     def _submit(self, job):
         self._restore_state(job)
-        rows = job.guided_rows or job.query_rows
-        query=torch.cat(rows,dim=1) if rows else None
+        from .query_capture_buffer import query_for_submit
+        query = query_for_submit(job)
         # The assembly stream consumes the concatenated tensor, so its fence
         # must cover cat as well as the query forwards and state restoration.
         ready=torch.cuda.Event();ready.record()
@@ -597,7 +597,10 @@ class AsyncRefresh:
         qb,qe=job.command.query_span or (job.history,job.history+len(job.command.input_tokens))
         lo=max(qb,job.history+job.offset)-job.history-job.offset
         hi=min(qe,job.history+end)-job.history-job.offset
-        if hi>lo:job.query_rows.append(q[:,lo:hi].clone())
+        if hi>lo:
+            from .query_capture_buffer import append_query_chunk
+            total = min(qe, job.history+len(job.command.input_tokens)) - max(qb, job.history)
+            append_query_chunk(job, q, lo, hi, total)
         job.offset=end
         if end==len(job.command.input_tokens):
             boundary_guided = (job.command.guided_boundary if job.command.guided_boundary is not None
@@ -633,6 +636,8 @@ class AsyncRefresh:
             if not job.state[1].release(job.history):raise RuntimeError('Recurrent restore still in flight')
             job.state=None
         job.query_rows.clear();job.guided_rows.clear()
+        from .query_capture_buffer import release_query_buffer
+        release_query_buffer(job)
         job.assembly_inputs=None
 
     def report(self,job,assembly,fit,seconds):

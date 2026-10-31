@@ -10,8 +10,8 @@ pytestmark = pytest.mark.skipif(os.getenv('KVMEM_RUN_GPU_TESTS') != '1',
                                 reason='Explicit GPU qualification only')
 
 
-@pytest.mark.parametrize('candidate_chunk', [128, 256])
-def test_larger_chunks_match_32_across_resident_moves_partial_tail_and_restore(tmp_path, candidate_chunk):
+@pytest.mark.parametrize('candidate_chunk', [4, 16, 128, 256])
+def test_chunks_match_32_across_resident_moves_partial_tail_and_restore(tmp_path, candidate_chunk):
     from vllm_kvmem.assembly import assemble_fp8
     from vllm_kvmem.authority import RequestAuthority
     from vllm_kvmem.codec import native_vllm_fp8_views
@@ -80,7 +80,7 @@ def test_larger_chunks_match_32_across_resident_moves_partial_tail_and_restore(t
         assert optimized.partial_tokens == baseline.partial_tokens == 7
         assert optimized.uploaded_bytes == baseline.uploaded_bytes
         assert optimized.resident_v_reused_tokens == baseline.resident_v_reused_tokens == (0 if restoring else 130*block)
-        assert optimized.chunks < baseline.chunks
+        assert (optimized.chunks < baseline.chunks) == (candidate_chunk > 32)
         owner.memory.attach_completion(optimized)
         assert owner.memory.commit_selection()
         assert all(assembler.close() for assembler in assemblers)

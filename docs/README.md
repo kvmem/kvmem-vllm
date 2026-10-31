@@ -11,7 +11,7 @@ their own experiments; they are not default installation instructions.
 | [Installation](installation.md) | Install dependencies, obtain the model/tokenizer and validate a profile. |
 | [Serving and sessions](serving.md) | Start a server, submit chat or token-ID requests, and size memory budgets. |
 | [Support matrix](support.md) | Check model, GPU, API and runtime boundaries. |
-| [Benchmarks](benchmarks.md) | Understand the measured 3.70× generation-throughput result and its scope. |
+| [Benchmarks](benchmarks.md) | Read real-agent observations, historical generation results and their measurement limits. |
 | [Development](development.md) | Build the host core and run focused Python/C++ checks. |
 | [Contributing](../CONTRIBUTING.md) | Prepare a reproducible bug report or a scoped change. |
 

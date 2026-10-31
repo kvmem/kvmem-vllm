@@ -290,6 +290,8 @@ class RuntimeOptions:
     active_resident_ttl_ms: float = 0.0
     active_resident_pressure_only: bool = False
     active_resident_max_fraction: float = 0.5
+    active_tool_grace_ms: float = 0.0
+    active_tool_max_wait_ms: float = 15000.0
     maintenance_transfer_bytes_per_second: int = 0
     maintenance_transfer_burst_bytes: int = 67108864
     offline_agent_policy: bool = False
@@ -655,6 +657,14 @@ class RuntimeOptions:
             raise ValueError('Invalid idle active-view TTL or pool fraction')
         if self.active_resident_pressure_only and self.active_resident_ttl_ms:
             raise ValueError('Pressure-only residency and finite TTL are mutually exclusive')
+        if (type(self.active_tool_grace_ms) not in (int, float) or
+                not math.isfinite(self.active_tool_grace_ms) or self.active_tool_grace_ms < 0 or
+                type(self.active_tool_max_wait_ms) not in (int, float) or
+                not math.isfinite(self.active_tool_max_wait_ms) or self.active_tool_max_wait_ms <= 0 or
+                self.active_tool_grace_ms > self.active_tool_max_wait_ms):
+            raise ValueError('Invalid tool grace or maximum queue wait')
+        if self.active_tool_grace_ms and not self.active_resident_pressure_only:
+            raise ValueError('Tool grace requires pressure-only active residency')
         if self.active_residency_enabled and (not self.async_restore or not self.session_capture_terminal):
             raise ValueError('Idle active residency requires exact terminal capture and async restore')
         if (type(self.prefill_batch_tokens) is not int or self.prefill_batch_tokens < 0 or
@@ -942,6 +952,7 @@ class RuntimeOptions:
             ('prefill_max_tokens', 2048), ('prefill_feedback_timeout_ms', 5000.0),
             ('prefill_batch_tokens', 0), ('prefill_request_tokens', 0), ('active_resident_ttl_ms', 0.0),
             ('active_resident_pressure_only', False),
+            ('active_tool_grace_ms', 0.0), ('active_tool_max_wait_ms', 15000.0),
             ('active_resident_max_fraction', 0.5), ('maintenance_transfer_bytes_per_second', 0),
             ('maintenance_transfer_burst_bytes', 67108864), ('offline_agent_policy', False),
             ('offline_prefill_coalescing', False), ('offline_prefill_max_tokens', 4096),
