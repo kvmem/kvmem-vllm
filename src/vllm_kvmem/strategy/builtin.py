@@ -1,7 +1,8 @@
 """The strategies shipped with the package.
 
 Entries marked native are serving's existing code paths: the per-layer MeanK
-Query scores, the accumulated-attention pressure scores, the native store
+Query scores, the accumulated-attention pressure scores and their age-adjusted
+variant (lift, kept in the native layer-history state), the native store
 picker and the native historical-GC policies. They are listed so that a
 profile can name them and the strategy table is complete; serving runs them
 unchanged. The recency scorers are the lower reference for comparisons: they
@@ -50,6 +51,9 @@ register(Strategy(PRESSURE_SCORER, 'recency', RecencyPressureScorer, needs=('pos
                   paths=BOTH, summary='Most recent window blocks stay; lower reference'))
 register(Strategy(PRESSURE_SCORER, 'graph', _native, needs=('layer_attention', 'block_graph'), native=True,
                   paths=(GLOBAL,), summary='Attention seeds propagated over the block graph (pressure_policy=graph)'))
+register(Strategy(PRESSURE_SCORER, 'lift', _native, needs=('layer_attention',), native=True, paths=(LAYER,),
+                  summary='Age-adjusted: accumulated attention divided by what a block at the same distance '
+                          'typically receives (per layer)'))
 register(Strategy(PICKER, 'native', _native, native=True, paths=BOTH,
                   summary='Native store picker: sink and recent bands, mandatory blocks, top scores to the budget'))
 register(Strategy(EVICTOR, 'lru', _native, native=True, paths=BOTH,

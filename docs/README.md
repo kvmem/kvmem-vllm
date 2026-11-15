@@ -24,6 +24,7 @@ their own experiments; they are not default installation instructions.
 | [Qwen3.8 Flash Next](qwen38-flash-next.md) | Explicit B12X QSA adapter, FP4-Local profile, FP8 KV and MTP boundaries. |
 | [Rolling long output](rolling-long-output.md) | Generation across bounded working-window refreshes; requires token-ID requests. |
 | [Graph scoring configuration](graph-scoring-v2-configuration.md) | Explicit graph-policy choices and validation rules. |
+| [Age-adjusted pressure](age-adjusted-pressure.md) | Per-layer selection that keeps old content later text refers back to, plus the shared shallow selection. |
 | [Query replay](query-replay-20261022.md) | Implementation and measured behavior of complete query replay. |
 | [Thinking history GC](historical-thinking-gc.md) | Keep direct thinking representatives, then reclaim history with an explicit LRU fallback. |
 | [Elastic serving](elastic-serving.md) | A separate authenticated turn gateway, with its own profiles and API. |

@@ -7,6 +7,7 @@
 #include <array>
 #include <charconv>
 #include <climits>
+#include <cstring>
 #include <numeric>
 #include <string>
 #include <utility>
@@ -91,10 +92,38 @@ inline bool map_row(PyObject *row,long long &begin,long long &count,long long &d
         exact_int(PyTuple_GET_ITEM(row,4),dense);
 }
 
+// Age-adjusted pressure (strategy_pressure_scorer=lift): distance buckets of the
+// expected-attention profile, in tokens from a sampled row back to a block's end:
+// [0,32), [32,64), [64,128), ..., [65536,131072), >=131072.
+constexpr size_t kLiftBuckets=14;
+
+inline size_t lift_bucket(int64_t distance) {
+    if (distance<32) return 0;
+    const int log2=63-__builtin_clzll(static_cast<unsigned long long>(distance));
+    return std::min<size_t>(kLiftBuckets-1,static_cast<size_t>(log2-4));
+}
+
 struct State {
     std::vector<int64_t> keys;
     std::vector<double> mass, exposure;
     std::unordered_map<int64_t,size_t> positions;
+    // Lift states also keep, per key, the decayed attention a typical block at the
+    // same distance would have received over the same rows, and this layer's
+    // running attention profile by distance (this request's own rows). Off: empty.
+    bool lift=false;
+    std::vector<double> expected;
+    std::array<double,kLiftBuckets> bucket_mass{}, bucket_pairs{};
+
+    static State lift_empty() { State result; result.lift=true; return result; }
+
+    // Ranking value for key i: mass / expected; `top` (above every scored key)
+    // for keys no row has scored yet, so the newest text ranks first.
+    double lift_top() const {
+        double best=0.;
+        for (size_t i=0;i<keys.size();++i)
+            if (expected[i]>0.) best=std::max(best,mass[i]/expected[i]);
+        return best+1.;
+    }
 
     static State from_values(const py::dict &values) {
         State result;
@@ -106,6 +135,26 @@ struct State {
             if (pair.size()!=2) throw std::invalid_argument("Invalid prefill history state");
             result.positions.emplace(key,result.keys.size());result.keys.push_back(key);
             result.mass.push_back(pair[0]);result.exposure.push_back(pair[1]);
+        }
+        return result;
+    }
+
+    // The state from_values(values) builds; a lift state also keeps its distance
+    // profile and every remaining key's expected attention. Historical GC prunes a
+    // history through this (history.values = {kept keys}), so a lift state may only
+    // lose keys: each key must already be here with the same mass and exposure.
+    State with_values(const py::dict &values) const {
+        State result=from_values(values);
+        if (!lift) return result;
+        result.lift=true;result.bucket_mass=bucket_mass;result.bucket_pairs=bucket_pairs;
+        result.expected.reserve(result.keys.size());
+        for (size_t i=0;i<result.keys.size();++i) {
+            const auto found=positions.find(result.keys[i]);
+            if (found==positions.end() || !(mass[found->second]==result.mass[i]) ||
+                    !(exposure[found->second]==result.exposure[i]))
+                throw std::invalid_argument("A lift prefill state can only drop keys (a session restore of "
+                                            "lift states needs KVMEM_CHECKPOINT_FAST_STATE=1)");
+            result.expected.push_back(expected[found->second]);
         }
         return result;
     }
@@ -125,6 +174,12 @@ struct State {
         // Keep insertion order, filtering and IEEE division identical to
         // PrefillHistory.scores(); do not quantize or reassociate accumulation.
         py::dict result;
+        if (lift && has_lift_score()) {
+            const double top=lift_top();
+            for (size_t i=0;i<keys.size();++i)
+                result[py::int_(keys[i])]=expected[i]>0.?mass[i]/expected[i]:top;
+            return result;
+        }
         for (size_t i=0;i<keys.size();++i) {
             if (exposure[i]>0.) result[py::int_(keys[i])]=mass[i]/exposure[i];
         }
@@ -148,10 +203,12 @@ struct State {
         State result;
         result.keys.reserve(keys.size());result.mass.reserve(keys.size());
         result.exposure.reserve(keys.size());result.positions.reserve(keys.size());
+        result.lift=lift;result.bucket_mass=bucket_mass;result.bucket_pairs=bucket_pairs;
         for (const auto index : order) {
             result.positions.emplace(keys[index],result.keys.size());
             result.keys.push_back(keys[index]);
             result.mass.push_back(mass[index]);result.exposure.push_back(exposure[index]);
+            if (lift) result.expected.push_back(expected[index]);
         }
         return result;
     }
@@ -206,8 +263,25 @@ struct State {
 
     // scores().get(key, 0.) for each key, without building the dictionary:
     // the same IEEE division for exposed keys, 0.0 for absent/unexposed ones.
+    // Lift scores need at least one positive value; otherwise both lookups keep
+    // the original attention / time-visible score.
+    bool has_lift_score() const {
+        for (size_t i=0;i<keys.size();++i)
+            if (expected[i]<=0. || mass[i]>0.) return true;
+        return false;
+    }
+
     std::vector<double> scores_for(const std::vector<int64_t> &wanted) const {
         std::vector<double> result(wanted.size(), 0.);
+        if (lift && has_lift_score()) {
+            const double top=lift_top();
+            for (size_t i=0;i<wanted.size();++i) {
+                const auto found=positions.find(wanted[i]);
+                result[i]=(found!=positions.end() && expected[found->second]>0.)
+                    ?mass[found->second]/expected[found->second]:top;
+            }
+            return result;
+        }
         for (size_t i=0;i<wanted.size();++i) {
             const auto found=positions.find(wanted[i]);
             if (found!=positions.end() && exposure[found->second]>0.)
@@ -253,11 +327,16 @@ struct State {
     // scalar arithmetic identical; batching only shares argument conversion.
     State committed_buffer(double decay,const std::vector<int64_t> &rows,
             const std::vector<int64_t> &starts,const std::vector<int64_t> &history,
-            int64_t local_begin,const py::buffer_info &buffer,bool fp32) const {
+            int64_t local_begin,const py::buffer_info &buffer,bool fp32,int64_t history_shift=0) const {
         State result;
         {
             result.keys.reserve(history.size());result.mass.reserve(history.size());
             result.exposure.reserve(history.size());result.positions.reserve(history.size());
+            result.lift=lift;
+            if (lift) {
+                result.expected.reserve(history.size());
+                result.bucket_mass=bucket_mass;result.bucket_pairs=bucket_pairs;
+            }
             std::vector<size_t> indices;indices.reserve(history.size());
             for (const auto key : history) {
                 const auto inserted=result.positions.emplace(key,result.keys.size());
@@ -268,32 +347,107 @@ struct State {
                 const bool found=previous!=positions.end();
                 result.mass.push_back(kvmem_prefill::multiply(decay,found?mass[previous->second]:0.));
                 result.exposure.push_back(kvmem_prefill::multiply(decay,found?exposure[previous->second]:0.));
+                if (lift)
+                    result.expected.push_back(kvmem_prefill::multiply(decay,found?expected[previous->second]:0.));
             }
             const auto read_value=fp32?&kvmem_prefill::read<float>:&kvmem_prefill::read<double>;
             const double inv=1./rows.size();
             std::vector<ssize_t> seen(result.keys.size(),-1);
-            for (ssize_t row=0;row<buffer.shape[0];++row) {
-                kvmem_prefill::Sum sum;
-                for (ssize_t page=0;page<buffer.shape[1];++page) {
-                    const double value=read_value(buffer,row,page);
-                    if (!std::isfinite(value) || value<0.)
+            if (!lift) {
+                // The original loop, unchanged (lift states take the path below).
+                for (ssize_t row=0;row<buffer.shape[0];++row) {
+                    kvmem_prefill::Sum sum;
+                    for (ssize_t page=0;page<buffer.shape[1];++page) {
+                        const double value=read_value(buffer,row,page);
+                        if (!std::isfinite(value) || value<0.)
+                            throw std::runtime_error("Invalid prefill attention mass");
+                        sum.add(value);
+                    }
+                    if (std::abs(sum.value()-1.)>.005)
                         throw std::runtime_error("Invalid prefill attention mass");
-                    sum.add(value);
-                }
-                if (std::abs(sum.value()-1.)>.005)
-                    throw std::runtime_error("Invalid prefill attention mass");
-                if ((rows[row]>0 && local_begin>INT64_MAX-rows[row]) ||
-                    (rows[row]<0 && local_begin<INT64_MIN-rows[row]))
-                    throw std::invalid_argument("Prefill position overflow");
-                const auto position=local_begin+rows[row];
-                for (size_t page=0;page<std::min(starts.size(),history.size());++page) {
-                    if (starts[page]>position)continue;
-                    const auto index=indices[page];
-                    result.mass[index]+=kvmem_prefill::multiply(inv,read_value(buffer,row,page));
-                    if (seen[index]!=row) {
-                        result.exposure[index]+=inv;seen[index]=row;
+                    if ((rows[row]>0 && local_begin>INT64_MAX-rows[row]) ||
+                        (rows[row]<0 && local_begin<INT64_MIN-rows[row]))
+                        throw std::invalid_argument("Prefill position overflow");
+                    const auto position=local_begin+rows[row];
+                    for (size_t page=0;page<std::min(starts.size(),history.size());++page) {
+                        if (starts[page]>position)continue;
+                        const auto index=indices[page];
+                        result.mass[index]+=kvmem_prefill::multiply(inv,read_value(buffer,row,page));
+                        if (seen[index]!=row) {
+                            result.exposure[index]+=inv;seen[index]=row;
+                        }
                     }
                 }
+            } else {
+                // Typed reads (no per-value indirect call) for the lift path.
+                auto lift_pass=[&](auto tag) {
+                    using T=decltype(tag);
+                    const char *base=static_cast<const char *>(buffer.ptr);
+                    const ssize_t s0=buffer.strides[0],s1=buffer.strides[1];
+                    auto rv=[&](ssize_t r,ssize_t c)->double {
+                        T value;std::memcpy(&value,base+r*s0+c*s1,sizeof(value));
+                        return static_cast<double>(value);
+                    };
+                    // Lift: pass 1 validates every row (same checks and order) and adds the
+                    // packet to this layer's distance profile, counting each row's visible
+                    // blocks per distance bucket; pass 2 accumulates mass and exposure as
+                    // above plus each block's expected attention: the profile's mean for
+                    // its bucket, normalised per row (one table per row, no per-block division).
+                    const size_t pages=std::min(starts.size(),history.size());
+                    const ssize_t nrows=buffer.shape[0];
+                    std::vector<std::array<uint32_t,kLiftBuckets>> counts(static_cast<size_t>(nrows));
+                    for (ssize_t row=0;row<nrows;++row) {
+                        // One read per value, as in the original validation loop: the
+                        // position check moves first so visibility is known while reading.
+                        if ((rows[row]>0 && local_begin>INT64_MAX-rows[row]) ||
+                            (rows[row]<0 && local_begin<INT64_MIN-rows[row]))
+                            throw std::invalid_argument("Prefill position overflow");
+                        const auto position=local_begin+rows[row];
+                        const auto at=position+history_shift-32;
+                        auto &count=counts[static_cast<size_t>(row)];
+                        count.fill(0);
+                        std::array<double,kLiftBuckets> row_mass{};
+                        kvmem_prefill::Sum sum;
+                        for (ssize_t page=0;page<buffer.shape[1];++page) {
+                            const double value=rv(row,page);
+                            if (!std::isfinite(value) || value<0.)
+                                throw std::runtime_error("Invalid prefill attention mass");
+                            sum.add(value);
+                            if (static_cast<size_t>(page)<pages && starts[page]<=position) {
+                                const auto bucket=lift_bucket(at-history[page]);
+                                row_mass[bucket]+=value;++count[bucket];
+                            }
+                        }
+                        if (std::abs(sum.value()-1.)>.005)
+                            throw std::runtime_error("Invalid prefill attention mass");
+                        for (size_t b=0;b<kLiftBuckets;++b) {
+                            result.bucket_mass[b]+=row_mass[b];result.bucket_pairs[b]+=count[b];
+                        }
+                    }
+                    std::array<double,kLiftBuckets> mean{};
+                    for (size_t b=0;b<kLiftBuckets;++b)
+                        mean[b]=result.bucket_pairs[b]>0.?result.bucket_mass[b]/std::max(result.bucket_pairs[b],1.):0.;
+                    std::array<double,kLiftBuckets> scaled{};
+                    for (ssize_t row=0;row<nrows;++row) {
+                        const auto position=local_begin+rows[row];
+                        const auto at=position+history_shift-32;
+                        const auto &count=counts[static_cast<size_t>(row)];
+                        double norm=0.;uint32_t visible=0;
+                        for (size_t b=0;b<kLiftBuckets;++b) { norm+=count[b]*mean[b];visible+=count[b]; }
+                        for (size_t b=0;b<kLiftBuckets;++b)
+                            scaled[b]=kvmem_prefill::multiply(inv,norm>0.?mean[b]/norm:1./static_cast<double>(std::max<uint32_t>(visible,1)));
+                        for (size_t page=0;page<pages;++page) {
+                            if (starts[page]>position)continue;
+                            const auto index=indices[page];
+                            result.mass[index]+=kvmem_prefill::multiply(inv,rv(row,page));
+                            if (seen[index]!=row) {
+                                result.exposure[index]+=inv;seen[index]=row;
+                            }
+                            result.expected[index]+=scaled[lift_bucket(at-history[page])];
+                        }
+                    }
+                };
+                if (fp32) lift_pass(float{}); else lift_pass(double{});
             }
         }
         return result;
@@ -301,11 +455,11 @@ struct State {
 
     State committed(double decay,const std::vector<int64_t> &rows,
             const std::vector<int64_t> &starts,const std::vector<int64_t> &history,
-            int64_t local_begin,py::buffer masses) const {
+            int64_t local_begin,py::buffer masses,int64_t history_shift) const {
         const auto buffer=masses.request();
         const bool fp32=validate_buffer(buffer,rows,history);
         py::gil_scoped_release release;
-        return committed_buffer(decay,rows,starts,history,local_begin,buffer,fp32);
+        return committed_buffer(decay,rows,starts,history,local_begin,buffer,fp32,history_shift);
     }
 };
 
@@ -359,7 +513,7 @@ std::vector<State> committed_batch(py::iterable state_objects,
         const std::vector<double> &decays,const std::vector<int64_t> &rows,
         const std::vector<int64_t> &starts,
         const std::vector<std::vector<int64_t>> &histories,
-        int64_t local_begin,py::buffer masses) {
+        int64_t local_begin,py::buffer masses,int64_t history_shift) {
     // Own a private immutable container before extracting pointers. The caller
     // may supply a generator or mutate its original list while the GIL is free.
     const py::tuple owners(state_objects);
@@ -396,7 +550,7 @@ std::vector<State> committed_batch(py::iterable state_objects,
         kvmem_parallel::for_rows(states.size(),[&](size_t layer) {
             const bool layer_fp32=State::validate_buffer(layers[layer],rows,histories[layer]);
             result[layer]=states[layer]->committed_buffer(decays[layer],rows,starts,
-                histories[layer],local_begin,layers[layer],layer_fp32);
+                histories[layer],local_begin,layers[layer],layer_fp32,history_shift);
         });
     }
     return result;
@@ -565,6 +719,7 @@ py::object identity_json(py::object rows) {
 PYBIND11_MODULE(_prefill_state_native,module) {
     py::class_<State>(module,"State")
         .def_static("from_values",&State::from_values)
+        .def("with_values",&State::with_values)
         .def("values",&State::values)
         .def("scores",&State::scores)
         .def("scores_for",&State::scores_for)
@@ -578,8 +733,13 @@ PYBIND11_MODULE(_prefill_state_native,module) {
 #ifdef KVMEM_FLOAT_REPR
         .def("rows_json",&State::rows_json)
 #endif
-        .def("committed",&State::committed);
-    module.def("committed_batch",&committed_batch);
+        .def("committed",&State::committed,py::arg("decay"),py::arg("rows"),py::arg("starts"),
+             py::arg("history"),py::arg("local_begin"),py::arg("masses"),py::arg("history_shift")=0)
+        .def_static("lift_empty",&State::lift_empty)
+        .def_readonly("lift",&State::lift);
+    module.def("committed_batch",&committed_batch,py::arg("states"),py::arg("decays"),py::arg("rows"),
+               py::arg("starts"),py::arg("histories"),py::arg("local_begin"),py::arg("masses"),
+               py::arg("history_shift")=0);
     module.def("validate_batch",&validate_batch);
     module.def("resolve_rows",&resolve_rows);
     module.def("same_identity",&same_identity);

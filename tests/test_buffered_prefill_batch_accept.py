@@ -147,7 +147,8 @@ def test_controller_batches_once_without_per_layer_mass_views_and_publishes_on_c
     call=native.committed_batch
     seen=[]
     def observed(*args):
-        array=args[-1]
+        array=args[6]    # (states, decays, rows, starts, histories, local_begin, masses, history_shift)
+        assert args[7]==512-512-0    # end - count - local_begin
         assert array.__array_interface__['data'][0]==masses.data_ptr()
         assert array.strides==tuple(stride*masses.element_size() for stride in masses.stride())
         seen.append(array.shape)

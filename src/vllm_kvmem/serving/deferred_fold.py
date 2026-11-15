@@ -47,10 +47,11 @@ class _Span:
     several owners the queued spans of owners between refreshes exhausted it.
     The eager fold released the lease at publication; so does this.
     """
-    __slots__ = ('end', 'rows', 'starts', 'local_begin', 'logical', 'buffer', 'first')
+    __slots__ = ('end', 'rows', 'starts', 'local_begin', 'logical', 'buffer', 'first', 'shift')
 
-    def __init__(self, end, rows, starts, local_begin, logical, masses, first=1):
+    def __init__(self, end, rows, starts, local_begin, logical, masses, first=1, shift=0):
         self.end, self.rows, self.starts, self.local_begin = end, rows, starts, local_begin
+        self.shift = shift
         self.logical, self.first = logical, first
         source = masses.numpy() if hasattr(masses, 'numpy') else np.asarray(masses)
         self.buffer = np.array(source[first:], copy=True, order='C')
@@ -70,7 +71,7 @@ def _apply(histories, span, first):
     count = len(histories)
     updated = require_batch_accept()(states, decays, span.rows, span.starts,
                                      list(span.logical[first:first+count]), span.local_begin,
-                                     span.layers(first, count))
+                                     span.layers(first, count), span.shift)
     for history, state in zip(histories, updated):
         d = history.__dict__
         d['_buffered_state'] = state
@@ -158,7 +159,8 @@ def deferrable(histories, end, count, accepted, rows, logical, masses):
 def accept_deferred(histories, end, count, accepted, rows, starts, logical, local_begin, masses):
     """Eagerly fold layer 0 (exactly as the batch did); queue every other layer."""
     from .buffered_prefill_attention import accept_buffered_batch
-    span = _Span(end, tuple(rows), tuple(starts), local_begin, tuple(logical), masses)
+    span = _Span(end, tuple(rows), tuple(starts), local_begin, tuple(logical), masses,
+                 shift=end - count - local_begin)
     if accept_buffered_batch(histories[:1], end, count, accepted, rows, starts,
                              logical[:1], local_begin, masses[:1]) != [True]:
         raise RuntimeError('Layer-zero attention fold was not accepted')

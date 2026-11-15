@@ -306,8 +306,12 @@ def test_strategies_declare_the_paths_they_decide_on():
     assert strategy.names(q, G) == ('key_fps', 'meank', 'overlap', 'recency')
     assert strategy.names(q, L) == ('meank', 'recency')
     assert strategy.names(p, G) == ('attention', 'graph', 'recency')
-    assert strategy.names(p, L) == ('attention', 'recency')
+    assert strategy.names(p, L) == ('attention', 'lift', 'recency')
     assert strategy.get(q, 'overlap').legacy and not strategy.get(q, 'key_fps').legacy
+    # lift (age-adjusted pressure): built in, per layer only.
+    assert strategy.resolve(p, 'lift', L) is None
+    with pytest.raises(ValueError, match='does not run on the global path'):
+        strategy.resolve(p, 'lift', G)
     # recency pressure: built in on the global path, a strategy object per layer.
     assert strategy.resolve(p, 'recency', G) is None
     assert strategy.resolve(p, 'recency', L).name == 'recency'

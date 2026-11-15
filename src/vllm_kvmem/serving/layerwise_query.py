@@ -58,6 +58,20 @@ def decode_inline_reads():
         raise ValueError('KVMEM_DECODE_INLINE_READS must be 0 or 1')
     return value == '1'
 
+
+def query_global_layers():
+    """KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS=N (strategy setting, default 0): at the
+    final per-layer Query the first N full-attention layers take the shared global
+    MeanK selection, the native frame chosen from every layer's Query before the
+    per-layer pass, and skip their own scoring; later layers keep their per-layer
+    MeanK selection. Shallow layers retrieve poorly on their own (LongMemEval-S,
+    K 8,192: 82.4 with N=4 against 81.0 per-layer and 77.4 global)."""
+    value = _settings.get('KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS', '0')
+    if not value.isdigit():
+        raise ValueError('KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS must be a non-negative integer')
+    return int(value)
+
+
 class LayerwiseQuery:
     def __init__(self, runner):
         self.runner = runner
@@ -264,6 +278,14 @@ class LayerwiseQuery:
                          score_mask=score_mask, fixed=fixed,
                          budget=cfg.select_budget, history=job.history, span=job.command.query_span,
                          request_id=rid, next_layer=0, query_tokens=len(job.command.input_tokens))
+        global_layers = query_global_layers()
+        if global_layers:
+            if self.mode != 'sequential' or self.no_probe:
+                raise ValueError('KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS needs the sequential per-layer Query '
+                                 'with its probe, which makes the shared selection')
+            if global_layers > len(self.names):
+                raise ValueError('KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS exceeds the full-attention layers')
+            state['global_layers'] = global_layers
         # Strategy layer: None runs the built-in per-layer MeanK scores unchanged.
         state['query_scorer'] = query_scorer(self, refresh.options)
         state['trace_scores'] = getattr(refresh.options, 'strategy_trace_scores', False)
@@ -431,7 +453,11 @@ class LayerwiseQuery:
         records = state['records']
         started = time.perf_counter()
         scorer = state.get('query_scorer')
-        if scorer is not None:
+        use_global = layer_index < state.get('global_layers', 0)
+        if use_global:
+            # Shared selection (KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS): no scoring.
+            compare, old_scores, scores = False, None, None
+        elif scorer is not None:
             # Frozen-Query comparison is a diagnostic of the built-in scorer only.
             compare, old_scores = False, None
             scores = strategy_scores(scorer, state, layer_index, q,
@@ -453,7 +479,12 @@ class LayerwiseQuery:
             old_scores = mean_key_scores(old_q, means, mask).cpu().tolist() if compare else None
         record_index = None
         with stage('selection_cpu', candidates=len(records)):
-            if getattr(self, 'record_index', False):
+            if use_global:
+                # The native frame: mandatory, sink and partial blocks included, same token count.
+                selected, frozen_selected = set(state['global_slots']), None
+                if not set(state['fixed']) <= selected or len(selected) * 32 > state['budget']:
+                    raise RuntimeError('The shared selection lost mandatory content or exceeded its budget')
+            elif getattr(self, 'record_index', False):
                 from .query_record_index import query_record_index
                 record_index = query_record_index(state)
                 for i in record_index.excluded_indices:
@@ -467,11 +498,12 @@ class LayerwiseQuery:
                         if old_scores is not None:
                             old_scores[i] = -1.
             memory = state['authority'].memory
-            selected = top_set(memory, records, scores, state['fixed'], state['budget'],
-                               record_index=record_index)
-            frozen_selected = (top_set(memory, records, old_scores, state['fixed'], state['budget'],
-                                      record_index=record_index)
-                               if old_scores is not None else None)
+            if not use_global:
+                selected = top_set(memory, records, scores, state['fixed'], state['budget'],
+                                   record_index=record_index)
+                frozen_selected = (top_set(memory, records, old_scores, state['fixed'], state['budget'],
+                                          record_index=record_index)
+                                   if old_scores is not None else None)
             chosen = ([r for r in records if r.handle.slot in selected] if record_index is None
                       else record_index.chosen(selected))
             if sum(r.count for r in chosen) != state['selected_tokens']:
@@ -505,7 +537,9 @@ class LayerwiseQuery:
                 fresh_frozen_set_overlap=len(selected & frozen_selected)/max(1,len(selected)),
                 frozen_layer_selected_starts=([r.history_begin for r in records if r.handle.slot in frozen_selected]
                     if record_index is None else record_index.starts(frozen_selected)))
-        if scorer is not None:
+        if use_global:
+            diagnostic['query_scorer'] = 'global_selection'
+        elif scorer is not None:
             diagnostic['query_scorer'] = scorer.name
         if state.get('trace_scores'):
             if layer_index == 0:
@@ -519,7 +553,8 @@ class LayerwiseQuery:
                                               if r.handle.slot in fixed_slots),
                           excluded_starts=sorted(r.history_begin for r in records
                                                  if r.handle.slot in state.get('partial_excluded', ())))
-            diagnostic['candidate_scores'] = [float(v) for v in scores]
+            if scores is not None:
+                diagnostic['candidate_scores'] = [float(v) for v in scores]
         if self.diagnostics:
             diagnostic['q_sha256'] = hashlib.sha256(
                 q.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()

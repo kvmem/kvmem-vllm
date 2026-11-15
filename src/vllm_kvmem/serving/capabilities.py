@@ -123,8 +123,20 @@ def check(kvmem, *, query_mode, pressure, batch_selection=False, environment=Non
         if batch_selection and (not strategy.get(strategy.PRESSURE_SCORER, pressure_name).native_on(path) or
                                 not strategy.get(strategy.PICKER, picker).native_on(path)):
             raise ValueError('Pressure batch selection implements the attention scorer and native picker only')
+    if path == strategy.LAYER and pressure and pressure_name == 'lift' and \
+            environment.get('KVMEM_LAYERWISE_PRESSURE_NATIVE_SCORE_EXPORT') == '0':
+        raise ValueError('strategy_pressure_scorer=lift is kept in the native layer-history state; it needs '
+                         'KVMEM_LAYERWISE_PRESSURE_NATIVE_SCORE_EXPORT=1')
+    shared = str(environment.get('KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS', '0') or '0')
+    if not shared.isdigit():
+        raise ValueError('KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS must be a non-negative integer')
+    if int(shared) and (query_mode != 'sequential' or environment.get('KVMEM_LAYERWISE_QUERY_NO_PROBE') == '1'):
+        raise ValueError('KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS applies to the sequential per-layer Query with its '
+                         'probe (--layerwise-query-diagnostic sequential), which makes the shared selection')
     report = dict(path=path, query_scorer=query, pressure_scorer=pressure_name, picker=picker,
                   signals=sorted(signals))
+    if int(shared):
+        report['query_global_layers'] = int(shared)
     # Signals by need is not wired yet: report the costly signals no chosen strategy reads.
     needed = set()
     for role, name in choice:

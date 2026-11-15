@@ -66,7 +66,7 @@ Three profile options under `kvmem`, all defaulting to serving's built-in code:
 | Option | Default | Global path | Per-layer path |
 | --- | --- | --- | --- |
 | `strategy_query_scorer` | `meank` | `meank`, `key_fps`, `recency`, `overlap` (legacy) | `meank`, `recency` |
-| `strategy_pressure_scorer` | `attention` | `attention`, `graph`, `recency` | `attention`, `recency` |
+| `strategy_pressure_scorer` | `attention` | `attention`, `graph`, `recency` | `attention`, `lift`, `recency` |
 | `strategy_picker` | `native` | `native` | `native` |
 
 The launcher records the path in `strategy_path` and refuses a name that does not run on
@@ -76,6 +76,12 @@ it. On the global path these options are the same switch as the older ones:
 refused. A default name resolves to "no strategy object", and serving runs its existing
 path unchanged, including the fused native pick. The `recency` scorers keep the most
 recent history and ignore content; they are the lower reference for comparisons.
+
+`lift` is age-adjusted per-layer pressure: accumulated attention divided by what a block at
+the same distance typically receives, kept in the native layer-history state. With the
+`strategy` setting `KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS=N` the first N layers take the shared
+global selection at the final per-layer Query; together they form the combined method of
+[age-adjusted-pressure.md](age-adjusted-pressure.md).
 
 A scorer that is not built in still runs on the fast pipeline. Its scores feed the same
 native picker, through the fused native call when that is enabled. Two shortcuts

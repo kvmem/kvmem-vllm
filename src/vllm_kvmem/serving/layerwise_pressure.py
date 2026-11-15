@@ -179,6 +179,13 @@ def native_lookup_scores(history, mapping):
     return state.scores_for([row[2] for row in mapping])
 
 
+# Age-adjusted per-layer pressure (strategy_pressure_scorer=lift, strategy/builtin.py).
+# Native: the layer histories are lift states (new_history), whose exported scores are
+# accumulated attention / expected attention for each block's distance, so every
+# selection path below runs unchanged.
+LIFT = 'lift'
+
+
 def pressure_scorer(owner, options):
     """The profile's pressure scorer, or None for the built-in attention path."""
     name = getattr(options, 'strategy_pressure_scorer', 'attention')
@@ -410,10 +417,24 @@ class LayerwisePrefillPressure:
         if getattr(self, 'buffered_history', False):
             if getattr(self, 'deferred_fold', False):
                 from .deferred_fold import DeferredFoldHistory
-                return DeferredFoldHistory(options)
-            from .buffered_prefill_attention import BufferedPrefillHistory
-            return BufferedPrefillHistory(options)
-        return PrefillHistory(options)
+                history = DeferredFoldHistory(options)
+            else:
+                from .buffered_prefill_attention import BufferedPrefillHistory
+                history = BufferedPrefillHistory(options)
+        else:
+            history = PrefillHistory(options)
+        if getattr(options, 'strategy_pressure_scorer', 'attention') == LIFT:
+            # Age-adjusted pressure: the native state also accumulates each block's
+            # expected attention for its distance, in the same pass, batches and folds.
+            # Every layer history starts as one, restored ones included: a session
+            # restore shares the checkpoint's native state (KVMEM_CHECKPOINT_FAST_STATE),
+            # and any other restore path is refused rather than silently dropping it.
+            if not getattr(history, 'native_score_export', False):
+                raise ValueError('The lift pressure scorer needs native buffered histories with native '
+                                 'score export (KVMEM_LAYERWISE_PRESSURE_NATIVE_SCORE_EXPORT=1)')
+            from .._prefill_state_native import State
+            history._buffered_state = State.lift_empty()
+        return history
 
     def history_execution(self, history):
         backend = getattr(history, 'storage_backend', 'native_dictionary')
@@ -811,7 +832,8 @@ class LayerwisePrefillPressure:
                 selected_starts=[r.history_begin for r in picked], selected_tokens=sum(r.count for r in picked),
                 charged_tokens=32*len(picked), accepted_score_end=history.end,
                 query_samples=history.samples, sampled_chunks=history.chunks,
-                actual_method=('accumulated_attention_per_layer' if scorer is None
+                actual_method=(('lift_per_layer' if getattr(refresh.options, 'strategy_pressure_scorer', '') == LIFT
+                                else 'accumulated_attention_per_layer') if scorer is None
                                else scorer.name + '_per_layer'), fallback_reason=None,
                 **({'candidate_scores': [float(v) for v in traced],
                     # What an offline replay needs to pick again (python -m vllm_kvmem.strategy.replay).

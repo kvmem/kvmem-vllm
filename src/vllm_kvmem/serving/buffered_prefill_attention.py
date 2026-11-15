@@ -42,8 +42,9 @@ def accept_buffered_batch(histories,end,count,accepted,rows,starts,logical,local
             for history in histories]
     for history in histories:
         history.last_commit_backend=None
+    # history_shift maps a row's window position to its history position (lift distances).
     updated=require_batch_accept()([history._buffered_state for history in histories],
-        decays,rows,starts,logical,local_begin,buffer)
+        decays,rows,starts,logical,local_begin,buffer,end-count-local_begin)
     for history,state in zip(histories,updated):
         history._buffered_state=state
         history.end=end;history.samples+=len(rows);history.chunks+=1
@@ -63,7 +64,11 @@ class BufferedPrefillHistory(PrefillHistory):
     @values.setter
     def values(self, values):
         from .._prefill_state_native import State
-        self._buffered_state=State.from_values(values)
+        # A lift state keeps its expected attention and distance profile when GC prunes
+        # keys (strategy_pressure_scorer=lift); it refuses to gain keys this way.
+        current=getattr(self,'_buffered_state',None)
+        self._buffered_state=(current.with_values(values) if getattr(current,'lift',False)
+                              else State.from_values(values))
 
     def __init__(self,options):
         super().__init__(options)
@@ -99,7 +104,7 @@ class BufferedPrefillHistory(PrefillHistory):
             buffer=np.asarray(masses)
             if buffer.dtype.kind!='f':buffer=buffer.astype('float64')
         decay=math.exp2(-(end-self.end)/self.options.prefill_attention_half_life)
-        updated=self._buffered_state.committed(decay,rows,starts,history,local_begin,buffer)
+        updated=self._buffered_state.committed(decay,rows,starts,history,local_begin,buffer,end-count-local_begin)
         self._buffered_state=updated
         self.end=end;self.samples+=len(rows);self.chunks+=1
         self.successful_buffered_commits+=1
