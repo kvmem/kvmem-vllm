@@ -76,6 +76,11 @@ class HistoricalAdmission:
             raise ValueError('Historical capacity cannot fit the in-flight envelope')
         self.snapshots, self.reservations, self.retiring = {}, {}, set()
         self.admissions = self.deferrals = self.settlements = 0
+        # Shared prefixes (docs/prefix-sharing.md, phase 2): distinct payloads charged
+        # once to the shared-prefix pool, as the worker last reported them. The
+        # snapshot reports the pool once it has been used.
+        self.pool_records = 0
+        self.pool_used = False
 
     def _validate_snapshot(self, snapshot):
         if (not isinstance(snapshot, HistoricalCapacitySnapshot) or
@@ -103,7 +108,34 @@ class HistoricalAdmission:
     def reserved_records(self):
         return sum(reservation.reserved_records for reservation in self.reservations.values()) + sum(
             snapshot.allocated_records for namespace, snapshot in self.snapshots.items()
-            if namespace not in self.reservations)
+            if namespace not in self.reservations) + self.pool_records
+
+    def observe_pool(self, records):
+        _extent(records)
+        self.pool_records = records
+        self.pool_used |= bool(records)
+
+    def transfer_to_pool(self, namespace, generation, records, pool_records):
+        """A registration moved ``records`` of an idle session to the pool charge,
+        atomically with the pool's new size (never a transient double count)."""
+        _extent(records, pool_records)
+        snapshot = self.snapshots.get(namespace)
+        if (records and snapshot is not None and snapshot.generation == generation and
+                namespace not in self.reservations):
+            allocated = max(0, snapshot.allocated_records - records)
+            self.snapshots[namespace] = HistoricalCapacitySnapshot(snapshot.generation, snapshot.history_end,
+                snapshot.ready_records, allocated, min(snapshot.protected_records, allocated))
+        self.pool_records = pool_records
+        self.pool_used |= bool(pool_records)
+
+    def import_idle(self, namespace, snapshot):
+        """An idle session materialized from a prefix image. Its private charge (the
+        index copies of its aliased records) exists already; it is recorded even
+        when it overcommits, and later admissions wait for reclamation."""
+        self._validate_snapshot(snapshot)
+        if namespace in self.reservations or namespace in self.snapshots:
+            raise ValueError('A prefix image import reused a live historical scope')
+        self.snapshots[namespace] = snapshot
 
     def preview(self, namespace, snapshot, request_id, *, base_history, history_limit):
         self._validate_snapshot(snapshot)
@@ -176,7 +208,8 @@ class HistoricalAdmission:
             active=len(self.reservations)-len(self.retiring), retiring=len(self.retiring),
             idle_protected_records=sum(value.protected_records for value in idle),
             idle_reclaimable_records=sum(value.allocated_records-value.protected_records for value in idle),
-            admissions=self.admissions, deferrals=self.deferrals, settlements=self.settlements)
+            admissions=self.admissions, deferrals=self.deferrals, settlements=self.settlements,
+            **(dict(pool_records=self.pool_records) if self.pool_used else {}))
 
     def evicted(self, namespace, generation):
         """A generation-qualified worker ACK for an idle scope's destruction."""
@@ -202,6 +235,10 @@ class HistoricalHistoryAdmission:
         self.observed_bytes = 0
         self._pressure_requests, self._sent_pressure = {}, {}
         self.history_evictions = 0
+        # Shared prefixes: images released for a deficit and not yet acknowledged,
+        # and pool payloads still draining. Neither counts as free capacity.
+        self._released_images, self._pool_draining = set(), 0
+        self.image_releases = 0
 
     def _proposal(self, request):
         from .coordination import HistoryAdmission
@@ -263,6 +300,13 @@ class HistoricalHistoryAdmission:
             demands[key] = (snapshot.generation, required, None)
         unobserved = snapshot.allocated_records if key not in self.ledger.snapshots else 0
         deficit = max(0, self.ledger.reserved_records + unobserved + required - self.ledger.capacity_records)
+        if deficit and self._release_unreferenced_images():
+            # Shared prefixes: first release images no session references. Their
+            # bytes are not counted free until the worker's pool notice shows them
+            # gone; meanwhile nothing lossier (history reclaim, eviction) runs.
+            self._pressure_requests[request.request_id] = demands
+            self._publish_pressure()
+            return
         # Scope snapshots retain retirement order: reclaim older idle histories
         # first. Active reservations never become supply for another turn.
         for victim, state in self.ledger.snapshots.items():
@@ -280,6 +324,17 @@ class HistoricalHistoryAdmission:
         self._pressure_requests[request.request_id] = demands
         self._publish_pressure()
 
+    def _release_unreferenced_images(self):
+        """True while an image release for a CPU deficit is still settling."""
+        index = getattr(self.sessions, 'prefix_images', None) if self.sessions is not None else None
+        if index is not None:
+            released = index.unreferenced(self.sessions.entries)
+            if released:
+                self.sessions.commands.image_releases.extend(released)
+                self._released_images.update(released)
+                self.image_releases += len(released)
+        return bool(self._released_images) or self._pool_draining > 0
+
     def _evict_idle(self, requester):
         """Opt-in KVMEM_SESSION_HISTORY_LRU_EVICTION: evict the least recently
         used idle session holding CPU history (never the requester's own). The
@@ -289,11 +344,15 @@ class HistoricalHistoryAdmission:
         entries = self.sessions.entries
         if any(entry.phase == 'evicting' for entry in entries.values()):
             return
+        index = getattr(self.sessions, 'prefix_images', None)
         for namespace, entry in list(entries.items()):
             key = ('session', *namespace)
             state = self.ledger.snapshots.get(key)
+            # A session holding no private record may still keep a shared-prefix
+            # image referenced; evicting it can let that image's bytes go.
             if (key == requester or entry.phase != 'idle' or key in self.ledger.reservations or
-                    state is None or not state.allocated_records):
+                    state is None or not (state.allocated_records or
+                                          (index is not None and index.references_entry(entry)))):
                 continue
             self.sessions._evict(entry)
             self.history_evictions += 1
@@ -346,7 +405,21 @@ class HistoricalHistoryAdmission:
             self.ledger.finish(key, reservation.generation, request.request_id)
 
     def consume(self, notice):
+        if notice.kind == 'history_pool':
+            self.ledger.observe_pool(notice.records)
+            self._pool_draining = notice.draining
+            return
+        if notice.kind == 'image_released':
+            self._released_images.discard(notice.key)
+            return
         key = ('session', *notice.namespace)
+        if notice.kind == 'image_registered':
+            self.ledger.transfer_to_pool(key, notice.generation, notice.transferred, notice.pool_records)
+            return
+        if notice.kind == 'imported':
+            self.ledger.import_idle(key, HistoricalCapacitySnapshot(notice.generation, notice.history,
+                notice.ready_records, notice.allocated_records, notice.protected_records))
+            return
         if notice.kind == 'evicted':
             self.ledger.evicted(key, notice.generation)
         elif notice.kind == 'history_capacity':
@@ -382,8 +455,11 @@ class HistoricalHistoryAdmission:
                       phase='retiring' if key in self.ledger.retiring else 'active',
                       bytes=value.reserved_records*self.record_bytes)
                  for key, value in self.ledger.reservations.items()]
+        shared = (dict(pool_draining_records=self._pool_draining, image_releases=self.image_releases,
+                       images_releasing=len(self._released_images))
+                  if self.ledger.pool_used or self.image_releases else {})
         return {**counters, 'capacity_bytes':self.ledger.capacity_records*self.record_bytes,
             'reserved_bytes':self.ledger.reserved_records*self.record_bytes,
             'available_bytes':counters['available_records']*self.record_bytes,
             'last_observed_archive_bytes':self.observed_bytes, 'waiting':len(self.waiting),
-            'history_evictions':self.history_evictions, 'lease_views':views}
+            'history_evictions':self.history_evictions, 'lease_views':views, **shared}

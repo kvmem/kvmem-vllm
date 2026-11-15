@@ -26,6 +26,10 @@ struct HistoricalBlockMeta {
     // Accepted-token provenance for this exact generation. Unknown and mixed
     // records are not eligible for thinking-only redundancy.
     bool thinking_complete = false, thinking_only = false;
+    // Shared prefixes (docs/prefix-sharing.md, phase 2): this record's payload
+    // is shared with other sessions or a prefix pool. Retiring it drops only
+    // this session's reference and frees no CPU bytes (cpu_bytes is 0).
+    bool shared = false;
 };
 
 struct HistoricalSnapshot {
@@ -40,6 +44,12 @@ struct HistoricalPressure {
     uint64_t pending_cpu_bytes = 0;
     uint32_t requested_ready_slots = 0;
     uint64_t scope_cpu_bytes = 0, scope_cpu_limit = UINT64_MAX, scope_pending_cpu_bytes = 0;
+    // Shared prefixes: the part of scope_cpu_bytes held in shared payloads. The
+    // scope's byte budget applies to its private bytes only.
+    uint64_t scope_shared_bytes = 0;
+    uint64_t scope_private_bytes() const {
+        return scope_cpu_bytes > scope_shared_bytes ? scope_cpu_bytes - scope_shared_bytes : 0;
+    }
 };
 
 struct HistoricalWorkBudget {
@@ -131,7 +141,7 @@ public:
                (bytes_pressure_ && deficit(pressure.high_cpu_bytes, pressure.free_cpu_bytes,
                                            pressure.pending_cpu_bytes)) ||
                deficit(pressure.requested_ready_slots, pressure.ready_slots, pressure.pending_slots) ||
-               deficit(pressure.scope_cpu_bytes, pressure.scope_cpu_limit, pressure.scope_pending_cpu_bytes);
+               deficit(pressure.scope_private_bytes(), pressure.scope_cpu_limit, pressure.scope_pending_cpu_bytes);
     }
     bool permits_pressure(const HistoricalPressure &pressure) override { return wants_snapshot(pressure); }
     bool permits(const HistoricalBlockMeta &block) const override {
@@ -173,7 +183,7 @@ public:
         uint64_t bytes = bytes_pressure_ ? deficit(pressure.high_cpu_bytes, pressure.free_cpu_bytes,
                                                    pressure.pending_cpu_bytes) : 0;
         slots = std::max(slots, deficit(pressure.requested_ready_slots, pressure.ready_slots, pressure.pending_slots));
-        bytes = std::max(bytes, deficit(pressure.scope_cpu_bytes, pressure.scope_cpu_limit,
+        bytes = std::max(bytes, deficit(pressure.scope_private_bytes(), pressure.scope_cpu_limit,
                                        pressure.scope_pending_cpu_bytes));
         if (!slots && !bytes) return finish(HistoricalPolicyStatus::Complete, 0, 0);
 
@@ -197,6 +207,8 @@ public:
             std::pop_heap(candidates_.begin(), candidates_.end(), Newer{});
             const auto block = candidates_.back();
             candidates_.pop_back();
+            // A shared record frees no bytes: only a slot deficit retires it.
+            if (!slots && block.shared) continue;
             out.push({block.handle, snapshot.incarnation, snapshot.round});
             ++emitted;
             if (slots) --slots;

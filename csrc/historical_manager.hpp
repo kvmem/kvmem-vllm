@@ -30,6 +30,9 @@ struct HistoricalGcStats {
     uint64_t redundancy_retired = 0, lossy_retired = 0;
     uint64_t lru_fallback_retired = 0, lru_representative_retired = 0, thinking_classified = 0, thinking_pure = 0;
     uint64_t rejected_ineligible = 0, cancelled_decisions = 0;
+    // Shared prefixes: records whose payload is shared, and those released
+    // logically (no bytes freed). Private bytes exclude marked minus released.
+    uint64_t shared_marked = 0, shared_released = 0;
 };
 
 struct HistoricalStorageStats {
@@ -69,6 +72,12 @@ public:
     bool publish(const qw3::KvMemRepository::Lease &, const HistoricalPayloadArena::Read &,
                  uint32_t flags, uint64_t use_seq = 0);
     bool update(const qw3::KvMemRepository::Lease &, uint32_t flags, uint64_t use_seq = 0);
+    // Shared prefixes (docs/prefix-sharing.md, phase 2): this live published
+    // generation's payload is shared with other sessions or a prefix pool. It
+    // stops counting toward the scope's private bytes, and its retirement only
+    // drops this session's reference. False when the generation is not live
+    // and published.
+    bool mark_shared(const qw3::KvMemRepository::Lease &);
     // Sole engine publisher; one O(1) use stamp per public model iteration.
     void used(uint64_t sequence);
     void observe(const qw3::KvMemRepository::Lease &, bool sealed, bool gpu, bool mandatory,

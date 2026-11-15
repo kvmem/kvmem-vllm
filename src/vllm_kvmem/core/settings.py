@@ -73,6 +73,10 @@ STRATEGY = frozenset((
     'KVMEM_LAYERWISE_DECODE_PREFILL_WEIGHT', 'KVMEM_RECALL_METHOD', 'KVMEM_PREFILL_PRESSURE_METHOD',
     'KVMEM_DECODE_PRESSURE_METHOD', 'KVMEM_PRESSURE_QUERY_WINDOW', 'KVMEM_VALUE_RECALL_REFERENCE',
     'KVMEM_LAYERWISE_HISTORICAL_GC', 'KVMEM_SESSION_HISTORY_LRU_EVICTION', 'KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS',
+    # Which shared prefix images stay retained (serving/prefix_images.py); not yet shown exact.
+    'KVMEM_PREFIX_IMAGE_MAX_BYTES',
+    # Budget of the shared-prefix pool on the native payload arena (phase 2).
+    'KVMEM_PREFIX_POOL_BYTES',
 ))
 
 # Diagnostics observe and never steer: timing, traces, profiles, verification.

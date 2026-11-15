@@ -311,7 +311,7 @@ def _prepacked_records(views, record_bytes):
 class MemoryArchive(AsyncArchive):
     def __init__(self, *args, gather_workers=8, cpu_direct_record_seal=False, cpu_seal_hash_workers=1,
                  cpu_seal_pack_workers=1, cpu_seal_serial_allocate=False,
-                 native_payloads=False, **kwargs):
+                 native_payloads=False, payload_capacity=None, **kwargs):
         if type(gather_workers) is not int or not 1 <= gather_workers <= 16:
             raise ValueError('CPU gather workers must be between 1 and 16')
         region_gather_parallel_min_bytes()   # validate the opt-in override early
@@ -330,7 +330,8 @@ class MemoryArchive(AsyncArchive):
                 raise ValueError('cpu_seal_serial_allocate requires direct CPU records, no native payloads, and pack_workers=1')
             if not callable(getattr(_native, 'PrivateRecordPack', None)):
                 raise ValueError('cpu_seal_serial_allocate requires the updated native extension')
-        super().__init__(*args, **kwargs, memory_only=True, native_cpu_payloads=native_payloads)
+        super().__init__(*args, **kwargs, memory_only=True, native_cpu_payloads=native_payloads,
+                         **({'payload_capacity': payload_capacity} if payload_capacity is not None else {}))
         self._native_payload_arena = getattr(self.tier, 'payloads', None)
         self._history_worker = None
         self._history_scopes = {}
@@ -849,12 +850,253 @@ class MemoryArchive(AsyncArchive):
         if self._native_payload_arena is None or len(entries) != len(sources):
             raise ValueError('Invalid pre-admitted CPU read extent')
         for entry, source in zip(entries, sources):
-            if (not isinstance(source, _native.HistoricalPayloadRead) or not source or
+            # The payload of a shared prefix may live in another descriptor's slot.
+            expected = self.tier.records.get(entry.allocation.slot)
+            if (not isinstance(source, _native.HistoricalPayloadRead) or not source or expected is None or
                     (source.handle.slot, source.handle.generation) !=
-                    (entry.allocation.slot, entry.allocation.generation) or
+                    (expected.slot, expected.generation) or
                     not self._native_payload_arena.owns(source)):
                 raise ValueError('Pre-admitted CPU read has a foreign allocation')
         return [source.clone() for source in sources]
+
+    def record_payloads(self, namespace, leases):
+        """Prefix images (serving/prefix_images.py): the immutable bytes object of
+        each published record, by identity, no copy.
+
+        The caller holds ``leases`` (repository pins of these generations) for the
+        whole call; readiness and record size are checked under the archive lock.
+        Only the bytes tier owns per-record ``bytes`` objects.
+        """
+        if self._native_payload_arena is not None:
+            raise ValueError('Record payload objects exist only in the bytes CPU archive')
+        if not leases:
+            raise ValueError('Record payload lookup requires leases')
+        keys = [self.key(namespace, lease) for lease in leases]
+        with self._lock:
+            if self._closed:
+                raise RuntimeError('Archive is closed')
+            entries = [self._entries.get(key) for key in keys]
+            if any(entry is None or not entry.ready for entry in entries):
+                raise KeyError('Archive record missing, stale, or not yet published')
+            with self.tier.lock:
+                payloads = [self.tier.records.get(entry.allocation.slot) for entry in entries]
+        if any(type(payload) is not bytes or len(payload) != self.record_bytes for payload in payloads):
+            raise ValueError('Archive record payload is not one immutable bytes record')
+        return payloads
+
+    def alias_records(self, namespace, leases, payloads):
+        """Prefix images: publish existing immutable record ``bytes`` under new keys.
+
+        Each lease (a pinned, committed generation of the importing request's own
+        repository) gets an ordinary new allocation in this archive whose payload
+        is the given bytes object itself; nothing is copied. The entries are
+        ready on return, as after a completed write. False when the archive has
+        too few free records (nothing is published). Release is the ordinary
+        reclaim path; it drops only this allocation's reference to the bytes.
+        """
+        if self._native_payload_arena is not None:
+            return self._alias_native(namespace, leases, tuple(payloads))
+        payloads = tuple(payloads)
+        if not leases or len(leases) != len(payloads):
+            raise ValueError('Aliased records need one payload per lease')
+        if any(type(payload) is not bytes or len(payload) != self.record_bytes for payload in payloads):
+            raise ValueError('Aliased records must be complete immutable bytes records')
+        keys = [self.key(namespace, lease) for lease in leases]
+        if len(set(keys)) != len(keys):
+            raise ValueError('Duplicate archive record in one alias batch')
+        from .storage import _Entry
+        with self._lock:
+            if self._closed:
+                raise RuntimeError('Archive is closed')
+            if any(key in self._entries for key in keys):
+                raise ValueError('Cannot overwrite immutable archive records')
+            if len(self._free_ids) < len(keys):
+                return False
+            entries = []
+            try:
+                for key in keys:
+                    block_id = self._free_ids.pop()
+                    try:
+                        allocation = self.tier.allocate(block_id)
+                        if allocation.slot < 0:
+                            raise RuntimeError('Archive allocator capacity invariant violated')
+                    except BaseException:
+                        self._free_ids.append(block_id)
+                        raise
+                    entry = _Entry(allocation)
+                    self._entries[key] = entry
+                    self._namespace_counts[namespace] = self._namespace_counts.get(namespace, 0) + 1
+                    entries.append(entry)
+                self.tier.publish_records([entry.allocation for entry in entries], payloads)
+            except BaseException:
+                for key in keys:
+                    self._release(key)
+                raise
+            for entry in entries:
+                entry.ready = True
+            self.aliased_records = getattr(self, 'aliased_records', 0) + len(keys)
+        return True
+
+    def record_payload_handles(self, namespace, leases):
+        """Shared prefixes on the native arena: the payload handle of each published
+        record (another descriptor's payload for an aliased record)."""
+        if self._native_payload_arena is None:
+            raise ValueError('Payload handles exist only with native CPU payloads')
+        if not leases:
+            raise ValueError('Record payload lookup requires leases')
+        keys = [self.key(namespace, lease) for lease in leases]
+        with self._lock:
+            if self._closed:
+                raise RuntimeError('Archive is closed')
+            entries = [self._entries.get(key) for key in keys]
+            if any(entry is None or not entry.ready for entry in entries):
+                raise KeyError('Archive record missing, stale, or not yet published')
+            handles = self.tier.payload_handles([entry.allocation for entry in entries])
+        if any(handle is None for handle in handles):
+            raise KeyError('Archive record has no published payload')
+        return handles
+
+    def _alias_native(self, namespace, leases, handles):
+        """alias_records on the native arena: a new descriptor per lease owning a
+        share of an existing live payload. Nothing is copied; the arena's resident
+        bytes do not change. The importing namespace's historical GC scope, when it
+        has one, learns each record's backing and that it is shared."""
+        if not leases or len(leases) != len(handles):
+            raise ValueError('Aliased records need one payload per lease')
+        if any(type(handle) is not _native.HistoricalPayloadHandle for handle in handles):
+            raise ValueError('Native aliased records require payload handles')
+        keys = [self.key(namespace, lease) for lease in leases]
+        if len(set(keys)) != len(keys):
+            raise ValueError('Duplicate archive record in one alias batch')
+        from .storage import _Entry
+        with self._lock:
+            if self._closed:
+                raise RuntimeError('Archive is closed')
+            if any(key in self._entries for key in keys):
+                raise ValueError('Cannot overwrite immutable archive records')
+            if len(self._free_ids) < len(keys):
+                return False
+            entries = []
+            try:
+                for key, handle in zip(keys, handles):
+                    block_id = self._free_ids.pop()
+                    try:
+                        allocation = self.tier.alias(block_id, handle)
+                    except BaseException:
+                        self._free_ids.append(block_id)
+                        raise
+                    entry = _Entry(allocation)
+                    self._entries[key] = entry
+                    self._namespace_counts[namespace] = self._namespace_counts.get(namespace, 0) + 1
+                    entries.append(entry)
+                context = self._backing_context(namespace)
+            except BaseException:
+                for key in keys:
+                    self._release(key)
+                raise
+        try:
+            if context is not None:
+                self._publish_backing(context, leases, entries)
+                for lease in leases:
+                    context.mark_shared(lease)
+        except BaseException:
+            with self._lock:
+                for key in keys:
+                    self._release(key)
+            raise
+        with self._lock:
+            for entry in entries:
+                entry.ready = True
+            self._mark_shared_keys(namespace, keys, aliases=True)
+            self.aliased_records = getattr(self, 'aliased_records', 0) + len(keys)
+        return True
+
+    # --- shared-prefix pool accounting (docs/prefix-sharing.md, phase 2) ------
+
+    def _mark_shared_keys(self, namespace, keys, *, aliases=False):
+        shared = self.__dict__.setdefault('_namespace_shared', {}).setdefault(namespace, set())
+        alias_counts = self.__dict__.setdefault('_namespace_aliases', {})
+        for key in keys:
+            if key[1:] not in shared:
+                shared.add(key[1:])
+                if aliases:
+                    alias_counts[namespace] = alias_counts.get(namespace, 0) + 1
+                    self.__dict__.setdefault('_alias_keys', set()).add(key)
+
+    def namespace_shared_records(self, namespace):
+        """(slot, generation) of this namespace's descriptors charged to the shared-prefix
+        pool, and how many of them are aliases of another session's payloads."""
+        with self._lock:
+            shared = self.__dict__.get('_namespace_shared', {}).get(namespace)
+            return (frozenset(shared) if shared else frozenset(),
+                    self.__dict__.get('_namespace_aliases', {}).get(namespace, 0))
+
+    def pool_records(self):
+        records = getattr(self.tier, 'pool_records', None)
+        return records() if records is not None else 0
+
+    def share_to_pool(self, namespace, leases):
+        """Registration of a prefix image on the native arena: each record's payload
+        gains a pool owner (returned handles, held by the image) and the publisher's
+        descriptor is charged to the pool from now on. The namespace's historical GC
+        scope marks the records shared, so its byte budget no longer counts them.
+        Returns the handles and how many records moved from private to pool charge."""
+        if self._native_payload_arena is None:
+            raise ValueError('Pool owners exist only with native CPU payloads')
+        if not leases:
+            raise ValueError('Pool sharing requires leases')
+        keys = [self.key(namespace, lease) for lease in leases]
+        handles = []
+        with self._lock:
+            if self._closed:
+                raise RuntimeError('Archive is closed')
+            entries = [self._entries.get(key) for key in keys]
+            if any(entry is None or not entry.ready for entry in entries):
+                raise KeyError('Archive record missing, stale, or not yet published')
+            try:
+                for entry in entries:
+                    handle = self.tier.payload_handles([entry.allocation])[0]
+                    if handle is None or not self.tier.share_pool(handle):
+                        raise ValueError('A pooled CPU payload must be live')
+                    handles.append(handle)
+            except BaseException:
+                for handle in handles:
+                    self.tier.release_pool(handle)
+                raise
+            transferred = sum(bool(self.tier.charge_pool(entry.allocation)) for entry in entries)
+            self._mark_shared_keys(namespace, keys)
+            context = self._history_scopes.get(namespace)
+        if context is not None:
+            for lease in leases:
+                context.mark_shared(lease)
+        return handles, transferred
+
+    def release_pool(self, handles):
+        """An image leaves: drop its pool owner of each payload."""
+        for handle in handles:
+            self.tier.release_pool(handle)
+
+    def _release(self, key):
+        released = super()._release(key)
+        if released:
+            shared = self.__dict__.get('_namespace_shared', {}).get(key[0])
+            if shared is not None and key[1:] in shared:
+                shared.discard(key[1:])
+                if not shared:
+                    del self._namespace_shared[key[0]]
+                aliases = self.__dict__.get('_alias_keys')
+                if aliases is not None and key in aliases:
+                    aliases.discard(key)
+                    remaining = self._namespace_aliases[key[0]] - 1
+                    if remaining:
+                        self._namespace_aliases[key[0]] = remaining
+                    else:
+                        del self._namespace_aliases[key[0]]
+        return released
+
+    def _payload_room(self, count):
+        room = getattr(self.tier, 'payload_room', None)
+        return True if room is None else room(count)
 
     def enable_history_gc(self, config):
         """Install one native manager for this CPU arena before serving."""

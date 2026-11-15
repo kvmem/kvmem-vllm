@@ -10,6 +10,17 @@ Generated token ids are appended verbatim, so a prefix cache can always reuse th
 --backend kvmem sends the KVMem session fields (session_id/cache_salt/query span) and releases the
 sessions at the end; --backend native sends plain completions (prefix caching does the reuse).
 Writes OUT/client.json: per-request rows and a summary of the steady window.
+
+--shared-prefix P (kvmem, docs/prefix-sharing.md): every session's grow prompt starts with one shared
+system prompt of P tokens (rounded down to --block) and all sessions use the cache_salt --tag. The
+per-session text after it is unchanged, so arms differ only in how the shared prompt is reached:
+  cold    each session prefills it itself (the baseline);
+  warm    each session first sends the registration-shaped request (shared prompt + --query tokens,
+          max_tokens 1) on its own session, then its grow request resumes from that frozen P;
+  import  one registration session '<tag>-prefix' sends that request with kvmem_share_prefix = P
+          before the sessions start (then --register-wait seconds); each grow request imports it.
+The registration and warm requests are not rows (summary.prefix has their timings), so the rows of
+any two arms compare request by request.
 """
 import argparse, json, math, random, threading, time, urllib.request
 from pathlib import Path
@@ -29,7 +40,13 @@ ap.add_argument('--grow-concurrency', type=int, default=4); ap.add_argument('--s
 ap.add_argument('--tag', default='sim'); ap.add_argument('--out', required=True)
 ap.add_argument('--save-tokens', action='store_true')   # exactness checks: keep generated ids per request
 ap.add_argument('--max-turns', type=int, default=0)    # stop each session after this many turns (0: duration only)
+ap.add_argument('--shared-prefix', type=int, default=0)   # tokens of one system prompt shared by every session
+ap.add_argument('--prefix-mode', choices=('cold', 'warm', 'import'), default='cold')
+ap.add_argument('--block', type=int, default=32)          # KVMem block_tokens: the shared prompt is aligned to it
+ap.add_argument('--register-wait', type=float, default=3.0)
 args = ap.parse_args()
+if args.shared_prefix and args.backend != 'kvmem':
+    ap.error('--shared-prefix needs --backend kvmem')
 out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
 
 from transformers import AutoTokenizer
@@ -42,6 +59,7 @@ rows, lock, errors = [], threading.Lock(), []
 grow_gate = threading.Semaphore(args.grow_concurrency)
 barrier = threading.Barrier(args.sessions)
 window = {}
+prefix_info = {}
 
 
 def post(body):
@@ -57,6 +75,29 @@ def text(rnd, n, salt):
     return marker + [words[(start + i) % len(words)] for i in range(max(0, n - len(marker)))]
 
 
+def kvmem_fields(sid, query, query_id):
+    return dict(session_id=sid, cache_salt=args.tag if shared else sid, kvmem_reselect='auto',
+                kvmem_mandatory_spans=[], kvmem_mandatory_parts='none', kvmem_query_span=list(query),
+                kvmem_query_mode='agent', kvmem_query_id=query_id)
+
+
+def register_request(sid, share):
+    """The registration shape: the shared prompt, then a short Query starting at P; max_tokens 1."""
+    body = dict(model=args.model, prompt=shared + register_query, max_tokens=1, temperature=0, ignore_eos=True,
+                **kvmem_fields(sid, [len(shared), len(shared) + len(register_query)], f'{sid}-prefix'))
+    if share:
+        body['kv_transfer_params'] = {'kvmem_share_prefix': len(shared)}
+    started = time.time()
+    post(body)
+    return time.time() - started
+
+
+def release(sid, last):
+    post(dict(model=args.model, prompt=last, session_id=sid, cache_salt=args.tag if shared else sid, max_tokens=1,
+              temperature=0, kvmem_reselect='off', kvmem_mandatory_spans=[],
+              kv_transfer_params={'kvmem_release_session': True}))
+
+
 def session(index):
     sid = f'{args.tag}-{index}'
     rnd = random.Random(args.seed * 1000 + index)
@@ -70,9 +111,7 @@ def session(index):
         body = dict(model=args.model, prompt=prefix, max_tokens=output, temperature=0, ignore_eos=True,
                     return_token_ids=True)
         if args.backend == 'kvmem':
-            body.update(session_id=sid, cache_salt=sid, kvmem_reselect='auto', kvmem_mandatory_spans=[],
-                        kvmem_mandatory_parts='none', kvmem_query_span=list(query), kvmem_query_mode='agent',
-                        kvmem_query_id=f'{sid}-q0')
+            body.update(kvmem_fields(sid, query, f'{sid}-q0'))
         started = time.time()
         choice = post(body)['choices'][0]
         ended = time.time()
@@ -85,7 +124,12 @@ def session(index):
 
     try:
         with grow_gate:
-            request(text(rnd, args.history, f'system s{index}'), 16, 'grow')
+            if shared and args.prefix_mode == 'warm':
+                seconds = register_request(sid, False)
+                with lock:
+                    prefix_info.setdefault('warm_seconds', {})[index] = seconds
+            own = text(rnd, args.history - len(shared), f'system s{index}')
+            request(shared + own if shared else own, 16, 'grow')
         barrier.wait(timeout=7200)
         with lock:
             window.setdefault('start', time.time())
@@ -129,17 +173,30 @@ def session(index):
     finally:
         if args.backend == 'kvmem' and prefix:
             try:
-                post(dict(model=args.model, prompt=prefix[-1:], session_id=sid, cache_salt=sid, max_tokens=1,
-                          temperature=0, kvmem_reselect='off', kvmem_mandatory_spans=[],
-                          kv_transfer_params={'kvmem_release_session': True}))
+                release(sid, prefix[-1:])
             except Exception as error:  # noqa: BLE001
                 errors.append(f'{sid} release: {error!r}')
 
 
+shared, register_query = [], []
+if args.shared_prefix:
+    shared = text(random.Random(args.seed * 1000 - 1), args.shared_prefix // args.block * args.block, 'system shared')
+    register_query = text(random.Random(args.seed * 1000 - 2), args.query, 'register')
+    if not 0 < len(shared) < args.history:
+        ap.error('--shared-prefix must hold at least one block and stay below --history')
+    prefix_info.update(tokens=len(shared), mode=args.prefix_mode)
+    if args.prefix_mode == 'import':
+        prefix_info['register_seconds'] = register_request(f'{args.tag}-prefix', True)
+        time.sleep(args.register_wait)   # the worker registers the image when the request has retired
 threads = [threading.Thread(target=session, args=(i,)) for i in range(args.sessions)]
 began = time.time()
 for t in threads: t.start()
 for t in threads: t.join()
+if shared and args.prefix_mode == 'import':
+    try:
+        release(f'{args.tag}-prefix', register_query[-1:])
+    except Exception as error:  # noqa: BLE001
+        errors.append(f'prefix release: {error!r}')
 w0 = window.get('start', began); w1 = w0 + args.duration
 turns = [r for r in rows if r['kind'] == 'turn']
 inside = [r for r in turns if w0 <= r['started'] and r['ended'] <= w1 + 0.0]
@@ -153,5 +210,7 @@ summary = dict(backend=args.backend, sessions=args.sessions, history=args.histor
                turns_per_min=60 * len(inside) / args.duration,
                turn_latency_p50=q(.5), turn_latency_p90=q(.9), turn_latency_p99=q(.99),
                grow_seconds=w0 - began, window=[w0, w1])
+if shared:
+    summary['prefix'] = prefix_info
 (out / 'client.json').write_text(json.dumps(dict(summary=summary, rows=rows)))
 print('SUMMARY', json.dumps(summary, indent=1), flush=True)

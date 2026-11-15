@@ -11,6 +11,7 @@ import hashlib
 import time
 
 from .. import _native
+from . import settings as _settings
 
 
 def read_destination(destination, size):
@@ -81,6 +82,15 @@ def _submit_archive_job(executor, work):
         ready.set()
 
 
+def prefix_pool_bytes():
+    """KVMEM_PREFIX_POOL_BYTES: CPU budget of the shared-prefix pool (docs/prefix-sharing.md,
+    phase 2). 0 (the default) disables sharing payloads on the native arena."""
+    value = _settings.get('KVMEM_PREFIX_POOL_BYTES', '0')
+    if not value.isdigit():
+        raise ValueError('KVMEM_PREFIX_POOL_BYTES must be a non-negative integer')
+    return int(value)
+
+
 def make_shared_archive(options, directory, record_bytes, max_requests, *, max_query_tokens=0):
     """One process-wide arena; each admitted authority has a lifetime partition."""
     from .query_window_budget import split_cpu_history_budget
@@ -97,10 +107,17 @@ def make_shared_archive(options, directory, record_bytes, max_requests, *, max_q
         if getattr(options, 'historical_gc', None) is not None:
             from .historical_gc import historical_record_charge
             charge = historical_record_charge(record_bytes, options.memory.block_tokens)
+        descriptors = capacity
         capacity = min(capacity, history_bytes // charge)
         if capacity <= 0:
             raise ValueError('CPU history budget cannot fit one record after Query cache reservation')
-        archive = MemoryArchive(str(directory), record_bytes, capacity,
+        sharing = {}
+        if getattr(options, 'historical_gc', None) is not None and prefix_pool_bytes() and descriptors > capacity:
+            # Shared prefixes: aliases take descriptors, not payload bytes. The
+            # byte budget bounds payload slots; descriptors keep the logical bound.
+            sharing = dict(payload_capacity=capacity)
+            capacity = descriptors
+        archive = MemoryArchive(str(directory), record_bytes, capacity, **sharing,
                                io_max_bytes=options.archive_io_max_bytes,
                                gather_workers=options.cpu_gather_workers,
                                cpu_direct_record_seal=getattr(options, 'cpu_direct_record_seal', False),
@@ -170,7 +187,7 @@ class AsyncArchive:
     def __init__(self, directory: str, record_bytes: int, capacity: int,
                  workers: int = 2, max_pending: int = 4, *, preallocate: bool = False,
                  max_bytes: int = 0, io_max_bytes: int = 0, memory_only: bool = False,
-                 native_cpu_payloads: bool = False):
+                 native_cpu_payloads: bool = False, payload_capacity: int | None = None):
         if min(record_bytes, capacity, workers, max_pending) <= 0:
             raise ValueError("Archive capacities must be positive")
         self.record_bytes = record_bytes
@@ -188,11 +205,13 @@ class AsyncArchive:
         self.span = _native.IoSpan
         if type(native_cpu_payloads) is not bool or native_cpu_payloads and not memory_only:
             raise ValueError('Native CPU payloads require the CPU archive backend')
+        if payload_capacity is not None and not native_cpu_payloads:
+            raise ValueError('A separate CPU payload capacity requires native CPU payloads')
         if memory_only:
             from .memory_storage import MemoryTier, MemorySpan
             if native_cpu_payloads:
                 from .native_memory_storage import NativeMemoryTier
-                self.tier = NativeMemoryTier(record_bytes, capacity)
+                self.tier = NativeMemoryTier(record_bytes, capacity, payload_capacity)
             else:
                 self.tier = MemoryTier(record_bytes, capacity)
             self.span = MemorySpan
@@ -311,7 +330,8 @@ class AsyncArchive:
             if any(key in self._entries for key in keys):
                 raise ValueError("Cannot overwrite immutable archive records")
             self._check_extent(admitted_bytes)
-            if len(self._free_ids) < len(keys) or not self._admit(admitted_bytes):
+            if (len(self._free_ids) < len(keys) or not self._payload_room(len(keys)) or
+                    not self._admit(admitted_bytes)):
                 return None
             entries, owned = [], []
             try:
@@ -388,6 +408,10 @@ class AsyncArchive:
                     self._release(key)
                 self._complete(admitted_bytes)
                 raise
+
+    def _payload_room(self, count):
+        """Whether the payload store can take ``count`` more records (shared prefixes)."""
+        return True
 
     def _backing_context(self, namespace):
         return None

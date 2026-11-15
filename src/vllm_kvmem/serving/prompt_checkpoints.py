@@ -329,6 +329,28 @@ class PromptCheckpointPool:
                                      pending.identity, fixed, False, previous, False, action_snapshot,
                                      graph_snapshot, seed, layerwise_snapshot)
 
+    def install_imported(self, checkpoint):
+        """Prefix-image import (serving/prefix_images.py): adopt an IDLE frozen P
+        checkpoint materialized outside capture() for a new session namespace.
+
+        The same entry and payload limits as capture() apply. From here on the
+        entry is an ordinary idle checkpoint: claim, eviction and accounting
+        do not distinguish it.
+        """
+        if checkpoint.phase is not CheckpointPhase.IDLE or checkpoint.kind != 'P':
+            raise ValueError('An imported checkpoint must be an idle frozen prompt (P) checkpoint')
+        namespace = checkpoint.namespace
+        if namespace in self.entries or namespace in self.prompts:
+            raise ValueError('Session already owns a checkpoint; serialize its turns')
+        self.poll_captures()
+        if len(self.entries) >= self.capacity:
+            raise BufferError('Prompt checkpoint entry capacity is exhausted')
+        if self.payload_bytes + checkpoint.payload_bytes > self.max_payload_bytes:
+            raise BufferError('Prompt checkpoint payload capacity is exhausted')
+        self.entries[namespace] = checkpoint
+        self.payload_bytes += checkpoint.payload_bytes
+        return checkpoint
+
     def drop_live(self, checkpoint):
         """Discard a snapshot while capture runtime keeps its live authority."""
         self._owned(checkpoint)

@@ -249,6 +249,7 @@ class KVMemScheduler(Scheduler):
         self._probe_submitted = False
         if options.session_capacity:
             from .session_control import SessionLedger
+            from .prefix_images import scope_error as prefix_image_scope
             def prepare_import(request_id, history, window):
                 prepared = []
                 try:
@@ -286,7 +287,11 @@ class KVMemScheduler(Scheduler):
                                                     require_owned=options.graph_mode != 'off',
                                                     pressure_policy=options.pressure_policy,
                                                     freeze_prompt=options.session_freeze_prompt,
-                                                    guided_options=options)
+                                                    guided_options=options,
+                                                    prefix_image_scope=prefix_image_scope(
+                                                        options, tensor_parallel_size=self.vllm_config
+                                                        .parallel_config.tensor_parallel_size),
+                                                    prefix_image_model=self.vllm_config.model_config.model)
         if options.cpu_history_coordination:
             from .coordination import HistoryAdmission
             from ..adapters.cache_manifest import archive_bytes_per_token

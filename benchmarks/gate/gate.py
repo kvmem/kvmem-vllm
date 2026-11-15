@@ -193,7 +193,7 @@ def run_agent(args):
     execution = dict(fixture['execution'], **json.loads(args.env))
     # The global path: one selection for every layer (no --layerwise-* flag).
     flags = fixture['server_flags'] if args.path == 'layer' else []
-    client = dict(fixture['client'])
+    client = dict(fixture['client'], **json.loads(args.client))
     if args.turns is not None:
         client['turns'] = args.turns
     out.mkdir(parents=True)
@@ -228,6 +228,10 @@ def run_agent(args):
                '--output', str(client['output']), '--tool-median', str(client['tool_median']),
                '--append-median', str(client['append_median']), '--seed', str(client['seed']),
                '--max-turns', str(client['turns']), '--save-tokens', '--tag', 'gate', '--out', str(out)]
+        if client.get('shared_prefix'):
+            # docs/prefix-sharing.md: one shared system prompt; arms cold, warm or import.
+            sim += ['--shared-prefix', str(client['shared_prefix']), '--prefix-mode', client.get('prefix_mode', 'cold'),
+                    '--block', str(profile['kvmem']['block_tokens'])]
         started = time.time()
         with (out / 'client.log').open('x') as stream:
             proc = subprocess.Popen(sim, stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
@@ -558,6 +562,8 @@ def main(argv=None):
     p.add_argument('--opts', default='{}',
                    help='kvmem profile options, JSON (e.g. the strategy_* options); null removes an option')
     p.add_argument('--env', default='{}', help='extra KVMEM_* execution flags, JSON')
+    p.add_argument('--client', default='{}',
+                   help='agent fixture: client overrides, JSON (e.g. shared_prefix, prefix_mode cold|warm|import)')
     p.add_argument('--port', type=int, default=19641)
     p.add_argument('--autotune-dir', default=None, help='FlashInfer autotune cache root (agent fixture)')
     p.add_argument('--data', default=str(DEFAULT_DATA), help='directory of the memory-benchmark question files')

@@ -2561,7 +2561,8 @@ PYBIND11_MODULE(_native, m) {
         .value("COMMITTED", PayloadArena::RetireResult::Committed)
         .value("ALREADY_RETIRED", PayloadArena::RetireResult::AlreadyRetired)
         .value("STALE", PayloadArena::RetireResult::StaleHandle)
-        .value("RETRY", PayloadArena::RetireResult::Retry);
+        .value("RETRY", PayloadArena::RetireResult::Retry)
+        .value("SHARED", PayloadArena::RetireResult::Shared);
     py::class_<PayloadArena, std::shared_ptr<PayloadArena>>(m, "HistoricalPayloadArena")
         .def(py::init([](uint32_t capacity, size_t record_bytes, bool background,
                         uint32_t poll_ms, uint32_t scan_slots, uint32_t release_batch,
@@ -2616,6 +2617,14 @@ PYBIND11_MODULE(_native, m) {
             return result;
         })
         .def("retire", &PayloadArena::retire)
+        // Shared prefixes (docs/prefix-sharing.md, phase 2): owners of one payload.
+        .def("share", &PayloadArena::share, py::arg("handle"), py::arg("pool") = false)
+        .def("release_pool", &PayloadArena::release_pool)
+        .def("retire_unshared", &PayloadArena::retire_unshared)
+        .def("owners", [](const PayloadArena &arena, PayloadArena::Handle handle) {
+            const auto owners = arena.owners(handle);
+            return py::make_tuple(owners.total, owners.pool);
+        })
         .def("reclaimed", &PayloadArena::reclaimed)
         // Opt-in session tiering (CPU TTL to SSD): drop / restore CPU bytes, same handle.
         .def("spill", [](PayloadArena &arena, PayloadArena::Handle handle) {
@@ -2684,6 +2693,7 @@ PYBIND11_MODULE(_native, m) {
             PAYLOAD_STAT(external_owners); PAYLOAD_STAT(external_bytes); PAYLOAD_STAT(external_released_bytes);
             PAYLOAD_STAT(pool_hits); PAYLOAD_STAT(pool_misses); PAYLOAD_STAT(pool_reserved_bytes);
             PAYLOAD_STAT(spilled_slots); PAYLOAD_STAT(spilled_bytes);
+            PAYLOAD_STAT(shared_slots); PAYLOAD_STAT(pool_slots); PAYLOAD_STAT(unique_bytes);
 #undef PAYLOAD_STAT
             return result;
         });
@@ -2753,6 +2763,7 @@ PYBIND11_MODULE(_native, m) {
         .def("publish", &HistoryScope::publish, py::arg("lease"), py::arg("cpu"),
              py::arg("flags"), py::arg("use_seq") = 0)
         .def("update", &HistoryScope::update, py::arg("lease"), py::arg("flags"), py::arg("use_seq") = 0)
+        .def("mark_shared", &HistoryScope::mark_shared, py::arg("lease"))
         .def("publish_thinking", &HistoryScope::publish_thinking, py::arg("lease"),
              py::arg("thinking_tokens"), py::arg("known_tokens"))
         .def("configure_features", &HistoryScope::configure_features,
@@ -2801,6 +2812,7 @@ PYBIND11_MODULE(_native, m) {
             HSTAT(redundancy_retired); HSTAT(lossy_retired); HSTAT(rejected_ineligible); HSTAT(cancelled_decisions);
             HSTAT(lru_fallback_retired); HSTAT(lru_representative_retired);
             HSTAT(thinking_classified); HSTAT(thinking_pure);
+            HSTAT(shared_marked); HSTAT(shared_released);
 #undef HSTAT
             return result;
         });
@@ -2967,10 +2979,30 @@ PYBIND11_MODULE(_native, m) {
         })
         .def("set_protect_current_window", &KvMemStore::set_protect_current_window)
         .def_property_readonly("protect_current_window", &KvMemStore::protect_current_window)
+        // Prefix-image import (serving/prefix_images.py): install one committed
+        // repository generation as the next whole history block. The Python
+        // lease is moved into the store (it reads false afterwards). With
+        // current-window protection (configured before the first install),
+        // current_frame marks the block as part of the protected current frame.
+        .def("register_block", [](KvMemStore &store, KvMemRepository::Lease &lease, uint32_t baked_pos,
+                                  bool current_frame) {
+            store.register_repository_block(std::move(lease), baked_pos, current_frame);
+        }, py::arg("lease"), py::arg("baked_pos"), py::arg("current_frame") = true)
         .def("prepare_append", &KvMemStore::prepare_repository_append, py::keep_alive<0, 1>())
         .def("checkpoint", &KvMemStore::repository_checkpoint,
              py::arg("position"), py::arg("pin_working_set") = true)
         .def("checkpoint_valid", &KvMemStore::repository_checkpoint_valid)
+        .def("current_frame_records", [](const KvMemStore &store) {
+            // Diagnostics: the blocks of the protected current frame (historical
+            // GC never retires them), as (slot, generation, history_begin).
+            std::vector<std::tuple<uint32_t, uint64_t, uint64_t>> records;
+            if (!store.protect_current_window()) return records;
+            for (const auto &block : store.blocks()) {
+                if (block.repository_generation && block.n_tokens && block.in_current_frame)
+                    records.emplace_back(block.block_id, block.repository_generation, block.history_pos_start);
+            }
+            return records;
+        })
         .def("working_records", [](const KvMemStore &store) {
             // Value tuples only: no block/Store views survive into a checkpoint.
             std::vector<std::tuple<uint32_t, uint64_t, uint64_t, uint32_t, int64_t>> records;

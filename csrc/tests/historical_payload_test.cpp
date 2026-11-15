@@ -7,6 +7,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 using Arena = vllm_kvmem::HistoricalPayloadArena;
 using Repository = qw3::KvMemRepository;
@@ -213,8 +214,107 @@ static void external_completion_grants_immediately_reusable_capacity() {
     check(released == 200, "index generation was lost or destroyed twice");
 }
 
+// Shared prefixes (docs/prefix-sharing.md, phase 2): owners of one payload.
+static void shared_owners_keep_bytes_until_the_last_owner() {
+    Arena arena({2, 16, 1, 4, 4, false});
+    const Arena::Handle h{0, 1};
+    std::array<uint8_t, 16> source{};
+    source.fill(7);
+    arena.publish(h, source.data(), source.size());
+    check(arena.owners(h).total == 1 && arena.owners(h).pool == 0, "a publication has one plain owner");
+    check(arena.share(h) && arena.share(h, true), "a live payload could not be shared");
+    auto stats = arena.stats();
+    check(stats.shared_slots == 1 && stats.pool_slots == 1 && stats.unique_bytes == 16,
+          "shared payload accounting counted bytes twice");
+    check(arena.owners(h).total == 3 && arena.owners(h).pool == 1, "owner counts are wrong");
+    check(arena.retire_unshared(h) == Arena::RetireResult::Shared && arena.owners(h).total == 3,
+          "historical GC retired or dropped a shared payload");
+    check(!arena.spill(h), "a shared payload was spilled");
+    check(arena.retire(h) == Arena::RetireResult::Shared, "a non-last plain owner retired the payload");
+    check(arena.retire(h) == Arena::RetireResult::Shared && arena.owners(h).total == 1,
+          "the second plain owner did not leave");
+    check(arena.retire(h) == Arena::RetireResult::StaleHandle, "a plain owner left twice");
+    check(arena.stats().shared_slots == 0 && arena.stats().pool_slots == 1, "shared slot count drifted");
+    auto reader = arena.acquire(h);
+    check(bool(reader) && reader.data()[3] == 7, "the pool owner lost its readable bytes");
+    check(arena.advance() == 0 && arena.stats().used_bytes == 16, "a shared payload was released early");
+    check(arena.release_pool(h) == Arena::RetireResult::Committed, "the last pool owner did not retire");
+    check(arena.release_pool(h) == Arena::RetireResult::AlreadyRetired, "pool release is not idempotent");
+    check(arena.stats().pool_slots == 0 && !arena.share(h), "a retired payload accepted a new owner");
+    check(arena.advance() == 0 && reader.data()[0] == 7, "a reader lost bytes after the last owner left");
+    reader.reset();
+    check(arena.advance() == 1 && arena.reclaimed(h) && arena.stats().used_bytes == 0,
+          "the last owner's bytes were not released");
+    // A single owner behaves exactly as before: retire_unshared is retire.
+    const Arena::Handle single{1, 1};
+    arena.publish(single, source.data(), source.size());
+    check(arena.retire_unshared(single) == Arena::RetireResult::Committed, "single owner not retired");
+    check(arena.retire(single) == Arena::RetireResult::AlreadyRetired, "single owner retired twice");
+    check(arena.advance() == 1 && arena.reclaimed(single), "single owner not released");
+    eventually([&] { return arena.close(); }, "shared arena shutdown stalled");
+}
+
+static void shutdown_releases_shared_payloads() {
+    Arena arena({1, 8, 1, 4, 4, false});
+    const Arena::Handle h{0, 1};
+    std::array<uint8_t, 8> source{};
+    arena.publish(h, source.data(), source.size());
+    check(arena.share(h) && arena.share(h, true), "shutdown fixture could not share");
+    eventually([&] { return arena.close(); }, "shutdown left a shared payload alive");
+    check(arena.stats().shared_slots == 0 && arena.stats().pool_slots == 0 && arena.stats().used_bytes == 0,
+          "shutdown left shared payload accounting behind");
+}
+
+static void concurrent_share_and_retire_drop_each_owner_once() {
+    constexpr uint32_t slots = 8, rounds = 2000, threads = 8;
+    Arena arena({slots, 64, 1, 64, 64, true});
+    std::array<uint8_t, 64> source{};
+    std::atomic<uint64_t> generation{0}, published{0};
+    // Each round: publish, let every thread take a share and read, then each
+    // owner (publisher + sharers) drops exactly once. The last drop retires.
+    for (uint32_t round = 0; round < rounds; ++round) {
+        const Arena::Handle h{round % slots, generation.fetch_add(1) + 1};
+        eventually([&] { return arena.reclaimed({h.slot, h.generation > slots ? h.generation - slots : 0}) ||
+                                h.generation <= slots; }, "slot did not become reusable");
+        source.fill(static_cast<uint8_t>(round));
+        arena.publish(h, source.data(), source.size());
+        published.fetch_add(1);
+        std::atomic<uint32_t> shared{0}, committed{0}, mismatches{0}, ready{0};
+        std::vector<std::thread> workers;
+        // Shares race readers; then every owner, the publisher included, drops
+        // at once, so the last drop is decided by the race.
+        for (uint32_t t = 0; t <= threads; ++t) {
+            workers.emplace_back([&, t] {
+                const bool publisher = t == threads, pool = t % 2;
+                if (!publisher) {
+                    if (!arena.share(h, pool)) mismatches.fetch_add(1);
+                    else shared.fetch_add(1);
+                }
+                auto read = arena.acquire(h);
+                if (!read || read.data()[63] != static_cast<uint8_t>(round)) mismatches.fetch_add(1);
+                read.reset();
+                ready.fetch_add(1);
+                while (ready.load() <= threads) std::this_thread::yield();
+                const auto result = publisher || !pool ? arena.retire(h) : arena.release_pool(h);
+                if (result == Arena::RetireResult::Committed) committed.fetch_add(1);
+                else if (result != Arena::RetireResult::Shared) mismatches.fetch_add(1);
+            });
+        }
+        for (auto &worker : workers) worker.join();
+        check(!mismatches.load() && shared.load() == threads, "a concurrent owner failed to share or read");
+        check(committed.load() == 1, "concurrent owner drops retired a payload zero or several times");
+        check(arena.stats().shared_slots == 0 && arena.stats().pool_slots == 0, "owner counters drifted");
+    }
+    eventually([&] { return arena.stats().used_slots == 0; }, "shared payloads were not all released");
+    check(arena.stats().released_slots == published.load(), "a shared payload was released twice or never");
+    eventually([&] { return arena.close(); }, "stress arena shutdown stalled");
+}
+
 int main() {
     try {
+        shared_owners_keep_bytes_until_the_last_owner();
+        shutdown_releases_shared_payloads();
+        concurrent_share_and_retire_drop_each_owner_once();
         independent_cpu_and_gpu_lifetimes();
         generation_reuse_and_immutable_copy();
         sparse_arena_reclamation_uses_compact_retirement_hints();

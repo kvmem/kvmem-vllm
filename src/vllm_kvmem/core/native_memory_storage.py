@@ -41,13 +41,194 @@ def tiering_drop_cache():
 
 
 class NativeMemoryTier(MemoryTier):
-    def __init__(self, record_bytes, capacity):
+    """Allocation descriptors (MemoryTier) over native payload slots (the arena).
+
+    Shared prefixes (docs/prefix-sharing.md, phase 2): a payload can have several
+    owners, its publishing descriptor plus alias descriptors of other sessions
+    and shared-prefix pool owners. Each descriptor drops its owner reference
+    exactly once. A descriptor whose payload others still own is freed at once;
+    its arena slot stays occupied ("detached") until the last owner leaves.
+
+    Until the first share, or unless ``payload_capacity`` is below the descriptor
+    capacity, every descriptor publishes into the arena slot of its own id and
+    retires exactly as before. Afterwards arena slots are tracked explicitly.
+    """
+    def __init__(self, record_bytes, capacity, payload_capacity=None):
         super().__init__(record_bytes, capacity)
-        self.payloads = _native.HistoricalPayloadArena(capacity, record_bytes, **payload_pool_config())
+        payload_capacity = capacity if payload_capacity is None else payload_capacity
+        if type(payload_capacity) is not int or not 0 < payload_capacity <= capacity:
+            raise ValueError('CPU payload capacity must be positive and at most the descriptor capacity')
+        self.payload_capacity = payload_capacity
+        self.payloads = _native.HistoricalPayloadArena(payload_capacity, record_bytes, **payload_pool_config())
         self._publishing = set()
         self._failed_publications = set()
         self._spill_store = None
         self._spilled = {}          # slot -> (payload handle, SSD location)
+        self._arena_free = None     # free arena slots, once descriptors and arena slots are decoupled
+        self._arena_slot = {}       # descriptor slot -> arena slot where they differ
+        self._detached = {}         # arena slot -> handle of a payload whose publisher already left
+        self._aliases = set()       # descriptor slots that own a share of another payload
+        self._dropped = {}          # descriptor slot -> the result of its single owner drop
+        # Shared-prefix pool charge: descriptors whose payload is charged to the
+        # pool (aliases, and a parent's records once an image shares them), and
+        # per payload the number of such descriptors plus pool owners. A payload
+        # stays in the pool until its last charged reference is gone.
+        self._flagged = set()
+        self._pool_refs = {}        # (arena slot, generation) -> [handle, references]
+        self._pool_draining = {}    # (arena slot, generation) -> handle whose bytes are still draining
+        if payload_capacity != capacity:
+            self._decouple()
+
+    # --- shared prefixes ---------------------------------------------------
+
+    def _decouple(self):
+        """Track arena slots explicitly from now on (first share, or fewer slots)."""
+        with self.lock:
+            if self._arena_free is not None:
+                return
+            used = {self._arena_slot.get(slot, slot) for slot in self.allocations if slot not in self._aliases}
+            used.update(self._detached)
+            self._arena_free = set(range(self.payload_capacity)) - used
+
+    def _reap_detached(self):
+        for slot, handle in list(self._detached.items()):
+            if self.payloads.reclaimed(handle):
+                del self._detached[slot]
+                self._arena_free.add(slot)
+
+    def payload_room(self, count):
+        """Whether ``count`` more records can be published (archive write admission)."""
+        with self.lock:
+            if self._arena_free is None:
+                return True
+            if len(self._arena_free) < count:
+                self._reap_detached()
+            return len(self._arena_free) >= count
+
+    def allocate(self, block_id):
+        with self.lock:
+            allocation = super().allocate(block_id)
+            if self._arena_free is None:
+                return allocation
+            if block_id not in self._arena_free:
+                self._reap_detached()
+            if block_id in self._arena_free:
+                arena = block_id
+            elif self._arena_free:
+                arena = min(self._arena_free)
+            else:
+                super().release(allocation)
+                raise BufferError('No CPU payload slot is free for a new record')
+            self._arena_free.discard(arena)
+            if arena != allocation.slot:
+                self._arena_slot[allocation.slot] = arena
+            return allocation
+
+    def alias(self, block_id, handle):
+        """A new descriptor that owns a share of the live payload ``handle``.
+        Its payload is charged to the shared-prefix pool."""
+        with self.lock:
+            self._decouple()
+            if not self.payloads.share(handle):
+                raise ValueError('A shared CPU payload must be live')
+            try:
+                allocation = MemoryTier.allocate(self, block_id)
+            except BaseException:
+                self.payloads.retire(handle)
+                raise
+            self.records[allocation.slot] = handle
+            self._aliases.add(allocation.slot)
+            self._flagged.add(allocation.slot)
+            self._pool_ref(handle, 1)
+            return allocation
+
+    def share_pool(self, handle):
+        """A shared-prefix pool owner (an image) of the live payload ``handle``."""
+        with self.lock:
+            self._decouple()
+            shared = self.payloads.share(handle, True)
+            if shared:
+                self._pool_ref(handle, 1)
+            return shared
+
+    def release_pool(self, handle):
+        with self.lock:
+            result = self.payloads.release_pool(handle)
+            if result in (_native.HistoricalPayloadRetireResult.SHARED,
+                          _native.HistoricalPayloadRetireResult.COMMITTED):
+                if self._pool_ref(handle, -1) == 0 and result == _native.HistoricalPayloadRetireResult.COMMITTED:
+                    self._pool_draining[(handle.slot, handle.generation)] = handle
+            return result
+
+    def charge_pool(self, allocation):
+        """A publisher's descriptor whose payload a pool owner now shares: its
+        record is charged to the pool from now on (it never moves back)."""
+        with self.lock:
+            if self.allocations.get(allocation.slot) != allocation or allocation.slot not in self.records:
+                raise ValueError('Only a published CPU record can join the shared-prefix pool')
+            if allocation.slot in self._flagged:
+                return False
+            self._flagged.add(allocation.slot)
+            self._pool_ref(self.records[allocation.slot], 1)
+            return True
+
+    def _pool_ref(self, handle, delta):
+        key = handle.slot, handle.generation
+        entry = self._pool_refs.get(key)
+        if entry is None:
+            if delta < 0:
+                return 0
+            entry = self._pool_refs[key] = [handle, 0]
+        entry[1] += delta
+        if entry[1] <= 0:
+            del self._pool_refs[key]
+            return 0
+        return entry[1]
+
+    def pool_records(self):
+        """Distinct payloads charged to the shared-prefix pool, including those
+        whose last pool owner left while their bytes still drain."""
+        return self.pool_state()[0]
+
+    def pool_state(self):
+        """(pool records, of which draining): see pool_records."""
+        with self.lock:
+            for key, handle in list(self._pool_draining.items()):
+                if self.payloads.reclaimed(handle):
+                    del self._pool_draining[key]
+            return len(self._pool_refs) + len(self._pool_draining), len(self._pool_draining)
+
+    def pool_active(self):
+        return bool(self._pool_refs or self._pool_draining)
+
+    def payload_handles(self, allocations):
+        with self.lock:
+            return [self.records.get(allocation.slot) for allocation in allocations]
+
+    def _drop(self, slot, handle):
+        """This descriptor's owner reference, dropped exactly once."""
+        result = self._dropped.get(slot)
+        if result is None:
+            result = self.payloads.retire(handle)
+            if result != _native.HistoricalPayloadRetireResult.RETRY:
+                self._dropped[slot] = result
+        return result
+
+    def _settle(self, slot, handle, result):
+        """Arena slot bookkeeping once descriptor ``slot`` is gone."""
+        alias = slot in self._aliases
+        self._aliases.discard(slot)
+        self._dropped.pop(slot, None)
+        arena = self._arena_slot.pop(slot, slot)
+        if handle is None:
+            if not alias:
+                self._arena_free.add(arena)          # reserved, never published
+        elif result == _native.HistoricalPayloadRetireResult.SHARED:
+            if not alias:
+                self._detached[handle.slot] = handle  # others still own its bytes
+        else:
+            self._detached.pop(handle.slot, None)
+            self._arena_free.add(handle.slot)
 
     # Opt-in session tiering (cpu_session_ttl_ms): an idle session's records
     # move to SSD and come back with identical bytes under the same handle.
@@ -96,8 +277,10 @@ class NativeMemoryTier(MemoryTier):
 
     def _spill_one(self, allocation, written):
         with self.lock:
+            # Pool-charged (shared-prefix) payloads never spill: skip them before any I/O.
             if (self.allocations.get(allocation.slot) != allocation or allocation.slot in self._spilled or
-                    allocation.slot in self._failed_publications or allocation.slot in self._publishing):
+                    allocation.slot in self._failed_publications or allocation.slot in self._publishing or
+                    allocation.slot in self._flagged):
                 return 'skip'
             handle = self.records.get(allocation.slot)
             read = self.payloads.acquire(handle) if handle is not None else None
@@ -129,7 +312,7 @@ class NativeMemoryTier(MemoryTier):
             eligible = [(a, self.records[a.slot]) for a in allocations
                         if self.allocations.get(a.slot) == a and a.slot in self.records and
                         a.slot not in self._spilled and a.slot not in self._failed_publications and
-                        a.slot not in self._publishing]
+                        a.slot not in self._publishing and a.slot not in self._flagged]
         if not eligible:
             return 0
         extents = store.reserve(len(eligible))
@@ -222,6 +405,10 @@ class NativeMemoryTier(MemoryTier):
     def payload_handle(allocation):
         return _native.HistoricalPayloadHandle(allocation.slot, allocation.generation)
 
+    def _publication_handle(self, allocation):
+        arena = self._arena_slot.get(allocation.slot, allocation.slot)
+        return _native.HistoricalPayloadHandle(arena, allocation.generation)
+
     def borrow_records(self, allocations):
         """Acquire CPU rights at I/O admission, before queuing any copy task."""
         if self._spilled:
@@ -261,7 +448,7 @@ class NativeMemoryTier(MemoryTier):
         published = {}
         try:
             for allocation, views in zip(allocations, record_views):
-                handle = self.payload_handle(allocation)
+                handle = self._publication_handle(allocation)
                 self.payloads.publish_segments(handle, views)
                 published[allocation.slot] = handle
             with self.lock:
@@ -288,30 +475,51 @@ class NativeMemoryTier(MemoryTier):
         return self.publish_record_views(allocations, [(record,) for record in records])
 
     def retire_payload(self, allocation):
-        """Close CPU reads independently of repository/GPU metadata ownership."""
+        """Close CPU reads independently of repository/GPU metadata ownership.
+
+        With shared payloads this drops the descriptor's owner reference (once);
+        SHARED means other owners keep the bytes.
+        """
         with self.lock:
             if self.allocations.get(allocation.slot) != allocation:
                 return _native.HistoricalPayloadRetireResult.STALE
             handle = self.records.get(allocation.slot)
             if handle is None:
                 return _native.HistoricalPayloadRetireResult.RETRY
-            return self.payloads.retire(handle)
+            if self._arena_free is None:
+                return self.payloads.retire(handle)
+            return self._drop(allocation.slot, handle)
 
     def release(self, allocation):
         with self.lock:
             if self.allocations.get(allocation.slot) != allocation or allocation.slot in self._publishing:
                 return False
             handle = self.records.get(allocation.slot)
+            result = None
             if handle is not None:
-                self.payloads.retire(handle)
-                if not self.payloads.reclaimed(handle):
-                    return False
+                if self._arena_free is None:
+                    self.payloads.retire(handle)
+                    if not self.payloads.reclaimed(handle):
+                        return False
+                else:
+                    # A shared payload stays with its other owners: this descriptor
+                    # is free at once. The last owner waits for the bytes as before.
+                    result = self._drop(allocation.slot, handle)
+                    if (result != _native.HistoricalPayloadRetireResult.SHARED and
+                            not self.payloads.reclaimed(handle)):
+                        return False
             spilled = self._spilled.pop(allocation.slot, None)
             if spilled is not None:
                 self._spill_store.release(spilled[1])
             del self.allocations[allocation.slot]
             self.records.pop(allocation.slot, None)
             self._failed_publications.discard(allocation.slot)
+            if self._arena_free is not None:
+                if allocation.slot in self._flagged:
+                    self._flagged.discard(allocation.slot)
+                    if handle is not None:
+                        self._pool_ref(handle, -1)
+                self._settle(allocation.slot, handle, result)
             return True
 
     def read_from_sources(self, spans, destination, sources):

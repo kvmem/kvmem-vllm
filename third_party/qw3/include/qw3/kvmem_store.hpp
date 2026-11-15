@@ -466,7 +466,11 @@ public:
     // Executor publishes these only after all configured main/MTP raw-K/V and
     // index components have actually become authoritative for this generation.
     void set_repository_gc_flags(KvMemBlockHandle, uint32_t mask, uint32_t values);
-    void register_repository_block(KvMemRepository::Lease, uint32_t baked_pos);
+    // Install one committed generation as a whole history block (prefix-image
+    // import). With current-window protection, current_frame says whether it
+    // joins the protected current frame; an append's pages always do.
+    void register_repository_block(KvMemRepository::Lease, uint32_t baked_pos,
+                                   bool current_frame = true);
     KvMemBlockHandle repository_handle(uint32_t slot) const;
     uint64_t history_end() const { return total_tokens_; }
     // Host adapter preflight only; does not change original selection policy.
@@ -738,7 +742,7 @@ private:
         const std::vector<uint32_t> &mandatory, bool pressure, uint32_t budget) const;
     void repository_sync_gc(uint32_t slot, bool used = false);
     void install_repository_block(KvMemRepository::Lease, uint32_t baked_pos,
-                                  uint32_t valid_tokens);
+                                  uint32_t valid_tokens, bool current_frame = true);
     void require_no_repository_append() const;
     KvMemRepository::Lease validate_repository_mutation(uint32_t, uint64_t, bool admitted_window = false) const;
     std::vector<uint32_t> chronological_ids() const;

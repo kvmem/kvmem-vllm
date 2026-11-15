@@ -127,6 +127,14 @@ class HistoryAdmission:
 
     def consume(self, notice):
         """Called only AFTER the session ledger has validated the worker notice."""
+        if notice.kind == 'imported':
+            # A new session materialized from a prefix image holds a retained
+            # history of P tokens, exactly as after a retired turn that kept P.
+            key = ('session', *notice.namespace)
+            if key in self.leases:
+                raise ValueError('Prefix image import reused a live CPU history lease')
+            self.leases[key] = HistoryLease(notice.generation, self.extent_bytes(notice.history), None, 'idle')
+            return
         if notice.kind not in ('retired', 'evicted'):
             return
         key = ('session', *notice.namespace)

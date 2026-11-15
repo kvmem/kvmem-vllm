@@ -397,7 +397,7 @@ struct HistoricalRedundancyPolicy::State {
         return {std::max(slots_pressure?deficit(p.high_slots,p.ready_slots,p.pending_slots):0,
                          deficit(p.requested_ready_slots,p.ready_slots,p.pending_slots)),
             std::max(bytes_pressure?deficit(p.high_cpu_bytes,p.free_cpu_bytes,p.pending_cpu_bytes):0,
-                     deficit(p.scope_cpu_bytes,p.scope_cpu_limit,p.scope_pending_cpu_bytes))};
+                     deficit(p.scope_private_bytes(),p.scope_cpu_limit,p.scope_pending_cpu_bytes))};
     }
     void clear_round() {
         for(const auto &m:refs) reference_generations[m.handle.slot]=0;
@@ -662,6 +662,7 @@ HistoricalPolicyResult HistoricalRedundancyPolicy::step(const HistoricalSnapshot
         if(index==SIZE_MAX) break;
         auto &row=s.rows[index];
         if(!s.eligible(row.meta) || (reason==HistoricalDeleteReason::LossyPressure && row.supports)) continue;
+        if(!slots && row.meta.shared) continue;   // a shared record frees no bytes
         HistoricalDeleteIntent intent{row.meta.handle,snapshot.incarnation,snapshot.round};
         intent.reason=reason;intent.feature_version=row.key->version;intent.question_epoch=s.query.epoch;
         if(reason==HistoricalDeleteReason::Redundancy) {
@@ -681,6 +682,7 @@ HistoricalPolicyResult HistoricalRedundancyPolicy::step(const HistoricalSnapshot
             const auto entry=s.lru.back();s.lru.pop_back();++popped;
             const auto &meta=entry.meta;
             if(!s.reclaimable(meta) || s.protected_in_round(meta)) continue;
+            if(!slots && meta.shared) continue;   // a shared record frees no bytes
             // An ordinary snapshot entry cannot become a same-round victim
             // immediately after it acquires a successful representative hold.
             if(!entry.prior_carry && s.prior_representative(meta)) continue;

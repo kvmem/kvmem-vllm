@@ -254,6 +254,8 @@ class ThinkingHistory:
                 self.stats['pure_blocks' if thinking == known == record.count else 'mixed_blocks'] += 1
                 self.publications.pop(key, None)
                 record._thinking_counts = None
+                # Kept for prefix images: an imported session republishes it.
+                record._thinking_published = (thinking, known)
             else:
                 # Retry metadata contention without keeping a deleted Record or
                 # its MeanK storage alive. The number is bounded by live records.

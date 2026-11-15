@@ -27,6 +27,11 @@ def validate_session_payload(payload, header):
         payload.get('prompt'), payload.get('max_tokens'))
     if release and payload.get('kvmem_query_span') is not None:
         raise ValueError('Session release cannot execute a Query')
+    params = payload.get('kv_transfer_params')
+    share = params.get('kvmem_share_prefix') if isinstance(params, dict) else None
+    if share is not None and (type(share) is not int or share <= 0 or not session or release):
+        # Prefix images (serving/prefix_images.py); the scheduler validates P itself.
+        raise ValueError('kvmem_share_prefix requires a session and a positive integer token position')
 
 
 def normalize_query_plan(payload, session_header=None):

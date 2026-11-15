@@ -22,7 +22,8 @@ using Payload = HistoricalPayloadArena;
     X(slots_released) X(pending_slots) X(pending_cpu_bytes) X(retries) X(stale) \
     X(policy_failures) X(shadow_decisions) X(admission_attempts) X(admission_retries) \
     X(redundancy_retired) X(lossy_retired) X(rejected_ineligible) X(cancelled_decisions) \
-    X(lru_fallback_retired) X(lru_representative_retired) X(thinking_classified) X(thinking_pure)
+    X(lru_fallback_retired) X(lru_representative_retired) X(thinking_classified) X(thinking_pure) \
+    X(shared_marked) X(shared_released)
 
 struct AtomicStats {
 #define FIELD(name) std::atomic<uint64_t> name{0};
@@ -52,6 +53,9 @@ struct PublishedBlock {
     std::atomic<uint32_t> thinking_flags{0};
     std::atomic_flag policy_gate = ATOMIC_FLAG_INIT;
     std::atomic<uint64_t> cpu_event{0}, cpu_ack{0}, slot_event{0}, slot_ack{0};
+    // Shared prefixes: the generation whose payload this session shares with
+    // other sessions or a prefix pool (sticky until that generation is gone).
+    std::atomic<uint64_t> shared_generation{0};
 };
 
 struct BlockView {
@@ -64,6 +68,9 @@ struct PendingBlock {
     Handle handle;
     Payload::Handle payload;
     bool active = false, cpu_done = false, slot_done = false, byte_credit = false;
+    // Shared payload: releasing it here is logical only. The archive descriptor
+    // release drops this session's owner reference; no bytes are credited.
+    bool shared = false;
 };
 
 bool sample(const PublishedBlock &source, uint32_t slot, BlockView &out) {
@@ -100,6 +107,8 @@ bool sample(const PublishedBlock &source, uint32_t slot, BlockView &out) {
     if (thinking_version != source.thinking_version.load(std::memory_order_acquire)) return false;
     out.meta.thinking_complete = thinking_generation == out.meta.handle.generation && (thinking_flags & 1);
     out.meta.thinking_only = out.meta.thinking_complete && (thinking_flags & 2);
+    out.meta.shared = out.meta.handle.generation &&
+        source.shared_generation.load(std::memory_order_relaxed) == out.meta.handle.generation;
     out.payload = {source.payload_slot.load(std::memory_order_relaxed),
                    source.payload_generation.load(std::memory_order_relaxed)};
     if (out.meta.handle.generation != source.generation.load(std::memory_order_relaxed)) out.payload = {};
@@ -268,8 +277,29 @@ struct HistoricalScopeState {
         return true;
     }
 
+    // Shared prefixes: from now on this live, published generation's payload is
+    // shared with other sessions or a prefix pool (sticky for the generation).
+    // Its bytes leave this scope's private budget; releasing it is logical.
+    bool mark_shared(const Repo::Lease &lease) {
+        if (!repository->owns(lease)) throw std::invalid_argument("Historical shared mark has a foreign repository lease");
+        const auto handle = lease.record().handle;
+        auto live = repository->try_pin(handle);
+        auto &block = records[handle.slot];
+        if (!live || block.generation.load(std::memory_order_acquire) != handle.generation ||
+                !block.payload_generation.load(std::memory_order_acquire)) return false;
+        auto previous = block.shared_generation.load(std::memory_order_acquire);
+        while (previous != handle.generation) {
+            if (block.shared_generation.compare_exchange_weak(previous, handle.generation,
+                    std::memory_order_acq_rel, std::memory_order_acquire)) {
+                stats.shared_marked.fetch_add(1, std::memory_order_relaxed);
+                return true;
+            }
+        }
+        return true;
+    }
+
     void credit_cpu(PendingBlock &job, uint64_t &global_pending) {
-        if (job.payload.generation && !job.byte_credit && !job.cpu_done) {
+        if (job.payload.generation && !job.byte_credit && !job.cpu_done && !job.shared) {
             const auto bytes = arena->record_bytes();
             job.byte_credit = true;
             stats.pending_cpu_bytes.fetch_add(bytes, std::memory_order_relaxed);
@@ -287,16 +317,39 @@ struct HistoricalScopeState {
         // readers. Retired generations can never supply a new policy round.
         if (features) features->erase_key(handle);
         BlockView view;
-        if (sample(records[handle.slot], handle.slot, view) && view.meta.handle == handle)
+        if (sample(records[handle.slot], handle.slot, view) && view.meta.handle == handle) {
             job.payload = view.payload;
+            job.shared = view.meta.shared;
+        }
         stats.pending_slots.fetch_add(1, std::memory_order_relaxed);
         credit_cpu(job, global_pending);
         return true;
     }
 
+    // The arena reported other owners of an unmarked payload (a share that
+    // raced this retirement): release it as shared, withdrawing any byte credit.
+    void share_job(PendingBlock &job, uint64_t &global_pending) {
+        if (job.byte_credit) {
+            const auto bytes = arena->record_bytes();
+            stats.pending_cpu_bytes.fetch_sub(bytes, std::memory_order_relaxed);
+            global_pending -= bytes;
+            job.byte_credit = false;
+        }
+        job.shared = true;
+        auto previous = records[job.handle.slot].shared_generation.load(std::memory_order_acquire);
+        while (previous != job.handle.generation) {
+            if (records[job.handle.slot].shared_generation.compare_exchange_weak(previous, job.handle.generation,
+                    std::memory_order_acq_rel, std::memory_order_acquire)) {
+                stats.shared_marked.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
+        }
+    }
+
     void cpu_complete(PendingBlock &job, uint64_t &global_pending) {
         if (job.cpu_done) return;
         job.cpu_done = true;
+        if (job.shared) stats.shared_released.fetch_add(1, std::memory_order_relaxed);
         if (job.byte_credit) {
             const auto bytes = arena->record_bytes();
             stats.pending_cpu_bytes.fetch_sub(bytes, std::memory_order_relaxed);
@@ -321,15 +374,22 @@ struct HistoricalScopeState {
         }
         if (!job.payload.generation) {
             BlockView view;
-            if (sample(entry, job.handle.slot, view) && view.meta.handle == job.handle)
+            if (sample(entry, job.handle.slot, view) && view.meta.handle == job.handle) {
                 job.payload = view.payload;
+                job.shared = view.meta.shared;
+            }
             credit_cpu(job, global_pending);
         }
         bool progress = false;
         if (job.payload.generation && !job.cpu_done) {
-            const auto result = arena->retire(job.payload);
-            if (result == Payload::RetireResult::Retry) stats.retries.fetch_add(1, std::memory_order_relaxed);
-            if (arena->reclaimed(job.payload)) {
+            if (!job.shared) {
+                // Retires only a payload this session owns alone; a shared one
+                // is left to the descriptor release (exactly one owner drop).
+                const auto result = arena->retire_unshared(job.payload);
+                if (result == Payload::RetireResult::Retry) stats.retries.fetch_add(1, std::memory_order_relaxed);
+                if (result == Payload::RetireResult::Shared) share_job(job, global_pending);
+            }
+            if (job.shared || arena->reclaimed(job.payload)) {
                 cpu_complete(job, global_pending);
                 progress = true;
             }
@@ -341,12 +401,15 @@ struct HistoricalScopeState {
             if (!job.payload.generation) {
                 BlockView view;
                 if (!sample(entry, job.handle.slot, view)) return false;
-                if (view.meta.handle == job.handle) job.payload = view.payload;
+                if (view.meta.handle == job.handle) {
+                    job.payload = view.payload;
+                    job.shared = view.meta.shared;
+                }
                 credit_cpu(job, global_pending);
             }
-            if (job.payload.generation && !arena->reclaimed(job.payload)) {
-                arena->retire(job.payload);
-                return false;
+            if (job.payload.generation && !job.shared && !arena->reclaimed(job.payload)) {
+                if (arena->retire_unshared(job.payload) != Payload::RetireResult::Shared) return false;
+                share_job(job, global_pending);
             }
             cpu_complete(job, global_pending);
             return shutdown || entry.cpu_ack.load(std::memory_order_acquire) >= job.handle.generation;
@@ -401,8 +464,12 @@ struct HistoricalScopeState {
         result.high_cpu_bytes = config.cpu_free_high;
         result.pending_cpu_bytes = global_pending;
         result.requested_ready_slots = requested_ready.load(std::memory_order_acquire);
+        const auto shared_released = stats.shared_released.load(std::memory_order_relaxed);
         result.scope_cpu_bytes = (stats.published.load(std::memory_order_relaxed) -
-                                  stats.cpu_released.load(std::memory_order_relaxed)) * arena->record_bytes();
+                                  stats.cpu_released.load(std::memory_order_relaxed) - shared_released) *
+                                 arena->record_bytes();
+        result.scope_shared_bytes = (stats.shared_marked.load(std::memory_order_relaxed) - shared_released) *
+                                    arena->record_bytes();
         result.scope_cpu_limit = requested_cpu_limit.load(std::memory_order_acquire);
         result.scope_pending_cpu_bytes = stats.pending_cpu_bytes.load(std::memory_order_relaxed) + shadow_bytes;
         return result;
@@ -602,7 +669,7 @@ struct HistoricalScopeState {
                     if (end && lease.record().token_begin < end &&
                             lease.record().token_begin + lease.record().token_count > recent)
                         view.meta.mandatory = true;
-                    view.meta.cpu_bytes = view.payload.generation ? arena->record_bytes() : 0;
+                    view.meta.cpu_bytes = view.payload.generation && !view.meta.shared ? arena->record_bytes() : 0;
                     if (features) view.meta.feature_version = features->key_version(view.meta.handle);
                     if (view.meta.gpu_resident)
                         view.meta.last_use_seq = std::max(view.meta.last_use_seq, use_stamp.load(std::memory_order_acquire));
@@ -819,6 +886,12 @@ std::shared_ptr<HistoricalFrameHold> HistoricalGcScope::protect_impl(const std::
         if (!state_->repository->try_pin(lease.handle())) return {};
     return hold;
 }
+bool HistoricalGcScope::mark_shared(const Repo::Lease &lease) {
+    if (!state_) throw std::runtime_error("Historical scope is closed");
+    if (state_->closing.load(std::memory_order_acquire)) return false;
+    return state_->mark_shared(lease);
+}
+
 bool HistoricalGcScope::publish(const Repo::Lease &lease, const Payload::Read &cpu, uint32_t flags, uint64_t use) {
     if (!state_) throw std::runtime_error("Historical scope is closed");
     return state_->publish(lease, &cpu, flags, use);

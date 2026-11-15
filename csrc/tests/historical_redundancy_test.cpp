@@ -273,6 +273,23 @@ static void lru_fallback_orders_by_use_and_honors_byte_and_ready_pressure() {
     auto intents=decide_ack(no_query,{1,1,{old,newer,ref}},p);
     check(intents.size()==1 && intents[0].handle==old.handle,"LRU fallback improperly depended on Query/features");
 }
+// Shared prefixes: a scope byte budget falls back to private records only;
+// a ready-slot request may still take the older shared record.
+static void lru_fallback_spends_byte_budgets_on_private_records() {
+    auto s=source();s->configure(1,1,1,2);question(s,{100,0});
+    auto older=block(s,0,{1,0},1),newer=block(s,1,{0,1},2),ref=block(s,7,{-1,-1},3,true);
+    older.shared=true;older.cpu_bytes=0;
+    auto c=config();c.lru_fallback=true;c.representative_similarity=1;
+    for(bool bytes:{true,false}) {
+        HistoricalRedundancyPolicy policy(8,c);policy.bind_features(s);
+        HistoricalPressure p;
+        if(bytes) {p.scope_cpu_bytes=3072;p.scope_shared_bytes=1024;p.scope_cpu_limit=1024;}
+        else p.requested_ready_slots=1;
+        auto intents=decide_ack(policy,{1,1,{older,newer,ref}},p);
+        check(intents.size()==1 && intents[0].handle==(bytes?newer.handle:older.handle),
+            "a byte budget took a shared record, or a slot request skipped it");
+    }
+}
 static void no_fallback_before_ack_and_recheck_actual_deficit() {
     auto s=source();s->configure(1,1,1,2);question(s,{1,0});
     auto a=thinking(block(s,0,{1,0},2)),b=thinking(block(s,1,{1,0},3)),other=block(s,2,{0,1},1);
@@ -382,6 +399,7 @@ int main() {
     continuous_generations_and_bounded_snapshots();pending_credit_pressure_hysteresis_and_no_batch_chains();
     thinking_redundancy_then_global_lru_preserves_witness();
     lru_fallback_orders_by_use_and_honors_byte_and_ready_pressure();
+    lru_fallback_spends_byte_budgets_on_private_records();
     no_fallback_before_ack_and_recheck_actual_deficit();bounded_pool_nontransitivity_and_reference_scope();
     representative_fallback_makes_progress_only_in_later_round();
     refresh_once_before_rank_and_epoch_peak();

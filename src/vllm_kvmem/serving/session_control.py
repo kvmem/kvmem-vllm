@@ -75,6 +75,9 @@ class SessionBinding:
     # continuation removes its already-completed selection/replay operation.
     question_span: tuple | None = None
     question_id: str | None = None
+    # kv_transfer_params.kvmem_share_prefix: register the retained frozen P as a
+    # prefix image once it is idle (serving/prefix_images.py). 0: never.
+    share_prefix: int = 0
 
 
 @dataclass(frozen=True)
@@ -106,6 +109,12 @@ def held_p_capture():
     if value not in ('0', '1', '2'):
         raise ValueError('KVMEM_HELD_P_CAPTURE must be 0, 1 or 2')
     return int(value)
+
+
+# Worker notices of prefix images (serving/prefix_images.py): registration of an
+# image from an idle frozen P, and the materialization of a new session from one.
+_PREFIX_IMAGE_NOTICES = frozenset(('image_registered', 'image_refused', 'image_released', 'imported',
+                                   'import_failed', 'history_pool'))
 
 
 @dataclass(frozen=True)
@@ -157,6 +166,10 @@ class SessionCommands:
     # Opt-in session tiering: sessions whose next turn just arrived, so the
     # worker can start bringing them back from SSD while they queue.
     returning: list = field(default_factory=list)
+    # Prefix images (serving/prefix_images.py): new sessions to materialize from
+    # an image (SessionImport) and image keys the worker may drop.
+    image_imports: list = field(default_factory=list)
+    image_releases: list = field(default_factory=list)
 
 
 @dataclass
@@ -192,8 +205,20 @@ class _Entry:
     question_id: str | None = None
     guided_anchor: int = 0
     prompt_guided_anchor: int = 0
+    # Prefix images: the validated kvmem_share_prefix of the active request, and
+    # for a session being materialized from an image (phase 'importing') the
+    # requesting native request, the image key and whether that request ended.
+    share_prefix: int = 0
+    import_request: str | None = None
+    import_key: object = None
+    import_orphan: bool = False
     _fingerprint_tokens: bytes | None = field(default=None, repr=False, compare=False)
     _fingerprint: str = field(default='', repr=False, compare=False)
+
+    def prompt_tokens_for(self, position):
+        """Token identity of this idle session's first ``position`` tokens (a P
+        below a retained M shares the M identity's prefix)."""
+        return self.tokens[:position * 4] if 0 < position <= self.history else b''
 
     def prefix_fingerprint(self):
         # Tokens are immutable bytes. Retaining the object avoids both repeated
@@ -208,7 +233,8 @@ class SessionLedger:
     def __init__(self, capacity, block_tokens, prepare_import, abort_import, commit_import, *, terminal_capture=False,
                  select_budget=None, gen_budget=None, checkpoint_policy='sealed',memory_config=None,
                  preserve_history=False, require_owned=False, pressure_policy='recency', freeze_prompt=False,
-                 guided_options=None):
+                 guided_options=None, prefix_image_scope='prefix images were not configured by the scheduler',
+                 prefix_image_model=''):
         if any(type(v) is not int or v <= 0 for v in (capacity, block_tokens)):
             raise ValueError('Session capacity and checkpoint block size must be positive')
         self.capacity, self.block_tokens = capacity, block_tokens
@@ -238,6 +264,13 @@ class SessionLedger:
         if type(require_owned) is not bool:
             raise ValueError('Owned-session requirement must be boolean')
         self.require_owned = require_owned
+        # Prefix images (serving/prefix_images.py): None when this serving
+        # configuration is inside their scope (scope_error), else why it is not.
+        self.prefix_image_scope = prefix_image_scope
+        self.prefix_image_model = '' if prefix_image_model is None else str(prefix_image_model)
+        self.prefix_images = None       # scheduler image index, created at the first registration
+        self.importing = {}             # native request id -> namespace being imported for it
+        self.import_declined = set()    # requests whose import failed: they prefill cold
 
     @staticmethod
     def namespace(request):
@@ -254,6 +287,7 @@ class SessionLedger:
         namespace = self.namespace(request)
         release = session_release_intent(getattr(request, 'kv_transfer_params', None),
             getattr(request, 'session_id', None), request.prompt_token_ids, self.output_tokens(request))
+        share = self._share_prefix_intent(request, namespace, release)
         if namespace is None:
             if self.require_owned:
                 raise ValueError('Block graph requests require an owned session namespace')
@@ -276,6 +310,9 @@ class SessionLedger:
             self.waits += 1
             return None
         if release:
+            if self.prefix_images is not None:
+                # Images registered by this session go with an explicit close.
+                self.commands.image_releases.extend(self.prefix_images.release_owner(namespace))
             if entry is not None:
                 # Wait for the existing generation's history, model snapshot
                 # and resident GPU leases to retire through the normal path.
@@ -396,6 +433,7 @@ class SessionLedger:
                 entry.pressure_restore = True
                 entry.restore_window = min(entry.history, budget -
                     (-entry.history % self.block_tokens))
+            entry.share_prefix = share
             entry.phase, entry.request_id = 'lookup', request.request_id
             self.requests[request.request_id] = entry
             try:
@@ -403,9 +441,13 @@ class SessionLedger:
             except Exception:
                 entry.phase, entry.request_id = 'idle', None
                 entry.pressure_restore, entry.restore_window = False, 0
+                entry.share_prefix = 0
                 del self.requests[request.request_id]
                 raise
             return entry.history
+        if self.prefix_images is not None and self._start_prefix_import(request, namespace):
+            self.waits += 1
+            return None
         self.cold_plan(request)
         if len(self.entries) >= self.capacity:
             if self.preserve_history and not self.idle_lru_eviction:
@@ -438,11 +480,15 @@ class SessionLedger:
             # All cache slots are in use. A new session may still run normally;
             # it cannot create a checkpoint or touch any existing namespace,
             # but must exclude another turn until this request finishes.
+            if share:
+                from .request_plan import RequestCapacityError
+                raise RequestCapacityError('kvmem_share_prefix: no session slot is free to retain the prefix')
             self.uncached_sessions[namespace] = request.request_id
             self.uncached_requests[request.request_id] = namespace
             return 0
         self.generation += 1
         entry = _Entry(namespace, self.generation, request.request_id)
+        entry.share_prefix = share
         from .request_plan import request_plan
         plan = request_plan(request,self.block_tokens,self.gen_budget) if self.gen_budget else None
         if plan is not None:
@@ -560,7 +606,8 @@ class SessionLedger:
             plan.message_spans if plan is not None else (),
             plan.locality_spans if plan is not None else (),
             plan.locality_provenance if plan is not None else (),
-            question_span=entry.question_span, question_id=entry.question_id))
+            question_span=entry.question_span, question_id=entry.question_id,
+            share_prefix=entry.share_prefix))
         self.hits += int(bool(external_tokens))
         self.misses += int(not external_tokens)
 
@@ -603,6 +650,15 @@ class SessionLedger:
         self.commands.captures.append(SessionCapture(request.request_id, entry.generation, position, tokens))
 
     def finished(self, request):
+        importing = self.importing.pop(request.request_id, None)
+        if importing is not None:
+            # Its session is still being materialized from a prefix image. The
+            # import completes and the orphan session is then evicted.
+            entry = self.entries.get(importing)
+            if entry is not None and entry.phase == 'importing':
+                entry.import_orphan = True
+            return
+        self.import_declined.discard(request.request_id)
         namespace = self.uncached_requests.pop(request.request_id, None)
         if namespace is not None:
             del self.uncached_sessions[namespace]
@@ -616,6 +672,7 @@ class SessionLedger:
                 self.abort_import(request.request_id)
                 entry.phase, entry.request_id = 'idle', None
                 entry.pressure_restore, entry.restore_window = False, 0
+                entry.share_prefix = 0
             else:
                 del self.entries[entry.namespace]
             return
@@ -641,6 +698,8 @@ class SessionLedger:
         self.commands.evictions.append(SessionEviction(entry.namespace, entry.generation))
 
     def consume(self, notice):
+        if notice.kind in _PREFIX_IMAGE_NOTICES:
+            return self._consume_prefix_image(notice)
         entry = self.entries.get(notice.namespace)
         # Idle observations can already be in a worker result when the next
         # scheduler iteration leases/evicts the scope. They are advisory and
@@ -666,6 +725,8 @@ class SessionLedger:
             if entry.phase != 'evicting' or notice.request_id or notice.history or notice.window:
                 raise ValueError('Unexpected session eviction completion')
             del self.entries[entry.namespace]
+            if self.prefix_images is not None:
+                self.prefix_images.forget_namespace(entry.namespace)
             return
         if entry.request_id != notice.request_id:
             raise ValueError('Session completion belongs to another native request')
@@ -730,6 +791,7 @@ class SessionLedger:
             entry.candidate_position, entry.candidate_tokens = 0, b''
             entry.terminal_position, entry.terminal_tokens = 0, b''
             entry.retained_position, entry.retained_tokens = 0, b''
+            entry.share_prefix = 0
             entry.request_id, entry.phase, entry.allocated = None, 'idle', False
             # Most recently retired session is the last idle eviction candidate.
             del self.entries[entry.namespace]
@@ -738,6 +800,8 @@ class SessionLedger:
             if notice.window:
                 raise ValueError('Empty checkpoint has a nonempty target frame')
             del self.entries[entry.namespace]
+            if self.prefix_images is not None:
+                self.prefix_images.forget_namespace(entry.namespace)
         del self.requests[notice.request_id]
 
     def take_commands(self):
@@ -745,7 +809,123 @@ class SessionLedger:
         return result
 
     def has_pending_work(self):
-        return any(e.phase in ('retiring', 'evicting') for e in self.entries.values())
+        return any(e.phase in ('retiring', 'evicting', 'importing') for e in self.entries.values())
 
     def import_scheduled(self, request_id):
         return any(b.request_id == request_id and b.history for b in self.commands.bindings)
+
+    # Prefix images (docs/prefix-sharing.md, serving/prefix_images.py) ---------
+
+    def _share_prefix_intent(self, request, namespace, release):
+        """Validated kv_transfer_params.kvmem_share_prefix of this request, or 0.
+
+        P must be the frozen prompt position this request captures; the worker
+        registers the idle P checkpoint as an image after the request retires.
+        """
+        params = getattr(request, 'kv_transfer_params', None)
+        if not isinstance(params, dict) or params.get('kvmem_share_prefix') is None:
+            return 0
+        from .request_plan import RequestCapacityError, request_plan
+        value = params['kvmem_share_prefix']
+
+        def refuse(reason):
+            raise RequestCapacityError('kvmem_share_prefix: ' + reason)
+        if type(value) is not int or value <= 0:
+            refuse('must be a positive integer token position')
+        if namespace is None or release:
+            refuse('requires an owned session (session_id) and cannot close it')
+        if self.prefix_image_scope is not None:
+            refuse('outside the prefix image scope: ' + self.prefix_image_scope)
+        if not self.gen_budget:
+            refuse('requires request planning')
+        if value % self.block_tokens or value >= request.num_prompt_tokens:
+            refuse('%d must be a block boundary before the end of the prompt' % value)
+        plan = request_plan(request, self.block_tokens, self.gen_budget)
+        point = plan.prefill_checkpoint(request.num_prompt_tokens) if plan is not None else None
+        if point != value:
+            refuse('%d is not the frozen prompt position of this request (%s)' % (value, point))
+        return value
+
+    def _start_prefix_import(self, request, namespace):
+        """A new session whose prompt starts with a registered image: materialize it
+        from the image (worker) instead of prefilling; the request waits until then.
+
+        A full ledger keeps today's rules (wait or evict) and retries later.
+        """
+        index = self.prefix_images
+        if (not index.images or request.request_id in self.import_declined or
+                len(self.entries) >= self.capacity):
+            return False
+        image = index.match(namespace[0], request.prompt_token_ids)
+        if image is None:
+            return False
+        from .prefix_images import SessionImport
+        self.generation += 1
+        entry = _Entry(namespace, self.generation, None, phase='importing')
+        entry.import_request, entry.import_key = request.request_id, image.key
+        self.entries[namespace] = entry
+        self.importing[request.request_id] = namespace
+        index.acquire(image.key)
+        self.commands.image_imports.append(SessionImport(namespace, entry.generation, image.key))
+        return True
+
+    def _consume_prefix_image(self, notice):
+        """Image registration and import notices. False: no other consumer
+        (CPU history credits, residency) reads the notice. Registration, image
+        release and pool notices also reach the historical CPU admission (pool
+        charge), which ignores the rest."""
+        if notice.kind == 'image_refused':
+            return False
+        if notice.kind in ('history_pool', 'image_released'):
+            return True
+        entry = self.entries.get(notice.namespace)
+        if notice.kind == 'image_registered':
+            if (entry is None or entry.generation != notice.generation or entry.phase != 'idle' or
+                    entry.prompt_tokens_for(notice.history) != notice.tokens):
+                # Only the idle parent holds the continuation state an import
+                # must reproduce (Query, pins, guided anchors); drop the image.
+                self.commands.image_releases.append(notice.key)
+                return True
+            if self.prefix_images is None:
+                from .prefix_images import PrefixImageIndex, max_image_bytes
+                from ..core.storage import prefix_pool_bytes
+                self.prefix_images = PrefixImageIndex(self.prefix_image_model,
+                                                      prefix_pool_bytes() or max_image_bytes())
+                self.prefix_images.entries = self.entries
+            self.commands.image_releases.extend(self.prefix_images.register(notice, entry))
+            return True
+        if (entry is None or entry.generation != notice.generation or entry.phase != 'importing' or
+                notice.request_id):
+            raise ValueError('Unexpected prefix image import completion')
+        index = self.prefix_images
+        key, request_id, orphan = entry.import_key, entry.import_request, entry.import_orphan
+        entry.import_key = entry.import_request = None
+        entry.import_orphan = False
+        if self.importing.get(request_id) == notice.namespace:
+            del self.importing[request_id]
+        image = index.images[key]       # an in-flight import holds a reference
+        if notice.kind == 'import_failed':
+            del self.entries[notice.namespace]
+            if not orphan:
+                self.import_declined.add(request_id)      # it prefills cold instead
+            self.commands.image_releases.extend(index.release_ref(key))
+            return False
+        if notice.history != key.position or not 0 < notice.window <= notice.history:
+            raise ValueError('Imported session differs from its prefix image')
+        # Exactly the idle state the parent session reached at P (retired notice).
+        entry.history, entry.window, entry.tokens = notice.history, notice.window, image.tokens
+        entry.active_records = notice.active_records
+        entry.ready_records = notice.ready_records
+        entry.allocated_records = notice.allocated_records
+        entry.protected_records = notice.protected_records
+        entry.scope_history = notice.history
+        for name, value in image.ledger.items():
+            setattr(entry, name, value)
+        entry.request_id, entry.phase, entry.allocated = None, 'idle', False
+        del self.entries[notice.namespace]
+        self.entries[notice.namespace] = entry
+        index.imported(key, notice.namespace)
+        self.commands.image_releases.extend(index.release_ref(key))
+        if orphan:
+            self._evict(entry)
+        return True

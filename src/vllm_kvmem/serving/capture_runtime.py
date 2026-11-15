@@ -1518,112 +1518,126 @@ class CaptureRuntime(EarlyCaptureFeedback):
         authority = self.authorities.get(request_id)
         if authority is None:
             sessions = getattr(self.runner,'_kvmem_sessions',None)
-            graph_enabled = (getattr(self.options, 'graph_mode', 'off') != 'off' and
-                             request_id not in getattr(sessions, 'release_requests', ()))
-            boundary_enabled = (getattr(self.options, 'historical_gc', None) is not None and
-                self.options.query_score_mode == 'key_fps_4' and not graph_enabled and
-                request_id not in getattr(sessions, 'release_requests', ()))
             binding = sessions.bindings.get(request_id) if sessions is not None else None
-            if (graph_enabled or boundary_enabled) and binding is None:
-                # Never allocate authority state for a graph with temporary
-                # request ownership; its logical identities would be unstable.
-                raise ValueError('Block graph requires an owned session binding')
-            from .authority import MeanIndexStats
-            if getattr(self, 'cpu_mean_index_stats', None) is None:
-                self.cpu_mean_index_stats = MeanIndexStats()
-            authority = RequestAuthority(request_id, self.config, self.archive,
-                len(self.layers), self.heads, self.dim, raw_dtype=self.raw_dtype,
-                resident_records=self.resident_records,
-                gc_config=self.gc_config, gc_progress=self.gc_progress,
-                scoring_layers=len(self.runner._kvmem_layers),mean_k_backend=self.options.mean_k_backend,
-                query_score_mode=getattr(self.options, 'query_score_mode', 'mean_k'),
-                query_window_cache_bytes=getattr(self.options, 'query_window_cache_bytes', 2147483648),
-                cpu_mean_index_simd=getattr(self.options, 'cpu_mean_index_simd', False),
-                cpu_reuse_record_views=getattr(self.options, 'cpu_reuse_record_views', False),
-                cpu_fuse_record_mean=getattr(self.options, 'cpu_fuse_record_mean', False),
-                fused_mean_stats=self.__dict__.setdefault('_fused_mean_stats', dict(records=0, batches=0)),
-                record_view_stats=self.__dict__.setdefault('_record_view_stats',
-                    dict(slot_exports=0, bound_records=0, finalize_records=0, sealed_records=0)),
-                cpu_release_sealed_sums=getattr(self.options, 'cpu_release_sealed_sums', False),
-                query_fps_cache_fp8=getattr(self.options, 'query_fps_cache_fp8', False),
-                mean_index_stats=self.cpu_mean_index_stats)
-            picker_name = getattr(self.options, 'strategy_picker', 'native')
-            if picker_name != 'native':
-                from ..strategy import PICKER, resolve
-                authority.memory.picker = resolve(PICKER, picker_name)
-            authority.graph_options = self.options
-            if binding is not None and getattr(self.archive, 'history_scope_metrics_path', None) is not None:
-                self.archive.set_history_scope_context(authority.memory.request_id,
-                    binding.namespace, binding.generation)
-            if (binding is not None and getattr(authority.gc, 'native_history', False) and
-                    request_id not in getattr(sessions, 'release_requests', ())):
-                # This exact working frame may become the next session's M
-                # checkpoint. Protect it before the first page becomes live;
-                # older GPU leases remain independently retireable.
-                authority.memory._store.set_protect_current_window(True)
-            if (getattr(self, 'redundancy_enabled', False) and
-                    request_id not in getattr(sessions, 'release_requests', ())):
-                if binding is None or not getattr(authority.gc, 'native_history', False):
-                    authority.close()
-                    raise ValueError('Redundancy requires native history and an owned session binding')
-                from ..core.historical_gc import RedundancyHistory
-                authority.redundancy_history = RedundancyHistory(authority.gc.scope,
-                    len(self.runner._kvmem_layers), self.heads, self.redundancy_query_heads, self.dim)
-                if getattr(self, 'thinking_enabled', False):
-                    from .thinking_history import ThinkingHistory
-                    authority.thinking_history = ThinkingHistory(authority.gc.scope, self.thinking_layout,
-                        self.config.block_tokens, self.thinking_max_pending_tokens,
-                        identity=(binding.namespace, binding.generation))
-            if boundary_enabled:
-                from .query_boundary_history import QueryBoundaryHistory
-                from .prompt_spans import install_selection_metadata
-                try:
-                    authority.query_boundaries = QueryBoundaryHistory(
-                        (binding.namespace, binding.generation),
-                        block_tokens=self.config.block_tokens,
-                        max_spans=self.config.repository_blocks*self.config.block_tokens)
-                    authority.graph_report_path = self.output/'block_graph.jsonl'
-                    install_selection_metadata(authority, binding, validated_prefix=0)
-                except BaseException:
-                    authority.close()
-                    raise
-            if getattr(self.options, 'query_fps_prebuild', False):
-                if getattr(self, 'fps_prebuild_manager', None) is None:
-                    from .query_fps_prebuild import FPSPrebuildManager
-                    device = (self.runner.device if self.options.query_fps_prebuild_device == 'cuda'
-                              else 'cpu')
-                    self.fps_prebuild_manager = FPSPrebuildManager(device=device,
-                        cpu_backend=getattr(self.options, 'query_fps_cpu_backend', 'torch'),
-                        cpu_workers=getattr(self.options, 'query_fps_cpu_workers', 8))
-                authority.fps_prebuild = self.fps_prebuild_manager.bind(authority)
-            if getattr(self,'action',None) is not None:
-                from .action_attention import ActionHistory
-                authority.action_history = ActionHistory(self.options,self.action.ids)
-            if graph_enabled:
-                from .block_graph import BlockGraph
-                try:
-                    authority.block_graph = BlockGraph((binding.namespace,binding.generation),
-                        self.config.block_tokens,topk=self.options.graph_attention_topk,
-                        min_mass=self.options.graph_attention_min_mass,
-                        max_bytes_per_session=self.options.graph_max_bytes_per_session,
-                        budget=self.block_graph_budget)
-                    authority.graph_options = self.options
-                    authority.graph_report_path = self.output/'block_graph.jsonl'
-                    from .prompt_spans import install_graph_metadata
-                    install_graph_metadata(authority.block_graph, binding, validated_prefix=0)
-                except BaseException:
-                    graph = getattr(authority,'block_graph',None)
-                    if graph is not None:
-                        graph.close()
-                    authority.close()
-                    raise
-            if self.options.query_history and sessions is not None and request_id in sessions.bindings:
-                from .query_history import QueryRelevance
-                authority.query_history = QueryRelevance(self.options.query_history_decay)
+            authority = self.build_authority(request_id, binding)
             self.authorities[request_id] = authority
             self.accepted[request_id] = self.rejected[request_id] = 0
             self.last_steps[request_id] = []
             self._snapshot_capacity(request_id, authority)
+        return authority
+
+    def build_authority(self, request_id, binding, *, graph_metadata=True):
+        """A new request authority with its session state attached, not registered.
+
+        _ensure_authority_locked registers it for a native request. A prefix-image
+        import (serving/prefix_images.py) builds the idle authority of a new
+        session this way: graph_metadata=False leaves the empty graph for the
+        imported checkpoint's graph snapshot instead of installing a request's
+        message spans.
+        """
+        sessions = getattr(self.runner,'_kvmem_sessions',None)
+        graph_enabled = (getattr(self.options, 'graph_mode', 'off') != 'off' and
+                         request_id not in getattr(sessions, 'release_requests', ()))
+        boundary_enabled = (getattr(self.options, 'historical_gc', None) is not None and
+            self.options.query_score_mode == 'key_fps_4' and not graph_enabled and
+            request_id not in getattr(sessions, 'release_requests', ()))
+        if (graph_enabled or boundary_enabled) and binding is None:
+            # Never allocate authority state for a graph with temporary
+            # request ownership; its logical identities would be unstable.
+            raise ValueError('Block graph requires an owned session binding')
+        from .authority import MeanIndexStats
+        if getattr(self, 'cpu_mean_index_stats', None) is None:
+            self.cpu_mean_index_stats = MeanIndexStats()
+        authority = RequestAuthority(request_id, self.config, self.archive,
+            len(self.layers), self.heads, self.dim, raw_dtype=self.raw_dtype,
+            resident_records=self.resident_records,
+            gc_config=self.gc_config, gc_progress=self.gc_progress,
+            scoring_layers=len(self.runner._kvmem_layers),mean_k_backend=self.options.mean_k_backend,
+            query_score_mode=getattr(self.options, 'query_score_mode', 'mean_k'),
+            query_window_cache_bytes=getattr(self.options, 'query_window_cache_bytes', 2147483648),
+            cpu_mean_index_simd=getattr(self.options, 'cpu_mean_index_simd', False),
+            cpu_reuse_record_views=getattr(self.options, 'cpu_reuse_record_views', False),
+            cpu_fuse_record_mean=getattr(self.options, 'cpu_fuse_record_mean', False),
+            fused_mean_stats=self.__dict__.setdefault('_fused_mean_stats', dict(records=0, batches=0)),
+            record_view_stats=self.__dict__.setdefault('_record_view_stats',
+                dict(slot_exports=0, bound_records=0, finalize_records=0, sealed_records=0)),
+            cpu_release_sealed_sums=getattr(self.options, 'cpu_release_sealed_sums', False),
+            query_fps_cache_fp8=getattr(self.options, 'query_fps_cache_fp8', False),
+            mean_index_stats=self.cpu_mean_index_stats)
+        picker_name = getattr(self.options, 'strategy_picker', 'native')
+        if picker_name != 'native':
+            from ..strategy import PICKER, resolve
+            authority.memory.picker = resolve(PICKER, picker_name)
+        authority.graph_options = self.options
+        if binding is not None and getattr(self.archive, 'history_scope_metrics_path', None) is not None:
+            self.archive.set_history_scope_context(authority.memory.request_id,
+                binding.namespace, binding.generation)
+        if (binding is not None and getattr(authority.gc, 'native_history', False) and
+                request_id not in getattr(sessions, 'release_requests', ())):
+            # This exact working frame may become the next session's M
+            # checkpoint. Protect it before the first page becomes live;
+            # older GPU leases remain independently retireable.
+            authority.memory._store.set_protect_current_window(True)
+        if (getattr(self, 'redundancy_enabled', False) and
+                request_id not in getattr(sessions, 'release_requests', ())):
+            if binding is None or not getattr(authority.gc, 'native_history', False):
+                authority.close()
+                raise ValueError('Redundancy requires native history and an owned session binding')
+            from ..core.historical_gc import RedundancyHistory
+            authority.redundancy_history = RedundancyHistory(authority.gc.scope,
+                len(self.runner._kvmem_layers), self.heads, self.redundancy_query_heads, self.dim)
+            if getattr(self, 'thinking_enabled', False):
+                from .thinking_history import ThinkingHistory
+                authority.thinking_history = ThinkingHistory(authority.gc.scope, self.thinking_layout,
+                    self.config.block_tokens, self.thinking_max_pending_tokens,
+                    identity=(binding.namespace, binding.generation))
+        if boundary_enabled:
+            from .query_boundary_history import QueryBoundaryHistory
+            from .prompt_spans import install_selection_metadata
+            try:
+                authority.query_boundaries = QueryBoundaryHistory(
+                    (binding.namespace, binding.generation),
+                    block_tokens=self.config.block_tokens,
+                    max_spans=self.config.repository_blocks*self.config.block_tokens)
+                authority.graph_report_path = self.output/'block_graph.jsonl'
+                install_selection_metadata(authority, binding, validated_prefix=0)
+            except BaseException:
+                authority.close()
+                raise
+        if getattr(self.options, 'query_fps_prebuild', False):
+            if getattr(self, 'fps_prebuild_manager', None) is None:
+                from .query_fps_prebuild import FPSPrebuildManager
+                device = (self.runner.device if self.options.query_fps_prebuild_device == 'cuda'
+                          else 'cpu')
+                self.fps_prebuild_manager = FPSPrebuildManager(device=device,
+                    cpu_backend=getattr(self.options, 'query_fps_cpu_backend', 'torch'),
+                    cpu_workers=getattr(self.options, 'query_fps_cpu_workers', 8))
+            authority.fps_prebuild = self.fps_prebuild_manager.bind(authority)
+        if getattr(self,'action',None) is not None:
+            from .action_attention import ActionHistory
+            authority.action_history = ActionHistory(self.options,self.action.ids)
+        if graph_enabled:
+            from .block_graph import BlockGraph
+            try:
+                authority.block_graph = BlockGraph((binding.namespace,binding.generation),
+                    self.config.block_tokens,topk=self.options.graph_attention_topk,
+                    min_mass=self.options.graph_attention_min_mass,
+                    max_bytes_per_session=self.options.graph_max_bytes_per_session,
+                    budget=self.block_graph_budget)
+                authority.graph_options = self.options
+                authority.graph_report_path = self.output/'block_graph.jsonl'
+                if graph_metadata:
+                    from .prompt_spans import install_graph_metadata
+                    install_graph_metadata(authority.block_graph, binding, validated_prefix=0)
+            except BaseException:
+                graph = getattr(authority,'block_graph',None)
+                if graph is not None:
+                    graph.close()
+                authority.close()
+                raise
+        if self.options.query_history and sessions is not None and request_id in sessions.bindings:
+            from .query_history import QueryRelevance
+            authority.query_history = QueryRelevance(self.options.query_history_decay)
         return authority
 
     def _snapshot_capacity(self, request_id, authority):

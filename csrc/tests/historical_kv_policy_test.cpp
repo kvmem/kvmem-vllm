@@ -163,6 +163,43 @@ static void byte_pressure_is_independent_of_slots() {
           "pending CPU bytes were not deducted");
 }
 
+// Shared prefixes: shared records free no bytes, so a scope byte budget is
+// met with private records only; a slot deficit may still take shared ones.
+static void shared_records_count_only_against_slots() {
+    auto shared = [](uint32_t slot, uint64_t age) {
+        auto b = block(slot, age, age);
+        b.shared = true;
+        b.cpu_bytes = 0;
+        return b;
+    };
+    HistoricalSnapshot s{7, 1, {shared(0, 1), shared(1, 2), block(2, 3, 3), block(3, 4, 4)}};
+    HistoricalPressure pressure;
+    pressure.ready_slots = 8;
+    pressure.scope_cpu_bytes = 400;       // two shared and two private records
+    pressure.scope_shared_bytes = 200;
+    pressure.scope_cpu_limit = 100;
+    check(pressure.scope_private_bytes() == 200, "private bytes include shared payloads");
+    HistoricalLruPolicy policy(8);
+    HistoricalDecisionBatch out(8);
+    auto result = policy.step(s, pressure, {8, 8}, out);
+    check(result.emitted == 1 && out.values()[0].handle.slot == 2,
+          "a byte budget retired a shared record or more than its private deficit");
+    out.clear_after_ack();
+    pressure.scope_cpu_limit = UINT64_MAX;
+    pressure.requested_ready_slots = 8;   // one slot short of the request
+    pressure.ready_slots = 7;
+    HistoricalLruPolicy slots_policy(8);
+    result = slots_policy.step(s, pressure, {8, 8}, out);
+    check(result.emitted == 1 && out.values()[0].handle.slot == 0,
+          "a slot deficit could not retire the oldest (shared) record");
+    out.clear_after_ack();
+    pressure.requested_ready_slots = 0;
+    pressure.scope_cpu_bytes = 200;
+    pressure.scope_shared_bytes = 200;    // nothing private: no byte deficit at all
+    pressure.scope_cpu_limit = 0;
+    check(!policy.wants_snapshot(pressure), "shared bytes created a private byte deficit");
+}
+
 static void refill_reuses_one_scan_and_observes_current_pressure() {
     HistoricalSnapshot s{7, 1, {}};
     for (uint32_t i = 0; i < 1024; ++i) s.blocks.push_back(block(i, i, i));
@@ -265,6 +302,7 @@ int main() {
         stale_intents_racing_with_slot_reuse_do_not_delete_new_generations();
         policy_only_emits_intents();
         byte_pressure_is_independent_of_slots();
+        shared_records_count_only_against_slots();
         refill_reuses_one_scan_and_observes_current_pressure();
         eligibility_is_a_policy_choice_and_snapshot_is_stable();
         factory_validates_parameters_and_preserves_policy_behavior();

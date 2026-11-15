@@ -206,10 +206,11 @@ std::vector<uint32_t> KvMemStore::chronological_ids() const {
     return ids;
 }
 
-void KvMemStore::register_repository_block(KvMemRepository::Lease lease, uint32_t baked_pos) {
+void KvMemStore::register_repository_block(KvMemRepository::Lease lease, uint32_t baked_pos,
+                                           bool current_frame) {
     require_no_repository_append();
     const uint32_t valid = lease ? lease.record().token_count : 0;
-    install_repository_block(std::move(lease), baked_pos, valid);
+    install_repository_block(std::move(lease), baked_pos, valid, current_frame);
 }
 
 void KvMemStore::require_no_repository_append() const {
@@ -218,7 +219,7 @@ void KvMemStore::require_no_repository_append() const {
 }
 
 void KvMemStore::install_repository_block(KvMemRepository::Lease lease, uint32_t baked_pos,
-                                         uint32_t valid_tokens) {
+                                         uint32_t valid_tokens, bool current_frame) {
     if (!repository_ || !lease)
         throw std::invalid_argument("bounded KVMem append requires a repository lease");
     auto verified = repository_->try_pin(lease.handle());
@@ -249,7 +250,7 @@ void KvMemStore::install_repository_block(KvMemRepository::Lease lease, uint32_t
     b.repository_generation = r.handle.generation;
     b.logical_id = r.logical_id;
     b.history_pos_start = r.token_begin;
-    b.in_current_frame = protect_current_window_;
+    b.in_current_frame = protect_current_window_ && current_frame;
     blocks_[slot] = b;
     repository_gc_flags_[slot] = 0; // never inherit backing/index validity from the old generation
     total_tokens_ = std::max(total_tokens_, r.token_begin + valid_tokens);

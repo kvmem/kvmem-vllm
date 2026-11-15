@@ -16,12 +16,22 @@
 
 namespace vllm_kvmem {
 namespace {
-constexpr unsigned shift = 60;
-constexpr uint64_t refs_mask = (uint64_t{1} << shift) - 1;
+// Control word: phase (bits 60-63), readers (bits 0-31), and for a shared
+// payload (docs/prefix-sharing.md, phase 2) its extra owners beyond the
+// publisher (bits 32-47) and how many of all owners are shared-prefix pool
+// owners (bits 48-59). A single-owner payload has no owner bits, so its
+// control words are exactly the values used before sharing existed.
+constexpr unsigned shift = 60, owner_shift = 32, pool_shift = 48;
+constexpr uint64_t refs_mask = (uint64_t{1} << owner_shift) - 1;
+constexpr uint64_t owner_unit = uint64_t{1} << owner_shift, owner_max = (uint64_t{1} << 16) - 1;
+constexpr uint64_t pool_unit = uint64_t{1} << pool_shift, pool_max = (uint64_t{1} << 12) - 1;
 enum class Phase : uint64_t { Empty, Initializing, Live, Retired, Releasing, Spilled };
 constexpr uint64_t control(Phase p, uint64_t refs = 0) { return (uint64_t(p) << shift) | refs; }
 Phase phase(uint64_t value) { return Phase(value >> shift); }
 uint64_t refs(uint64_t value) { return value & refs_mask; }
+uint64_t extra_owners(uint64_t value) { return (value >> owner_shift) & owner_max; }
+uint64_t pool_owners(uint64_t value) { return (value >> pool_shift) & pool_max; }
+enum class DropKind { Plain, Pool, Unshared };
 static_assert(std::atomic<uint64_t>::is_always_lock_free,
               "Historical payload lifetime requires lock-free 64-bit atomics");
 
@@ -178,6 +188,7 @@ struct HistoricalPayloadArena::Shared {
     std::atomic<uint64_t> released_slots{0}, released_bytes{0}, last_release_thread{0}, writers{0};
     std::atomic<uint64_t> external_owners{0}, external_bytes{0}, external_released_bytes{0};
     std::atomic<uint64_t> spilled_slots{0}, spilled_bytes{0};
+    std::atomic<uint64_t> shared_slots{0}, pool_slots{0};
     std::atomic<ExternalOwner::Node *> external_pending{nullptr};
     ExternalOwner::Node *external_local = nullptr; // Sole reclaimer ownership.
     uint32_t cursor = 0; // Exclusive reclaimer ownership, not a foreground lock.
@@ -188,6 +199,8 @@ struct HistoricalPayloadArena::Shared {
     void mark_retired(uint32_t slot) {
         dirty[slot / 64].fetch_or(uint64_t{1} << (slot % 64), std::memory_order_release);
     }
+
+    RetireResult drop(Handle h, DropKind kind);
 
     // Spilled -> Retired (no CPU bytes). Accounting is restored to the resident
     // form first so release_one's single accounting path stays balanced.
@@ -261,6 +274,9 @@ struct HistoricalPayloadArena::Shared {
                 if (phase(prior) == Phase::Live &&
                         entry.control.compare_exchange_strong(prior, control(Phase::Retired, refs(prior)),
                             std::memory_order_acq_rel, std::memory_order_acquire)) {
+                    // Shutdown retires every owner of a shared payload at once.
+                    if (extra_owners(prior)) shared_slots.fetch_sub(1, std::memory_order_relaxed);
+                    if (pool_owners(prior)) pool_slots.fetch_sub(1, std::memory_order_relaxed);
                     retired_bytes.fetch_add(config.record_bytes, std::memory_order_relaxed);
                     mark_retired(slot);
                 } else if (phase(prior) == Phase::Spilled) {
@@ -499,14 +515,31 @@ HistoricalPayloadArena::Read HistoricalPayloadArena::acquire(Handle h) const {
 }
 
 HistoricalPayloadArena::RetireResult HistoricalPayloadArena::retire(Handle h) {
-    auto shared = shared_;
-    if (h.slot >= shared->config.capacity || !h.generation) return RetireResult::StaleHandle;
-    auto &entry = shared->entries[h.slot];
+    return shared_->drop(h, DropKind::Plain);
+}
+
+HistoricalPayloadArena::RetireResult HistoricalPayloadArena::release_pool(Handle h) {
+    return shared_->drop(h, DropKind::Pool);
+}
+
+HistoricalPayloadArena::RetireResult HistoricalPayloadArena::retire_unshared(Handle h) {
+    return shared_->drop(h, DropKind::Unshared);
+}
+
+// One owner leaves (Plain: a publisher or alias descriptor, Pool: a shared-prefix
+// pool owner), or, for Unshared, the historical GC retires a payload only if its
+// sole owner is plain. The last owner's retirement, and every single-owner path,
+// is the original retirement unchanged.
+HistoricalPayloadArena::RetireResult HistoricalPayloadArena::Shared::drop(Handle h, DropKind kind) {
+    auto &shared = *this;
+    if (h.slot >= shared.config.capacity || !h.generation) return RetireResult::StaleHandle;
+    auto &entry = shared.entries[h.slot];
     auto prior = entry.control.load(std::memory_order_acquire);
     if (phase(prior) == Phase::Spilled) {
-        if (entry.generation.load(std::memory_order_relaxed) != h.generation)
+        // Spilled payloads always have a single plain owner (spill refuses others).
+        if (entry.generation.load(std::memory_order_relaxed) != h.generation || kind == DropKind::Pool)
             return RetireResult::StaleHandle;
-        return shared->retire_spilled(h.slot) ? RetireResult::Committed : RetireResult::Retry;
+        return shared.retire_spilled(h.slot) ? RetireResult::Committed : RetireResult::Retry;
     }
     for (unsigned attempt = 0; attempt < 16; ++attempt) {
         if (phase(prior) != Phase::Live && phase(prior) != Phase::Retired)
@@ -523,16 +556,80 @@ HistoricalPayloadArena::RetireResult HistoricalPayloadArena::retire(Handle h) {
         prior = entry.control.load(std::memory_order_acquire);
         for (unsigned retry = 0; retry < 16; ++retry) {
             if (phase(prior) == Phase::Retired) return RetireResult::AlreadyRetired;
+            const auto extra = extra_owners(prior), pools = pool_owners(prior);
+            if (kind == DropKind::Unshared) {
+                if (extra || pools) return RetireResult::Shared;   // other owners: change nothing
+            } else if (kind == DropKind::Pool ? !pools : extra + 1 == pools) {
+                return RetireResult::StaleHandle;   // no owner of this kind is left to drop
+            }
+            if (extra) {
+                const auto next = prior - owner_unit - (kind == DropKind::Pool ? pool_unit : 0);
+                if (entry.control.compare_exchange_weak(prior, next,
+                        std::memory_order_acq_rel, std::memory_order_acquire)) {
+                    if (extra == 1) shared.shared_slots.fetch_sub(1, std::memory_order_relaxed);
+                    if (kind == DropKind::Pool && pools == 1)
+                        shared.pool_slots.fetch_sub(1, std::memory_order_relaxed);
+                    return RetireResult::Shared;
+                }
+                continue;
+            }
             if (entry.control.compare_exchange_weak(prior, control(Phase::Retired, refs(prior)),
                     std::memory_order_acq_rel, std::memory_order_acquire)) {
-                shared->retired_bytes.fetch_add(shared->config.record_bytes, std::memory_order_relaxed);
-                shared->mark_retired(h.slot);
+                if (pools) shared.pool_slots.fetch_sub(1, std::memory_order_relaxed);
+                shared.retired_bytes.fetch_add(shared.config.record_bytes, std::memory_order_relaxed);
+                shared.mark_retired(h.slot);
                 return RetireResult::Committed;
             }
         }
         return RetireResult::Retry;
     }
     return RetireResult::Retry;
+}
+
+bool HistoricalPayloadArena::share(Handle h, bool pool) {
+    auto shared = shared_;
+    if (h.slot >= shared->config.capacity || !h.generation ||
+            shared->closing.load(std::memory_order_acquire)) return false;
+    auto &entry = shared->entries[h.slot];
+    auto prior = entry.control.load(std::memory_order_acquire);
+    while (true) {
+        if (phase(prior) != Phase::Live || refs(prior) == refs_mask) return false;
+        // A temporary reader keeps the slot's generation stable while it is checked.
+        if (!entry.control.compare_exchange_weak(prior, prior + 1,
+                std::memory_order_acq_rel, std::memory_order_acquire)) continue;
+        break;
+    }
+    struct Guard {
+        std::atomic<uint64_t> &value;
+        ~Guard() { value.fetch_sub(1, std::memory_order_release); }
+    } guard{entry.control};
+    if (entry.generation.load(std::memory_order_relaxed) != h.generation ||
+            shared->closing.load(std::memory_order_acquire)) return false;
+    prior = entry.control.load(std::memory_order_acquire);
+    while (true) {
+        if (phase(prior) != Phase::Live) return false;
+        const auto extra = extra_owners(prior), pools = pool_owners(prior);
+        if (extra == owner_max || (pool && pools == pool_max)) return false;
+        if (entry.control.compare_exchange_weak(prior, prior + owner_unit + (pool ? pool_unit : 0),
+                std::memory_order_acq_rel, std::memory_order_acquire)) {
+            if (!extra) shared->shared_slots.fetch_add(1, std::memory_order_relaxed);
+            if (pool && !pools) shared->pool_slots.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+    }
+}
+
+HistoricalPayloadArena::Owners HistoricalPayloadArena::owners(Handle h) const {
+    Owners result;
+    if (h.slot >= shared_->config.capacity || !h.generation) return result;
+    const auto &entry = shared_->entries[h.slot];
+    const auto value = entry.control.load(std::memory_order_acquire);
+    if (entry.generation.load(std::memory_order_relaxed) != h.generation) return result;
+    if (phase(value) == Phase::Live || phase(value) == Phase::Spilled) {
+        result.total = static_cast<uint32_t>(extra_owners(value) + 1);
+        result.pool = static_cast<uint32_t>(pool_owners(value));
+    }
+    return result;
 }
 
 bool HistoricalPayloadArena::spill(Handle h) {
@@ -618,8 +715,9 @@ HistoricalPayloadArena::Stats HistoricalPayloadArena::stats() const {
     LOAD(used_slots); LOAD(used_bytes); LOAD(retired_bytes); LOAD(readers);
     LOAD(released_slots); LOAD(released_bytes); LOAD(last_release_thread);
     LOAD(external_owners); LOAD(external_bytes); LOAD(external_released_bytes);
-    LOAD(spilled_slots); LOAD(spilled_bytes);
+    LOAD(spilled_slots); LOAD(spilled_bytes); LOAD(shared_slots); LOAD(pool_slots);
 #undef LOAD
+    result.unique_bytes = result.used_bytes;   // every resident payload is counted once
     if (shared_->pool) {
         result.pool_hits = shared_->pool->hits();
         result.pool_misses = shared_->pool->misses();

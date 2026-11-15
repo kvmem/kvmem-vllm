@@ -235,6 +235,16 @@ class SessionWorker:
             raise RuntimeError('Namespace reuse precedes exact session swap release')
         self.release_requests.update(getattr(commands, 'release_requests', ()))
         self._receive_history_capacity(getattr(commands, 'history_capacity', ()))
+        image_releases = getattr(commands, 'image_releases', ())
+        image_imports = getattr(commands, 'image_imports', ())
+        if image_releases or image_imports:
+            # Prefix images (serving/prefix_images.py): drop released images, then
+            # materialize new sessions as idle frozen P checkpoints.
+            if any(command.namespace in retained_namespaces for command in image_imports):
+                raise RuntimeError('Namespace reuse precedes exact session swap release')
+            from .prefix_images import import_commands, release_images
+            release_images(self, image_releases)
+            import_commands(self, image_imports)
         for binding in commands.bindings:
             if binding.request_id in self.bindings:
                 raise ValueError('Duplicate worker session binding')
@@ -802,6 +812,10 @@ class SessionWorker:
                             (report.get('terminal_prefix') or {}).get('status') in
                             ('FINISHED_STOPPED', 'FINISHED_LENGTH_CAPPED')),
             allocated_records=allocated, protected_records=protected))
+        if getattr(binding, 'share_prefix', 0):
+            # kvmem_share_prefix: this idle frozen P becomes a prefix image.
+            from .prefix_images import register_image
+            register_image(self, binding, checkpoint)
         if historical:
             self._history_capacity_sent[binding.namespace] = (binding.generation, checkpoint.position,
                 checkpoint.authority.memory.repository.ready_slots, allocated, protected)
@@ -823,6 +837,11 @@ class SessionWorker:
         if binding is not None:
             self.completed.append(SessionNotice('retired', binding.namespace, binding.generation, request_id))
             del self.identities[binding.namespace]
+            if getattr(binding, 'share_prefix', 0):
+                from .prefix_images import emit
+                emit(self, 'refused', reason='the request retained no prompt checkpoint',
+                     namespace=list(binding.namespace), generation=binding.generation,
+                     request_id=request_id, position=binding.share_prefix)
 
     def evict(self, commands):
         for command in commands:
@@ -897,6 +916,7 @@ class SessionWorker:
         self.pool.poll_captures()
         self._poll_evictions()
         self._poll_idle_history()
+        self._pool_notice()
         result, self.completed = self.completed, []
         return result
 
@@ -919,6 +939,41 @@ class SessionWorker:
                 self._history_capacity_sent[namespace] = state
             self._history_idle.append(namespace)
             self._history_idle_queued.add(namespace)
+
+    def _protected_private(self, checkpoint, authority, shared):
+        """_history_rows' protected archived records, excluding pool-charged ones."""
+        frames = [checkpoint]
+        prompt = self.pool.prompts.get(checkpoint.namespace)
+        if prompt is not None:
+            frames.append(prompt)
+        protected = {(slot, generation) for frame in frames for slot, generation, *_ in frame.window.records}
+        for frame in frames:
+            layerwise = getattr(frame, 'layerwise_pressure', None)
+            if getattr(layerwise, 'gc_hold', None) is not None:
+                protected.update((row[0], row[1]) for rows in layerwise.maps for row in rows)
+        cfg = authority.memory.config
+        for record in islice(authority.records.values(), cfg.sink_blocks):
+            if record.history_begin < cfg.sink_blocks*cfg.block_tokens:
+                protected.add((record.handle.slot, record.handle.generation))
+        for record in islice(reversed(authority.records.values()), cfg.recent_blocks):
+            if record.history_begin+record.count > authority.history_end-cfg.recent_blocks*cfg.block_tokens:
+                protected.add((record.handle.slot, record.handle.generation))
+        return sum(key not in shared and key in authority.records and authority.records[key].archived
+                   for key in protected)
+
+    def _pool_notice(self):
+        """Shared-prefix pool size for the scheduler, when it changed."""
+        archive = getattr(self.runtime, 'archive', None) if self.runtime is not None else None
+        tier = getattr(archive, 'tier', None)
+        active = getattr(tier, 'pool_active', None)
+        last = self.__dict__.get('_pool_sent')
+        if active is None or (last is None and not active()):
+            return
+        state = tier.pool_state()
+        if state != last:
+            self._pool_sent = state
+            from .prefix_images import HistoryPoolNotice
+            self.completed.append(HistoryPoolNotice(records=state[0], draining=state[1]))
 
     def _receive_history_capacity(self, requests):
         from .prompt_checkpoints import CheckpointPhase
@@ -944,11 +999,28 @@ class SessionWorker:
 
     def _history_rows(self, checkpoint):
         authority = checkpoint.authority
-        allocated = authority.archive.namespace_allocated_records(authority.memory.request_id)
+        archive = authority.archive
+        allocated = archive.namespace_allocated_records(authority.memory.request_id)
         # Retain index-only partial tails and already detached index owners in
         # the same conservative record envelope until their native release.
         index_only = authority._resident_count + len(authority.gc.pending_index)
         allocated += index_only
+        held = authority.__dict__.get('_prefix_shared_keys')
+        if held:
+            # Shared prefixes: descriptors charged to the shared-prefix pool are not
+            # this session's; its own MeanK index of each shared record (live, or
+            # retired with its index owner still pending) is, as a fraction of the
+            # per-record charge. Counting by index owner keeps the figure from
+            # growing while GC retires a shared record. Protection counts private
+            # records only.
+            from .prefix_images import index_records
+            pending = authority.gc.pending_index
+            held.intersection_update(authority.records.keys() | pending.keys())
+            shared = archive.namespace_shared_records(authority.memory.request_id)[0]
+            pending_shared = sum(key in held for key in pending)
+            allocated += index_records(archive, len(held)) - len(shared) - pending_shared
+            return allocated, (self._protected_private(checkpoint, authority, held | shared) +
+                               index_only - pending_shared)
         frames = [checkpoint]
         prompt = self.pool.prompts.get(checkpoint.namespace)
         if prompt is not None:
