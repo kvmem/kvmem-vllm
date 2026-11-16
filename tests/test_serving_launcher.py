@@ -662,3 +662,26 @@ def test_elastic_prefill_attention_requires_and_forwards_bounded_chunk(tmp_path)
     cfg['refresh_quantum_tokens']=4096
     with pytest.raises(ValueError,match='asynchronous refresh'):
         build_elastic_launch(cfg,tmp_path,tmp_path/'invalid')
+
+
+@pytest.mark.parametrize("with_gc",[False,True])
+def test_native_split_policy_survives_profile_relaunch(tmp_path,with_gc):
+    cfg=profile(tmp_path)
+    policy=dict(max_split_size_mb=64)
+    if with_gc:
+        policy.update(garbage_collection_threshold=.9,per_process_memory_fraction=.99)
+    cfg["cuda_allocator_conf"]=policy
+    plan=build_launch(cfg,tmp_path,tmp_path/"split")
+    expected=("backend:native,"+
+        ("garbage_collection_threshold:0.9,per_process_memory_fraction:0.99," if with_gc else "")+
+        "max_split_size_mb:64")
+    assert plan["environment"]["PYTORCH_ALLOC_CONF"]==expected
+    assert plan["environment"]["PYTORCH_CUDA_ALLOC_CONF"]==expected
+    assert build_launch(plan["profile"],tmp_path,tmp_path/"again")["environment"]["PYTORCH_ALLOC_CONF"]==expected
+
+
+@pytest.mark.parametrize("size",[True,0,20,64.0,"64"])
+def test_native_split_policy_rejects_invalid_size(tmp_path,size):
+    cfg=profile(tmp_path);cfg["cuda_allocator_conf"]={"max_split_size_mb":size}
+    with pytest.raises(ValueError,match="max_split_size_mb"):
+        build_launch(cfg,tmp_path,tmp_path/"bad-split")

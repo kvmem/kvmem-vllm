@@ -41,3 +41,68 @@ def test_mtp_inherited_fp8_does_not_enter_dflash_patch(monkeypatch):
     # No DFlash model is provided: it must not even be accessed.
     runner = SimpleNamespace(speculative_config=SimpleNamespace(method='mtp', quantization='fp8'))
     install_quantized_context(runner)
+
+
+@pytest.mark.parametrize('quantization', [None, 'fp8', 'compressed-tensors'])
+def test_other_draft_modes_do_not_patch_loader(monkeypatch, quantization):
+    import vllm_kvmem.adapters.draft_quantization as adapter
+
+    def forbidden():
+        raise AssertionError('Unrelated model load must not import DFlash2')
+
+    monkeypatch.setattr(adapter, '_native_dflash2_type', forbidden)
+    runner = NS(speculative_config=NS(method='mtp', quantization=quantization))
+    with adapter.prepare_quantized_context(runner):
+        pass
+    if quantization != 'compressed-tensors':
+        runner.speculative_config.method = 'dflash'
+        with adapter.prepare_quantized_context(runner):
+            pass
+
+
+@pytest.mark.parametrize('fail_load', [False, True])
+def test_packed_draft_load_keeps_native_codec_and_restores_class(monkeypatch, fail_load):
+    import vllm_kvmem.adapters.draft_quantization as adapter
+    import vllm_kvmem.adapters.draft_contract as contract
+
+    class Parent:
+        def _build_context_kv_buffers(self, *args):
+            raise AssertionError('BF16 weight buffer must not read packed storage')
+
+    class Model(Parent):
+        pass
+
+    monkeypatch.setattr(adapter, '_native_dflash2_type', lambda: Model)
+    monkeypatch.setattr(contract, 'verify_draft_sources', lambda: None)
+    torch.manual_seed(91)
+    weights = [torch.randn(8, 5) for _ in range(2)]
+    calls = []
+
+    class PackedProjection:
+        # Packed layers expose no ordinary .weight. The native codec owns math.
+        def __init__(self, index): self.index = index
+        def __call__(self, x):
+            calls.append(self.index)
+            return torch.nn.functional.linear(x, weights[self.index]), None
+
+    model = Model()
+    model.hidden_norm = torch.nn.LayerNorm(5)
+    attns = [NS(qkv_proj=PackedProjection(i), q_size=4, kv_size=2,
+                k_norm=NS(weight=torch.ones(2))) for i in range(2)]
+    model.layers = [NS(self_attn=a) for a in attns]
+    runner = NS(speculative_config=NS(method='dflash', quantization=None,
+        draft_model_config=NS(quantization='compressed-tensors')))
+    try:
+        with adapter.prepare_quantized_context(runner):
+            model._build_context_kv_buffers(attns, False)
+            if fail_load:
+                raise RuntimeError('loader failure')
+    except RuntimeError as error:
+        assert fail_load and str(error) == 'loader failure'
+    assert '_build_context_kv_buffers' not in Model.__dict__
+    inputs = torch.randn(3, 5)
+    keys, values = model._project_context_kv(inputs, 3, 2, 1, 2)
+    expected = [torch.nn.functional.linear(model.hidden_norm(inputs), w) for w in weights]
+    assert calls == [0, 1]
+    torch.testing.assert_close(keys, torch.stack([x[:,4:6].reshape(3,1,2) for x in expected]))
+    torch.testing.assert_close(values, torch.stack([x[:,6:8].reshape(3,1,2) for x in expected]))

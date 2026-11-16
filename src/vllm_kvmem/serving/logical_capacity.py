@@ -25,7 +25,9 @@ def physical_config(config):
     transfer = getattr(config, 'kv_transfer_config', None)
     payload = getattr(transfer, 'kv_connector_extra_config', {}) or {}
     incremental = payload.get('kvmem', {}).get('gpu_memory_admission') == 'incremental'
-    if not recall and not finite_history and not incremental and config.model_config.max_model_len <= 1048576:
+    bounded_dflash = (_settings.get('KVMEM_LOGICAL_KV_CAPACITY') == '1' and
+        getattr(getattr(config, 'speculative_config', None), 'method', None) == 'dflash')
+    if not recall and not finite_history and not incremental and not bounded_dflash and config.model_config.max_model_len <= 1048576:
         return config
     transfer = config.kv_transfer_config
     if (transfer is None or transfer.kv_connector != 'KVMemConnector' or
@@ -33,6 +35,26 @@ def physical_config(config):
             config.scheduler_config.scheduler_cls != 'vllm_kvmem.serving.scheduler.KVMemScheduler'):
         raise ValueError('Bounded logical KV planning requires the owned KVMem scheduler/connector')
     options = RuntimeOptions.from_vllm(config)
+    if bounded_dflash:
+        from ..adapters.draft_contract import DraftContract
+        contract = DraftContract.from_vllm(config, options.memory)
+        frame = options.memory.select_budget + options.memory.gen_budget
+        if (contract.query_tokens != 2 or recall or finite_history or incremental or options.historical_gc is not None or
+                not options.request_planning or not options.rolling_active_window or
+                not options.cpu_history_coordination or not options.cpu_progress_reserve or
+                not options.session_capacity or options.async_refresh or options.async_restore or
+                config.cache_config.num_gpu_blocks_override is not None or
+                config.model_config.original_max_model_len == -1 or
+                not frame < config.model_config.max_model_len <= contract.max_position or
+                getattr(config.parallel_config, 'tensor_parallel_size', 1) not in (1, 2) or
+                any(getattr(config.parallel_config, field, 1) != 1 for field in
+                    ('pipeline_parallel_size','decode_context_parallel_size',
+                     'prefill_context_parallel_size'))):
+            raise ValueError('Unqualified DFlash2 bounded logical KV planning configuration')
+        result = copy(config)
+        result.model_config = copy(config.model_config)
+        result.model_config.max_model_len = frame
+        return result
     if incremental:
         if (recall or finite_history or config.scheduler_config.async_scheduling or
                 config.cache_config.enable_prefix_caching or config.cache_config.mamba_cache_mode != 'none' or
@@ -86,15 +108,40 @@ def physical_config(config):
     return result
 
 
-def check_specs(specs):
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
-    if len(specs) != 1 or not specs[0]:
-        raise ValueError('Bounded logical planning requires one populated worker')
-    if not any(type(spec) is FullAttentionSpec for spec in specs[0].values()):
-        raise ValueError('No bounded full-attention cache')
-    for spec in specs[0].values():
-        if type(spec) not in (FullAttentionSpec, MambaSpec):
-            raise ValueError('Unsupported cache type for bounded logical planning')
+def check_specs(specs, *, allow_dflash=False, expected_workers=1):
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
+    if (expected_workers not in ((1, 2) if allow_dflash else (1,)) or
+            len(specs) != expected_workers or any(not row for row in specs)):
+        raise ValueError('Bounded logical planning requires every declared worker')
+    # TP ranks own disjoint heads with identical local cache geometry. Native
+    # planning still receives each rank's available bytes independently.
+    if any(row != specs[0] for row in specs[1:]):
+        raise ValueError('DFlash2 TP workers disagree on local cache geometry')
+    for row in specs:
+        if not any(type(spec) is FullAttentionSpec for spec in row.values()):
+            raise ValueError('No bounded full-attention cache')
+        for spec in row.values():
+            if allow_dflash and type(spec) is SlidingWindowSpec:
+                import torch
+                if spec.dtype != torch.bfloat16 or spec.sliding_window != 2048:
+                    raise ValueError('Unqualified DFlash2 sliding cache for bounded planning')
+            elif type(spec) not in (FullAttentionSpec, MambaSpec):
+                raise ValueError('Unsupported cache type for bounded logical planning')
+
+
+
+def window_owner_pages(group, config, frame):
+    from vllm.v1.kv_cache_interface import SlidingWindowSpec, UniformTypeKVCacheSpecs
+    spec = group.kv_cache_spec
+    first = spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
+    if (getattr(config.speculative_config, 'method', None) == 'dflash' and
+            type(first) is SlidingWindowSpec):
+        # Match NativeCapacity: sliding pages recycle before allocation, while
+        # one extra DFlash query block can be in flight beyond target tokens.
+        lookahead = config.speculative_config.num_speculative_tokens + 1
+        return first.max_admission_blocks_per_request(
+            config.max_in_flight_tokens + lookahead, frame)
+    return spec.max_num_blocks_per_req(config, frame)
 
 
 def wrap_planner(original):
@@ -106,7 +153,11 @@ def wrap_planner(original):
         bounded = physical_config(vllm_config)
         if bounded is vllm_config:
             return original(vllm_config, kv_cache_specs, available_memory)
-        check_specs(kv_cache_specs)
+        check_specs(kv_cache_specs,
+            allow_dflash=getattr(vllm_config.speculative_config, 'method', None) == 'dflash',
+            expected_workers=getattr(vllm_config.parallel_config, 'tensor_parallel_size', 1))
+        if len(available_memory) != len(kv_cache_specs):
+            raise ValueError('Missing worker memory budget')
         # Native code may unify the input spec dictionaries. Isolate its mapping
         # mutations as well; immutable KVCacheSpec objects themselves are shared.
         result = original(bounded, [dict(row) for row in kv_cache_specs], available_memory)
@@ -115,8 +166,8 @@ def wrap_planner(original):
             'kvmem', {}).get('gpu_memory_admission') == 'incremental')
         rows = []
         for cache in result:
-            per_owner = sum(group.kv_cache_spec.max_num_blocks_per_req(
-                bounded, bounded.model_config.max_model_len) for group in cache.kv_cache_groups)
+            per_owner = sum(window_owner_pages(group, bounded,
+                bounded.model_config.max_model_len) for group in cache.kv_cache_groups)
             required_owners = 1 if incremental else owners
             needed = required_owners*per_owner + 1  # native null page is never available
             if needed > cache.num_blocks:

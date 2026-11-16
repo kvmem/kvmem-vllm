@@ -22,15 +22,17 @@ class Checkpoint:
     tensors: dict[str, torch.Tensor]
     event: torch.cuda.Event | None
     leases: tuple
+    source_device: torch.device | None = None
 
 
 class StateCheckpoints:
-    def __init__(self, request_id: str, max_bytes: int, capacity: int = 2):
+    def __init__(self, request_id: str, max_bytes: int, capacity: int = 2, *, offload_to_cpu: bool = False):
         if not request_id or max_bytes <= 0 or capacity <= 0:
             raise ValueError("Invalid checkpoint budget")
         self.request_id = request_id
         self.max_bytes = max_bytes
         self.capacity = capacity
+        self.offload_to_cpu = offload_to_cpu
         self.epoch = 0
         self.checkpoints: dict[int, Checkpoint] = {}
 
@@ -50,14 +52,23 @@ class StateCheckpoints:
         devices = {t.device for t in state.values()}
         if len(devices) != 1:
             raise ValueError("A checkpoint must belong to one rank/device")
-        tensors = {name: tensor.clone() for name, tensor in state.items()}
         device = next(iter(devices))
+        if self.offload_to_cpu:
+            # The model stream orders D2H before any provisional forward can
+            # overwrite these pages. Retain pinned storage until the restore
+            # fence completes, just as device snapshots retain their storage.
+            tensors = {name: torch.empty_like(tensor, device="cpu",
+                pin_memory=device.type == "cuda") for name, tensor in state.items()}
+            for name, tensor in state.items():
+                tensors[name].copy_(tensor, non_blocking=device.type == "cuda")
+        else:
+            tensors = {name: tensor.clone() for name, tensor in state.items()}
         event = None
         if device.type == "cuda":
             event = torch.cuda.Event()
             event.record(torch.cuda.current_stream(device))
         checkpoint = Checkpoint(StateIdentity(self.request_id, self.epoch, position),
-                                tensors, event, tuple(leases))
+                                tensors, event, tuple(leases), device)
         self.checkpoints[position] = checkpoint
         return checkpoint
 
@@ -70,13 +81,17 @@ class StateCheckpoints:
             raise ValueError("Incomplete model state; refusing partial restore")
         for name, dest in state.items():
             source = checkpoint.tensors[name]
-            if source.shape != dest.shape or source.dtype != dest.dtype or source.device != dest.device:
+            expected_device = checkpoint.source_device or source.device
+            storage_valid = (source.device.type == "cpu" and
+                (dest.device.type != "cuda" or source.is_pinned())) if self.offload_to_cpu else source.device == dest.device
+            if (source.shape != dest.shape or source.dtype != dest.dtype or
+                    dest.device != expected_device or not storage_valid):
                 raise ValueError(f"State schema changed for {name}")
         device = next(iter(state.values())).device
         if checkpoint.event is not None:
             torch.cuda.current_stream(device).wait_event(checkpoint.event)
         for name, dest in state.items():
-            dest.copy_(checkpoint.tensors[name])
+            dest.copy_(checkpoint.tensors[name], non_blocking=self.offload_to_cpu and device.type == "cuda")
         # Return a restore completion fence; callers retain this checkpoint until
         # it completes before dropping its model/page owners or reusing storage.
         event = None

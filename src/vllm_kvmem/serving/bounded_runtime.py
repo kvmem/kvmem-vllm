@@ -55,6 +55,11 @@ def install_bounded_target(runner):
         from ..adapters.draft_contract import DraftContract
         from ..core.options import RuntimeOptions
         draft_contract = DraftContract.from_vllm(runner.vllm_config, RuntimeOptions.from_vllm(runner.vllm_config).memory)
+    cpu_query_checkpoint = _settings.get('KVMEM_QUERY_CHECKPOINT_CPU') == '1'
+    if cpu_query_checkpoint and (draft_contract is None or
+            getattr(runner.speculative_config, 'method', None) != 'dflash' or
+            draft_contract.query_tokens != 2 or options.async_refresh):
+        raise ValueError('CPU query checkpoints require synchronous DFlash2 k=1')
     runner._kvmem_draft_contract = draft_contract
     if (runner.vllm_config.max_concurrent_batches != 1 or
             runner.vllm_config.cache_config.enable_prefix_caching or
@@ -163,7 +168,8 @@ def install_bounded_target(runner):
         if needs_state:
             state_adapter = NativeRecurrentState(runner)
             bundle = state_adapter.borrow(batch.req_ids)
-            checkpoints = StateCheckpoints("bounded-query", bundle.bytes, capacity=1)
+            checkpoints = StateCheckpoints("bounded-query", bundle.bytes, capacity=1,
+                offload_to_cpu=cpu_query_checkpoint)
             before = checkpoints.capture(0, bundle.tensors)
             if audit_guided:
                 from .guided_query import snapshot_guided_draft
@@ -343,6 +349,8 @@ def install_bounded_target(runner):
                 "local_tokens_before": local_tokens_before,
                 "rebuilt_tokens": assembly.rebuilt_tokens, "skipped_tokens": assembly.skipped_tokens,
                 "batch_requests": list(batch.req_ids), "probe_executed": needs_probe,
+                "query_checkpoint_storage": "cpu-pinned" if needs_state and cpu_query_checkpoint else "gpu",
+                "query_checkpoint_bytes": bundle.bytes if needs_state else 0,
                 "query_score_tokens": score_query, "draft_groups": list(draft_groups),
                 "guided_query_tokens":guided_tokens,"guided_prompt_tokens":guided_prompt_tokens,
                 "guided_seconds":guided_seconds,

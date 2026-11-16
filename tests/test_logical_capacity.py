@@ -241,3 +241,77 @@ def test_already_imported_core_alias_is_updated_and_idempotent(monkeypatch):
     assert first.__wrapped__ is original
     adapter.enable()
     assert core.get_kv_cache_configs is first
+
+
+def dflash_config(tmp_path):
+    cfg=config(tmp_path)
+    cfg.model_config.max_model_len=cfg.model_config.original_max_model_len=221184
+    cfg.scheduler_config.max_num_seqs=4
+    cfg.max_concurrent_batches=1
+    cfg.num_lookahead_tokens=2
+    cfg.kv_transfer_config.kv_connector_extra_config["kvmem"].update(
+        select_budget=32768,gen_budget=16384,recent_blocks=64,
+        historical_gc=None,async_refresh=False,async_restore=False,maintenance_max_steps=0)
+    cfg.speculative_config.method="dflash"
+    cfg.speculative_config.num_speculative_tokens=1
+    cfg.speculative_config.draft_model_config=NS(dtype=torch.bfloat16,hf_config=NS(
+        architectures=["DFlash2DraftModel"],dflash_config={"block_size":8},
+        sliding_window=2048,num_hidden_layers=5,layer_types=["sliding_attention"]*5,
+        use_sliding_window=True,max_position_embeddings=262144))
+    return cfg
+
+
+def test_dflash_window_planning_is_explicit_and_preserves_full_logical_limit(tmp_path,monkeypatch):
+    cfg=dflash_config(tmp_path)
+    assert physical_config(cfg) is cfg
+    monkeypatch.setenv("KVMEM_LOGICAL_KV_CAPACITY","1")
+    bounded=physical_config(cfg)
+    assert bounded.model_config.max_model_len==49152
+    assert bounded.model_config.original_max_model_len==221184
+    assert cfg.model_config.max_model_len==221184
+    assert bounded.kv_transfer_config is cfg.kv_transfer_config
+
+
+def test_dflash_all_owner_admission_still_rejects_insufficient_pages(tmp_path,monkeypatch):
+    from vllm.v1.kv_cache_interface import FullAttentionSpec,SlidingWindowSpec
+    cfg=dflash_config(tmp_path);monkeypatch.setenv("KVMEM_LOGICAL_KV_CAPACITY","1")
+    full=FullAttentionSpec(block_size=32,num_kv_heads=4,head_size=128,dtype=torch.float8_e4m3fn)
+    draft=SlidingWindowSpec(block_size=32,num_kv_heads=4,head_size=128,dtype=torch.bfloat16,sliding_window=2048)
+    caches=[{"full":full,"draft":draft}]
+    group=NS(kv_cache_spec=NS(max_num_blocks_per_req=lambda config,length:87))
+    def native(config,specs,memory):
+        assert config.model_config.max_model_len==49152
+        assert specs==caches and specs[0] is not caches[0]
+        return [NS(kv_cache_groups=[group],num_blocks=132)]
+    with pytest.raises(ValueError,match="cannot fit 4.*need 349.*have 132"):
+        wrap_planner(native)(cfg,caches,[4*2**30])
+    cfg.scheduler_config.max_num_seqs=1
+    assert wrap_planner(native)(cfg,caches,[4*2**30])[0].num_blocks==132
+    with pytest.raises(ValueError,match="Unsupported cache"):
+        check_specs(caches)
+
+
+@pytest.mark.parametrize("change",["async","apc","rolling","cpu","tp","positions","override"])
+def test_dflash_logical_planning_keeps_contract_guards(tmp_path,monkeypatch,change):
+    cfg=dflash_config(tmp_path);monkeypatch.setenv("KVMEM_LOGICAL_KV_CAPACITY","1")
+    opts=cfg.kv_transfer_config.kv_connector_extra_config["kvmem"]
+    if change=="async":opts["async_refresh"]=True
+    if change=="apc":cfg.cache_config.enable_prefix_caching=True
+    if change=="rolling":opts["rolling_active_window"]=False
+    if change=="cpu":opts["cpu_progress_reserve"]=False
+    if change=="tp":cfg.parallel_config.tensor_parallel_size=4
+    if change=="positions":cfg.model_config.max_model_len=262145
+    if change=="override":cfg.cache_config.num_gpu_blocks_override=100000
+    with pytest.raises(ValueError):physical_config(cfg)
+
+
+def test_dflash_sliding_page_budget_matches_runtime_admission(tmp_path):
+    from vllm.v1.kv_cache_interface import SlidingWindowSpec,FullAttentionSpec
+    from vllm_kvmem.serving.logical_capacity import window_owner_pages
+    cfg=dflash_config(tmp_path);cfg.max_in_flight_tokens=520
+    sliding=SlidingWindowSpec(block_size=1584,num_kv_heads=8,head_size=128,
+        dtype=torch.bfloat16,sliding_window=2048)
+    full=FullAttentionSpec(block_size=3168,num_kv_heads=4,head_size=256,
+        dtype=torch.float8_e4m3fn)
+    assert window_owner_pages(NS(kv_cache_spec=sliding),cfg,49152)==3
+    assert window_owner_pages(NS(kv_cache_spec=full),cfg,49152)==16

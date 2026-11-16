@@ -75,10 +75,14 @@ def make_probe_runner(base):
                 # Register the ABI before native AOT unpickling resolves ops.
                 from ..adapters.capture_opaque import install_opaque_capture
             from ..adapters.qsa_contract import release_target_loader_staging
-            with release_target_loader_staging(self) if qsa else nullcontext():
+            from ..adapters.draft_quantization import prepare_quantized_context
+            with (release_target_loader_staging(self) if qsa else nullcontext(),
+                  prepare_quantized_context(self)):
                 super().load_model(*args, **kwargs)
             from ..adapters.draft_quantization import install_quantized_context
             install_quantized_context(self)
+            from ..adapters.draft_parallel import validate_draft_parallel
+            validate_draft_parallel(self)
             self._kvmem_graph = _settings.get('KVMEM_FULL_GRAPH') == '1'
             if not self.model_config.enforce_eager and not self._kvmem_graph:
                 raise ValueError("Runner capture probe currently requires enforce_eager")
@@ -91,8 +95,19 @@ def make_probe_runner(base):
                 if ((compilation.mode, compilation.cudagraph_mode) not in allowed or
                         self.vllm_config.max_concurrent_batches != 1):
                     raise ValueError('KVMem capture requires qualified native compilation/graphs and synchronous batches')
-                if self._kvmem_native_compilation and getattr(self.speculative_config, 'method', None) != 'mtp':
-                    raise ValueError('Compiled KVMem capture currently qualifies native Qwen MTP only')
+                if self._kvmem_native_compilation:
+                    method = getattr(self.speculative_config, 'method', None)
+                    if method == 'dflash':
+                        if (self.speculative_config.num_speculative_tokens != 1 or
+                                not options.request_planning or options.async_refresh or
+                                options.async_restore or options.capture_opaque_projection or
+                                options.memory.recent_blocks * options.memory.block_tokens < 2048):
+                            raise ValueError('Compiled DFlash2 requires k=1, synchronous planned '
+                                             'capture and a 2048-token recent band')
+                        from ..adapters.draft_graphs import install_independent_draft_graphs
+                        install_independent_draft_graphs(self)
+                    elif method != 'mtp':
+                        raise ValueError('Compiled KVMem capture requires native Qwen MTP or DFlash2')
             self._kvmem_layers = install_qwen_capture(self.model)
             from .tensor_parallel import configure_worker
             modules = dict(self.model.named_modules()) if tp_size > 1 else {}
