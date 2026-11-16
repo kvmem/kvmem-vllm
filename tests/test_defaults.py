@@ -10,7 +10,6 @@ from vllm_kvmem.core import defaults
 
 ROOT = Path(__file__).resolve().parents[1]
 NOT_DEFAULTED = ('KVMEM_PUBLICATION_TRACE', 'KVMEM_QUERY_STAGE_PROFILE', 'KVMEM_HD_ALLOW_PTRACE',
-                 'KVMEM_NATIVE_DECODE_LAYER_BATCH',
                  'KVMEM_LAYERWISE_HISTORICAL_GC', 'KVMEM_SESSION_IDLE_LRU_EVICTION',
                  'KVMEM_LEGACY_DEFAULTS')
 

@@ -411,3 +411,175 @@ def test_damaged_frames_cover_both_outcomes():
         pytest.skip('needs the whole damaged-frame sweep')
     valid = sum(_DAMAGED.values())
     assert 30 <= valid <= 270
+
+
+# KVMEM_NATIVE_DECODE_PREPARE_BATCH and the threaded layer loops
+# (KVMEM_NATIVE_PUBLISH_THREADS): every layer's result equals its per-layer
+# call bit for bit, for any thread count, errors included.
+
+def _prepare_batch_native():
+    native = _batch()
+    if not hasattr(native, 'prepare_decode_attention_maps_targets'):
+        pytest.skip('native extension lacks the decode prepare batch')
+    return native
+
+
+def _layers_case(rng, layers, dtype, rows=5, cols=600):
+    """Per-layer old maps, one shared row set, an int64 [layers, cols] identity
+    array and one [layers, rows, cols] mass buffer, as attach_packet stages them."""
+    olds, targets, masses = [], [], []
+    _, indices, _, _ = _mass_case(rng, dtype, rows=rows, cols=cols)
+    for _ in range(layers):
+        old, _, t, m = _mass_case(rng, dtype, rows=rows, cols=cols, zero_frac=rng.choice((0., .3, .9)))
+        if rng.random() < .3:
+            t = sorted(t)                                       # the merge-walk branch
+        olds.append(native_map(old))
+        targets.append(t)
+        masses.append(m)
+    return olds, indices, np.asarray(targets, np.int64), np.stack(masses)
+
+
+def native_map(old):
+    from vllm_kvmem import _native
+    return _native.DecodeMassMap.from_dict(old)
+
+
+def _per_layer(native, olds, indices, targets, masses, cap=CAP):
+    """The per-layer loop: the first failing layer raises, in layer order."""
+    out = []
+    for layer, old in enumerate(olds):
+        mass, n = native.prepare_decode_attention_map_targets(old, 7, indices, targets[layer], masses[layer], cap)
+        assert n == 7 + len(indices)
+        out.append(mass)
+    return out
+
+
+@pytest.mark.parametrize('threads', ['1', '8'])
+@pytest.mark.parametrize('seed', range(24))
+def test_prepare_batch_equals_per_layer_calls(seed, threads, monkeypatch):
+    native = _prepare_batch_native()
+    monkeypatch.setenv('KVMEM_NATIVE_PUBLISH_THREADS', threads)
+    rng = random.Random(500 + seed)
+    layers = (1, 4, 16)[seed % 3]
+    olds, indices, targets, masses = _layers_case(rng, layers, np.float32 if seed % 2 else np.float64,
+                                                  cols=rng.choice((1, 40, 600)))
+    if seed % 4 == 1:                                           # strided mass views
+        wide = np.zeros(masses.shape[:2] + (masses.shape[2] * 2,), masses.dtype)
+        wide[:, :, ::2] = masses
+        masses = wide[:, :, ::2]
+    if seed % 4 == 2:                                           # a read-only, strided identity array
+        wide = np.zeros((targets.shape[0], targets.shape[1] * 2), np.int64)
+        wide[:, ::2] = targets
+        targets = wide[:, ::2]
+        targets.flags.writeable = False
+    before = [_hex(m) for m in olds]
+    want = _per_layer(native, olds, indices, targets, masses)
+    got = native.prepare_decode_attention_maps_targets(olds, indices, targets, masses, CAP)
+    assert type(got) is list and len(got) == layers
+    assert all(type(m) is native.DecodeMassMap for m in got)
+    assert [_hex(m) for m in got] == [_hex(m) for m in want]
+    assert [_hex(m) for m in olds] == before                    # inputs are never mutated
+
+
+@pytest.mark.parametrize('threads', ['1', '8'])
+@pytest.mark.parametrize('case', ['sum', 'negative', 'nan', 'order', 'duplicate', 'row_range', 'capacity',
+                                  'two_layers', 'capacity_after_sum'])
+def test_prepare_batch_raises_what_the_first_failing_layer_raises(case, threads, monkeypatch):
+    native = _prepare_batch_native()
+    monkeypatch.setenv('KVMEM_NATIVE_PUBLISH_THREADS', threads)
+    rng = random.Random(77)
+    olds, _, targets, masses = _layers_case(rng, 12, np.float32, cols=300)
+    indices, cap = [0, 2, 4], CAP
+    masses = masses.copy()
+    if case == 'sum': masses[5, 2] *= 1.5
+    elif case == 'negative': masses[3, 0, 3] = -1e-3
+    elif case == 'nan': masses[11, 4, 7] = np.nan
+    elif case == 'order': indices = [2, 0]
+    elif case == 'duplicate': indices = [1, 1]
+    elif case == 'row_range': indices = [0, 9]
+    elif case == 'capacity': cap = 4096 + 320 * (300 + len(olds[6])) - 1         # only layers this big fail
+    elif case == 'two_layers': masses[9, 0, 1] = -1.; masses[4, 2] *= 2.
+    elif case == 'capacity_after_sum':
+        masses[2, 4] *= 3.
+        big = max(range(3, 12), key=lambda layer: len(olds[layer]))
+        cap = 4096 + 320 * (300 + len(olds[big])) - 1
+    want = outcome(_per_layer, native, olds, indices, targets, masses, cap)
+    got = outcome(native.prepare_decode_attention_maps_targets, olds, indices, targets, masses, cap)
+    assert want[0] != 'ok'
+    assert got == want
+
+
+def test_prepare_batch_declines_inputs_outside_its_domain():
+    native = _prepare_batch_native()
+    rng = random.Random(9)
+    olds, indices, targets, masses = _layers_case(rng, 3, np.float32, cols=50)
+    call = native.prepare_decode_attention_maps_targets
+    assert call(olds, indices, targets, masses, CAP) is not None
+    for bad in (dict(olds=[{1: 1.}] + olds[1:]), dict(olds=olds[:2]), dict(olds=[]),
+                dict(targets=targets[0]), dict(targets=targets.astype(np.int32)), dict(targets=targets.tolist()),
+                dict(targets=targets[:, :-1]), dict(masses=masses[0]), dict(masses=masses[:2]),
+                dict(masses=masses.astype(np.float16)), dict(masses=masses[:, :, :-1])):
+        args = {**dict(olds=olds, targets=targets, masses=masses), **bad}
+        assert call(args['olds'], indices, args['targets'], args['masses'], CAP) is None
+
+
+@pytest.mark.parametrize('seed,interval', [(1, 16), (2, 2), (3, 1), (4, 3)])
+@pytest.mark.parametrize('threads', ['1', '8'])
+def test_prepare_batch_chains_equal_per_layer_path(seed, interval, threads, monkeypatch):
+    _prepare_batch_native()
+    monkeypatch.setenv('KVMEM_NATIVE_PUBLISH_THREADS', '1')
+    monkeypatch.setenv('KVMEM_NATIVE_DECODE_PREPARE_BATCH', '0')
+    _flags(monkeypatch, '0')
+    want = _run_chain(seed, interval)
+    calls = []
+    original = layerwise_decode._native.prepare_decode_attention_maps_targets
+
+    def counted(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(layerwise_decode._native, 'prepare_decode_attention_maps_targets', counted)
+    monkeypatch.setenv('KVMEM_NATIVE_PUBLISH_THREADS', threads)
+    monkeypatch.setenv('KVMEM_NATIVE_DECODE_PREPARE_BATCH', '1')
+    _flags(monkeypatch, '1')
+    got = _run_chain(seed, interval)
+    assert got[0] == want[0] and got[1] == want[1]
+    assert calls                                                # the batch call did run
+
+
+def test_prepare_batch_flag_is_validated(monkeypatch):
+    _prepare_batch_native()
+    monkeypatch.setenv('KVMEM_NATIVE_DECODE_PREPARE_BATCH', 'yes')
+    with pytest.raises(ValueError):
+        layerwise_decode.prepare_batch_enabled()
+    monkeypatch.setenv('KVMEM_NATIVE_DECODE_PREPARE_BATCH', '1')
+    assert layerwise_decode.prepare_batch_enabled()
+    monkeypatch.delenv('KVMEM_NATIVE_DECODE_PREPARE_BATCH')
+    assert not layerwise_decode.prepare_batch_enabled()
+
+
+@pytest.mark.parametrize('seed', range(120))
+def test_threaded_batch_identities_equal_serial(seed, monkeypatch):
+    """decode_identities_from_maps splits its layers across the publication pool;
+    the array (and None) is the same for any thread count."""
+    native = _batch()
+    rng = random.Random(4000 + seed)
+    layers = rng.choice((2, 5, 16))
+    c, origin, total = _controller(rng, layers=layers, blocks=rng.choice((12, 40, 300)), partial=seed % 3 != 0)
+    begin, local, count, starts, counts = _window(rng, c, origin, total, mode=('merge', 'split')[seed % 2],
+                                                  ahead=rng.choice((1, 40, 700)))
+    parsed = [native.parse_layer_map(records).copy() for records in c.maps['r'][1]]
+    if seed % 4 == 3:                                           # one damaged layer: None either way
+        rows = parsed[rng.randrange(layers)]
+        if len(rows):
+            rows[rng.randrange(len(rows)), 1] = 33
+    monkeypatch.setenv('KVMEM_NATIVE_PUBLISH_THREADS', '1')
+    serial = native.decode_identities_from_maps(parsed, origin, begin, local, count, starts, counts)
+    monkeypatch.setenv('KVMEM_NATIVE_PUBLISH_THREADS', '8')
+    for _ in range(3):
+        threaded = native.decode_identities_from_maps(parsed, origin, begin, local, count, starts, counts)
+        if serial is None:
+            assert threaded is None
+        else:
+            assert threaded[0] == serial[0] and threaded[1].tolist() == serial[1].tolist()
+            assert not threaded[1].flags.writeable

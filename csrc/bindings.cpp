@@ -1539,22 +1539,34 @@ PYBIND11_MODULE(_native, m) {
         // one at a time, and each is consumed by the score-column partition.
         // Every check of the per-layer function is still made on the same
         // values; a failed check anywhere returns None.
-        std::vector<int64_t> eb, es, ep;
         const int64_t stop = local_begin + count;
+        // Python objects are read only here, with the GIL: each layer's map rows
+        // (kept alive by maps). A map of the wrong type or layout returns None.
+        std::vector<const int64_t *> sources(static_cast<size_t>(layers));
+        std::vector<int64_t> lengths(static_cast<size_t>(layers));
         for (Py_ssize_t layer = 0; layer < layers; ++layer) {
             if (!py::isinstance<py::array_t<int64_t>>(map_items[layer])) return py::none();
             py::array parsed = py::reinterpret_borrow<py::array>(map_items[layer]);
             const int need = py::array::c_style | py::detail::npy_api::NPY_ARRAY_ALIGNED_;
             if (parsed.ndim() != 2 || parsed.shape(1) != 3 || (parsed.flags() & need) != need) return py::none();
+            sources[static_cast<size_t>(layer)] = static_cast<const int64_t *>(parsed.data());
+            lengths[static_cast<size_t>(layer)] = parsed.shape(0);
+        }
+        // One layer's pass, false wherever the per-layer function returns None.
+        // Layers are independent and each writes only its own row of out, so
+        // they run on the publication pool (KVMEM_NATIVE_PUBLISH_THREADS)
+        // without the GIL; the array is the same for any thread count.
+        auto decode_layer = [&](size_t layer) -> bool {
+            thread_local std::vector<int64_t> eb, es, ep;
             // extend_records(records, origin, end=history_begin, block_tokens=32)
-            const int64_t n0 = parsed.shape(0);
-            const int64_t *src = static_cast<const int64_t *>(parsed.data());
+            const int64_t n0 = lengths[layer];
+            const int64_t *src = sources[layer];
             int64_t cursor = 0;
             for (int64_t i = 0; i < n0; ++i) {
                 const int64_t b = src[3*i], s = src[3*i+1], p = src[3*i+2];
-                if (b > limit || b < -limit || s > limit || s < -limit || p > limit || p < -limit) return py::none();
+                if (b > limit || b < -limit || s > limit || s < -limit || p > limit || p < -limit) return false;
                 cursor += s;
-                if (cursor > limit || cursor < -limit) return py::none();
+                if (cursor > limit || cursor < -limit) return false;
             }
             // Rows [0, kept) stay in the frame; its last row (the only one an
             // extension can lengthen) and the extension rows live in eb/es/ep.
@@ -1575,7 +1587,7 @@ PYBIND11_MODULE(_native, m) {
             }
             // LayerwisePrefillPressure._layer_records length check: the sum of
             // every row's size, which is what cursor has accumulated.
-            if (cursor != local_begin) return py::none();
+            if (cursor != local_begin) return false;
             // window_segments(records, history_begin, local_begin, count, 32),
             // one segment per call: 1 = produced, 0 = no more, -1 = invalid.
             const int64_t records = kept + static_cast<int64_t>(eb.size());
@@ -1611,33 +1623,40 @@ PYBIND11_MODULE(_native, m) {
                 return 0;
             };
             // Partition of the native score columns (segment_identities).
-            int64_t *result = rows + static_cast<size_t>(layer) * columns;
+            int64_t *result = rows + layer * columns;
             int state = next();
-            if (state < 0) return py::none();
+            if (state < 0) return false;
             cursor = 0;
             for (size_t k = 0; k < columns; ++k) {
                 const int64_t start = starts[k], seg = counts[k];
-                if (start != cursor || seg <= 0) return py::none();
+                if (start != cursor || seg <= 0) return false;
                 const int64_t end = start + seg;
                 bool have = false;
                 int64_t identity = 0;
                 while (cursor < end) {
-                    if (state == 0 || !(seg_start <= cursor && cursor < seg_start + seg_size)) return py::none();
-                    if (have && identity != seg_block) return py::none();
+                    if (state == 0 || !(seg_start <= cursor && cursor < seg_start + seg_size)) return false;
+                    if (have && identity != seg_block) return false;
                     identity = seg_block;
                     have = true;
                     const int64_t limit_end = seg_start + seg_size;
                     cursor = std::min(end, limit_end);
                     if (cursor == limit_end) {
                         state = next();
-                        if (state < 0) return py::none();
+                        if (state < 0) return false;
                     }
                 }
                 result[k] = identity;
             }
             // Every segment was consumed (and so produced and checked).
-            if (cursor != stop || state != 0) return py::none();
+            return cursor == stop && state == 0;
+        };
+        std::vector<char> ok(static_cast<size_t>(layers), 0);
+        {
+            py::gil_scoped_release release;
+            kvmem_parallel::for_rows(static_cast<size_t>(layers), [&](size_t layer) { ok[layer] = decode_layer(layer); });
         }
+        for (char done : ok)
+            if (!done) return py::none();
         py::list first(columns);
         for (size_t k = 0; k < columns; ++k) {
             PyObject *v = PyLong_FromLongLong(rows[k]);

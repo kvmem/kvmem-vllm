@@ -28,10 +28,15 @@ all three) plus the flags validated after them:
   changes which blocks rolling decode keeps (not exact against "all"); outside
   rolling decode it changes nothing.
 
+- Decode-parallel staging (2026-11-16): KVMEM_NATIVE_DECODE_LAYER_BATCH=1 with
+  KVMEM_NATIVE_DECODE_PREPARE_BATCH=1 stage every layer's rolling-decode mass
+  and identities in one native call on the publication pool (GIL released);
+  bitwise exact. A800, 8 agents x 128K history: decode step 84 -> 70 ms
+  (about +20% decode tokens/s), one-session token-identical.
+
 Deliberately NOT defaulted (set them explicitly per run):
 - diagnostics: KVMEM_PUBLICATION_TRACE, KVMEM_QUERY_STAGE_PROFILE,
   KVMEM_HD_ALLOW_PTRACE;
-- no measured gain: KVMEM_NATIVE_DECODE_LAYER_BATCH;
 - capacity/policy features: KVMEM_LAYERWISE_HISTORICAL_GC,
   KVMEM_SESSION_IDLE_LRU_EVICTION;
 - anything that needs extra GPU memory (e.g. larger CUDA-graph capture sizes).
@@ -100,8 +105,10 @@ DEFAULTS = {
     'KVMEM_LAZY_ARCHIVE_REPORT': '1',
     'KVMEM_MIXED_DECODE_CANDIDATES': '1',
     'KVMEM_NATIVE_ARM_BATCHED': '1',
+    'KVMEM_NATIVE_DECODE_LAYER_BATCH': '1',
     'KVMEM_NATIVE_DECODE_LAYER_MAP': '1',
     'KVMEM_NATIVE_DECODE_MASS_MAP': '1',
+    'KVMEM_NATIVE_DECODE_PREPARE_BATCH': '1',
     'KVMEM_NATIVE_DECODE_SEGMENTS': '1',
     'KVMEM_NATIVE_DECODE_SPARSE_MASS': '1',
     'KVMEM_NATIVE_PREFILL_PLAN': '1',

@@ -2,6 +2,7 @@
 // staging never mutate the published dictionary or advance the scope parser.
 #pragma once
 #include "block_graph_accept.hpp"
+#include "parallel_rows.hpp"
 
 namespace kvmem_decode {
 namespace py = pybind11;
@@ -408,6 +409,70 @@ inline py::tuple prepare_map_targets(py::object old, size_t samples, const std::
     return py::make_tuple(py::cast(std::move(result)), samples+indices.size());
 }
 
+// KVMEM_NATIVE_DECODE_PREPARE_BATCH: prepare_map_targets() for every layer of
+// one request in one call. olds holds each layer's DecodeMassMap, targets is the
+// int64 [layers, columns] identity array of decode_identities_from_maps, masses
+// one float32/float64 [layers, rows, columns] buffer, and every layer folds the
+// same accepted rows. Each layer runs prepare_map_targets()'s capacity check,
+// copy and accumulate_rows() unchanged, so every map is bitwise equal to the
+// per-layer call; the layers are independent and run on the publication pool
+// (KVMEM_NATIVE_PUBLISH_THREADS) with the GIL released. A failing layer raises
+// what its per-layer call raises, the first one in layer order. Returns the
+// staged maps, or None when a map is not a DecodeMassMap or the arrays do not
+// have these shapes (the caller then runs the per-layer path).
+inline py::object prepare_maps_targets(py::sequence olds, const std::vector<size_t>& indices,
+        py::object targets_o, py::buffer masses, size_t max_bytes) {
+    if (!py::isinstance<py::array_t<int64_t>>(targets_o)) return py::none();
+    const py::array targets_a = py::reinterpret_borrow<py::array>(targets_o);
+    if (targets_a.ndim() != 2 || !(targets_a.flags() & py::detail::npy_api::NPY_ARRAY_ALIGNED_))
+        return py::none();
+    const size_t layers = static_cast<size_t>(targets_a.shape(0));
+    const size_t columns = static_cast<size_t>(targets_a.shape(1));
+    if (layers == 0 || static_cast<size_t>(py::len(olds)) != layers) return py::none();
+    const auto b = masses.request();
+    const bool fp32 = b.format == py::format_descriptor<float>::format() && b.itemsize == 4;
+    const bool fp64 = b.format == py::format_descriptor<double>::format() && b.itemsize == 8;
+    if (b.ndim != 3 || (!fp32 && !fp64) || b.shape[0] != static_cast<ssize_t>(layers) ||
+            b.shape[2] != static_cast<ssize_t>(columns))
+        return py::none();
+    std::vector<const MassMap*> sources(layers);
+    std::vector<std::vector<int64_t>> targets(layers, std::vector<int64_t>(columns));
+    std::vector<py::buffer_info> views;
+    views.reserve(layers);
+    const char* target_base = static_cast<const char*>(targets_a.data());
+    for (size_t layer = 0; layer < layers; ++layer) {
+        py::handle old = olds[layer];
+        if (!py::isinstance<MassMap>(old)) return py::none();
+        // The sequence keeps each map alive; maps are never mutated once made.
+        sources[layer] = &old.cast<const MassMap&>();
+        for (size_t col = 0; col < columns; ++col)
+            std::memcpy(&targets[layer][col], target_base + static_cast<ssize_t>(layer)*targets_a.strides(0) +
+                        static_cast<ssize_t>(col)*targets_a.strides(1), sizeof(int64_t));
+        // The [rows, columns] matrix prepare_map_targets() reads for this layer.
+        views.emplace_back(static_cast<char*>(b.ptr) + static_cast<ssize_t>(layer)*b.strides[0], b.itemsize,
+                           b.format, 2, std::vector<ssize_t>{b.shape[1], b.shape[2]},
+                           std::vector<ssize_t>{b.strides[1], b.strides[2]}, true);
+    }
+    std::vector<MassMap> results(layers);
+    {
+        py::gil_scoped_release release;
+        kvmem_parallel::for_rows(layers, [&](size_t layer) {
+            const size_t old_size = sources[layer]->size();
+            if (old_size > max_bytes/320 || columns > max_bytes/320 ||
+                    4096 + (old_size+columns)*320 > max_bytes)
+                throw std::length_error("Decode attention staging capacity exceeded before acceptance");
+            MassMap result = *sources[layer];
+            if (fp32) accumulate_rows<float>(views[layer], indices, targets[layer], result);
+            else accumulate_rows<double>(views[layer], indices, targets[layer], result);
+            results[layer] = std::move(result);
+        });
+    }
+    py::list out(layers);
+    for (size_t layer = 0; layer < layers; ++layer)
+        out[layer] = py::cast(std::move(results[layer]));
+    return std::move(out);
+}
+
 inline void bind(py::module_& module) {
     module.def("prepare_decode_attention",&prepare);
     module.def("prepare_decode_attention_sparse",&prepare_sparse);
@@ -438,5 +503,6 @@ inline void bind(py::module_& module) {
         .def("__len__", &MassMap::size);
     module.def("prepare_decode_attention_map", &prepare_map);
     module.def("prepare_decode_attention_map_targets", &prepare_map_targets);
+    module.def("prepare_decode_attention_maps_targets", &prepare_maps_targets);
 }
 }

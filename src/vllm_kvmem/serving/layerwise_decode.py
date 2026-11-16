@@ -284,6 +284,54 @@ def layer_batch_enabled():
             layer_map_enabled() and mass_map_enabled())
 
 
+def prepare_batch_enabled():
+    """KVMEM_NATIVE_DECODE_PREPARE_BATCH=1: stage every layer's accepted mass of
+    one request in one native call (prepare_decode_attention_maps_targets) instead
+    of one prepare_decode_attention_map_targets call per layer.
+
+    The layers run on the native publication pool (KVMEM_NATIVE_PUBLISH_THREADS)
+    without the GIL, map copy included; each layer's arithmetic is unchanged, so
+    the staged maps are bitwise equal to the per-layer loop. Effective only with
+    KVMEM_NATIVE_DECODE_LAYER_BATCH=1 (whose identity array it reads) and only
+    when every layer is a NativeDecodeHistory folding the same rows; anything
+    else runs the per-layer loop. Equivalence: tests/test_native_decode_layer_batch.py.
+    """
+    value = _settings.get('KVMEM_NATIVE_DECODE_PREPARE_BATCH', '0')
+    if value not in ('0', '1'):
+        raise ValueError('KVMEM_NATIVE_DECODE_PREPARE_BATCH must be 0 or 1')
+    return value == '1' and hasattr(_native, 'prepare_decode_attention_maps_targets')
+
+
+def _prepare_batch(histories, pending, accepted, logical, masses):
+    """prepare_accept's staged histories from one native call, or None to run the per-layer loop.
+
+    Makes _prepare_history's checks in its order (they are the same for every
+    layer), then batches only when every layer folds the same non-empty rows.
+    """
+    if (type(logical) is not np.ndarray or logical.ndim != 2 or not histories or
+            any(type(h) is not NativeDecodeHistory for h in histories) or not mass_map_enabled()):
+        return None
+    if not 0 <= accepted <= pending.candidate_count:
+        raise ValueError('Invalid rolling attention accepted prefix')
+    begin = pending.history_begin
+    wanted = _wanted_rows(pending, accepted)
+    end = histories[0].end
+    if any(h.end != end or type(h.samples) is not int for h in histories):
+        return None
+    indices = [i for i, row in enumerate(pending.rows) if row in wanted and begin + row >= end]
+    if wanted - set(pending.rows):
+        raise RuntimeError('Rolling attention omitted an accepted sampled row')
+    if not indices:
+        return None
+    values = masses.numpy() if hasattr(masses, 'numpy') else masses
+    cap = getattr(pending.state.options, 'action_commit_max_bytes', 16777216)
+    maps = _native.prepare_decode_attention_maps_targets([h._map for h in histories], indices, logical, values, cap)
+    if maps is None:
+        return None
+    return [NativeDecodeHistory(mass_map, h.samples + len(indices), begin + accepted, h.chunks + 1)
+            for mass_map, h in zip(maps, histories)]
+
+
 _LAYER_MAP_CACHE_LIMIT = 1024
 
 
@@ -368,8 +416,10 @@ def prepare_accept(controller, pending, accepted):
     if owner is not controller or masses.shape[0] != len(controller.names):
         raise RuntimeError('Rolling feedback belongs to a different layer domain')
     histories = controller.decode_histories[rid]
-    staged = [history.prepare(pending, accepted, logical[i], masses[i])
-              for i, history in enumerate(histories)]
+    staged = _prepare_batch(histories, pending, accepted, logical, masses) if prepare_batch_enabled() else None
+    if staged is None:
+        staged = [history.prepare(pending, accepted, logical[i], masses[i])
+                  for i, history in enumerate(histories)]
     if len({(h.samples, h.end, h.chunks) for h in staged}) != 1:
         raise RuntimeError('Rolling layers disagree on scheduler acceptance')
     return rid, staged, 'decode'
