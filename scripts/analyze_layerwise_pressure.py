@@ -6,6 +6,7 @@ import statistics
 
 import recall_comparison_protocol as p
 import run_layerwise_query_diagnostic as driver
+from vllm_kvmem.core.block_runs import candidate_starts
 
 
 def analyze(root):
@@ -40,7 +41,7 @@ def analyze(root):
                     if [e['layer'] for e in layers]!=list(range(16)):raise ValueError('Incomplete pressure layers')
                     sets=[]
                     for layer in layers:
-                        chosen=set(layer['selected_starts']);candidate=set(layer['candidate_starts'])
+                        chosen=set(layer['selected_starts']);candidate=set(candidate_starts(layer))
                         if (not chosen<=candidate or layer['charged_tokens']>36864 or
                             layer['selected_tokens']!=event['selected_tokens'] or
                             layer['accepted_score_end']>event['accepted_history']):

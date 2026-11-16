@@ -13,6 +13,7 @@ import time
 
 import recall_comparison_protocol as p
 from run_layerwise_query_diagnostic import verify
+from vllm_kvmem.core.block_runs import candidate_starts
 
 REPO = Path(__file__).resolve().parents[1]
 STAGES = ('baseline', 'native_scores', 'single_assembly', 'fast_metadata', 'compiled')
@@ -164,9 +165,9 @@ def signature(evidence):
     for event in evidence['events']:
         if event['event']=='pressure_selected':
             pressures.append(dict(accepted_history=event['accepted_history'],method=event['actual_method'],
-                fallback=event.get('fallback_reason'),layers=[{k:l[k] for k in (
-                    'layer','candidate_starts','selected_starts','charged_tokens','accepted_score_end',
-                    'query_samples','sampled_chunks')} for l in event['layers']]))
+                fallback=event.get('fallback_reason'),layers=[{**{k:l[k] for k in (
+                    'layer','selected_starts','charged_tokens','accepted_score_end',
+                    'query_samples','sampled_chunks')},'candidate_starts':candidate_starts(l)} for l in event['layers']]))
     queries=[{k:l[k] for k in ('layer','selected_starts','charged_tokens','query_source',
                              'predecessor_layers_completed')} for l in evidence['layers']]
     return pressures,dict(scope=query_scope(evidence),layers=queries)

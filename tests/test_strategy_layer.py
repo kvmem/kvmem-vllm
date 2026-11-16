@@ -7,6 +7,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 
+from vllm_kvmem.core.block_runs import candidate_starts
+
 from vllm_kvmem import strategy
 from vllm_kvmem.strategy import (ContractError, PickView, PressureLayerView, QueryLayerView, Strategy,
                                  check_pick, check_pressure_scores, check_query_scores, trace)
@@ -163,7 +165,7 @@ def test_recency_pressure_keeps_the_newest_window_blocks_in_every_layer(fast):
     attention, _ = pressure_plan(fast=fast)
     chosen, evidence = pressure_plan(fast=fast, strategy_pressure_scorer='recency')
     assert len(set(map(tuple, chosen))) == 1 and chosen != attention
-    candidates = evidence[0]['candidate_starts']
+    candidates = candidate_starts(evidence[0])
     free = len(chosen[0]) - 1
     # The sink block stays; the rest of the budget goes to the newest candidates.
     assert chosen[0] == [0] + sorted(candidates)[-free:]
@@ -184,7 +186,7 @@ def test_trace_scores_record_one_score_per_candidate(scorer, fast):
     chosen, evidence = pressure_plan(fast=fast, strategy_pressure_scorer=scorer, strategy_trace_scores=True)
     assert chosen == base
     for layer, reference in zip(evidence, plain):
-        assert len(layer['candidate_scores']) == len(layer['candidate_starts'])
+        assert len(layer['candidate_scores']) == len(candidate_starts(layer))
         replay_fields = {'candidate_scores', 'mandatory_starts', 'budget_tokens', 'sink_tokens'}
         assert {k: v for k, v in layer.items() if k not in replay_fields} == reference
         assert layer['budget_tokens'] > 0 and layer['sink_tokens'] >= 0

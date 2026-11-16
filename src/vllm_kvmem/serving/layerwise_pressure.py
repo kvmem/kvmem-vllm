@@ -16,6 +16,7 @@ from .action_attention import ActionRuntime, window_segments
 from .prefill_attention import PrefillHistory
 from ..adapters.original_rope import enabled as original_rope
 from ..core import settings as _settings
+from ..core.block_runs import encode_starts
 
 
 def _decode_labels():
@@ -828,7 +829,7 @@ class LayerwisePrefillPressure:
                 job.layerwise_zero_slots = ordered_slots   # slots of chosen[0], same order
             chosen.append(picked)
             evidence.append(dict(layer=layer, layer_name=self.names[layer],
-                candidate_block_count=len(candidates), candidate_starts=[r.history_begin for r in candidates],
+                candidate_block_count=len(candidates), candidate_runs=encode_starts([r.history_begin for r in candidates]),
                 selected_starts=[r.history_begin for r in picked], selected_tokens=sum(r.count for r in picked),
                 charged_tokens=32*len(picked), accepted_score_end=history.end,
                 query_samples=history.samples, sampled_chunks=history.chunks,

@@ -101,6 +101,18 @@ def _read_evictions(path, decisions, order):
     return decisions
 
 
+def candidate_starts(row, block=32):
+    """A trace row's candidate block starts: newer traces store ``candidate_runs``
+    (``[first_start, count]`` runs of consecutive blocks), older ones the full list.
+
+    Same decoding as vllm_kvmem.core.block_runs; kept here because this package
+    imports only itself and the standard library (the gate loads it by path).
+    """
+    if 'candidate_runs' in row:
+        return [start for first, count in row['candidate_runs'] for start in range(first, first + count * block, block)]
+    return list(row.get('candidate_starts', ()))
+
+
 def _read_layers(path, decisions, order):
     pool = {}
     with path.open() as stream:
@@ -119,7 +131,7 @@ def _read_layers(path, decisions, order):
                     'query', request, int(event['layer']), int(frame.get('history', -1)),
                     event.get('query_scorer', 'meank'),
                     tuple(event.get('selected_starts') or event.get('selected_blocks') or ()),
-                    tuple(frame.get('candidate_starts', ())) if scores else (), scores,
+                    tuple(candidate_starts(frame)) if scores else (), scores,
                     fixed=tuple(frame.get('fixed_starts', ())), excluded=tuple(frame.get('excluded_starts', ())),
                     eligible=tuple(frame.get('eligible', ())), counts=tuple(frame.get('candidate_counts', ())),
                     budget=int(frame.get('budget', -1))))
@@ -130,7 +142,7 @@ def _read_layers(path, decisions, order):
                     decisions.append(Decision(
                         'pressure', request, int(layer['layer']), int(event.get('accepted_history', -1)),
                         layer.get('actual_method', ''), tuple(layer.get('selected_starts', ())),
-                        tuple(layer.get('candidate_starts', ())), scores,
+                        tuple(candidate_starts(layer)), scores,
                         fixed=tuple(layer.get('mandatory_starts', ())), budget=int(layer.get('budget_tokens', -1)),
                         sink=int(layer.get('sink_tokens', -1)), stage=stage))
     return decisions

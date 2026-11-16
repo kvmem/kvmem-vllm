@@ -17,6 +17,7 @@ import recall_comparison_protocol as p
 from benchmark_memory import source, wait_terminal, digest_tokens
 from benchmark_niah import CpuCredits
 from benchmark_client_io import CaptureSlice, compact_response, result_events
+from vllm_kvmem.core.block_runs import candidate_starts
 
 REPO=Path(__file__).resolve().parents[1]
 REFERENCE=REPO/'artifacts/fused-stable-quality-20261021-r1'
@@ -118,7 +119,7 @@ def memory_pressure_audit(events, refresh, independent, buffered=False, select_b
                     raise ValueError('Pressure did not use the configured buffered history')
                 if (layer['charged_tokens']>select_budget or layer['selected_tokens']!=event['selected_tokens'] or
                     layer['accepted_score_end']>event['accepted_history'] or
-                    not set(layer['selected_starts'])<=set(layer['candidate_starts']) or
+                    not set(layer['selected_starts'])<=set(candidate_starts(layer)) or
                     not set(range(0,1312,32))<=set(layer['selected_starts'])):
                     raise ValueError('Pressure scope, accepted evidence or Active budget changed')
     return pressures

@@ -14,6 +14,7 @@ import tempfile
 import time
 
 from benchmark_client_io import result_events
+from vllm_kvmem.core.block_runs import candidate_starts
 from run_layerwise_pressure_efficiency import signature
 
 
@@ -196,7 +197,7 @@ def compare_cases(before_dir, after_dir):
                 for a, b in zip(pair[0]['layers'], pair[1]['layers']):
                     if a != b:
                         context['layers'].append(dict(layer=a['layer'],
-                            same_candidates=a['candidate_starts'] == b['candidate_starts'],
+                            same_candidates=candidate_starts(a) == candidate_starts(b),
                             same_score_end=a['accepted_score_end'] == b['accepted_score_end'],
                             selected_symmetric_difference=sorted(set(a['selected_starts']) ^ set(b['selected_starts']))))
             break

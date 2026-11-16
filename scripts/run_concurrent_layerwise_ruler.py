@@ -16,6 +16,7 @@ import ruler_protocol
 import run_layerwise_query_diagnostic as serial
 from benchmark_client_io import CaptureSlice
 from benchmark_niah import CpuCredits
+from vllm_kvmem.core.block_runs import candidate_starts
 
 
 def query_mode(fixture):
@@ -121,7 +122,7 @@ def audit_events(events, bounds, response, row, independent):
             for layer in event['layers']:
                 if (layer['charged_tokens']>36864 or layer['selected_tokens']!=event['selected_tokens'] or
                     layer['accepted_score_end']>event['accepted_history'] or
-                    not set(layer['selected_starts'])<=set(layer['candidate_starts']) or
+                    not set(layer['selected_starts'])<=set(candidate_starts(layer)) or
                     not set(range(0,1312,32))<=set(layer['selected_starts'])):
                     raise ValueError('Pressure scope, accepted time or per-layer budget violation')
     return layers

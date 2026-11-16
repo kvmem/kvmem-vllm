@@ -15,6 +15,7 @@ from types import MethodType
 import torch
 from ..adapters.original_rope import enabled as original_rope, record_positions
 from ..core import settings as _settings
+from ..core.block_runs import encode_starts
 
 
 def top_set(memory, records, scores, fixed, budget, *, record_index=None):
@@ -546,7 +547,7 @@ class LayerwiseQuery:
                 fixed_slots = set(state['fixed'])
                 self.emit('query_candidates', request_id=state['request_id'], budget=state['budget'],
                           history=state['history'], selected_tokens=state['selected_tokens'],
-                          candidate_starts=[r.history_begin for r in records],
+                          candidate_runs=encode_starts([r.history_begin for r in records]),
                           candidate_counts=[r.count for r in records],
                           eligible=[bool(e) for e in state['score_mask']],
                           fixed_starts=sorted(r.history_begin for r in records

@@ -5,6 +5,7 @@ import torch
 
 from vllm_kvmem.serving.layerwise_pressure import LayerwisePrefillPressure, extend_records
 from vllm_kvmem.serving.prefill_attention import PrefillHistory
+from vllm_kvmem.core.block_runs import candidate_starts
 from test_recall_experiment import native_authority, finish
 
 
@@ -185,7 +186,7 @@ def test_slot_cache_preserves_native_preview_inputs_and_reads_each_archive_slot_
         expected_calls=Counter({r.handle.slot:1 for r in rows})
         if stage=='decode':expected_calls.update(actual[0])
         assert calls==expected_calls
-        assert all(e['candidate_starts']==[r.history_begin for r in rows] for e in evidence)
+        assert all(candidate_starts(e)==[r.history_begin for r in rows] and 'candidate_starts' not in e for e in evidence)
         assert all(e['fallback_reason'] is None and e['charged_tokens']==96 for e in evidence)
     finally:
         a.records=records
