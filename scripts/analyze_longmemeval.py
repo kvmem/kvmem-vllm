@@ -18,6 +18,7 @@ from tokenizers import Tokenizer
 from vllm_kvmem.serving.action_attention import ActionHistory
 
 from benchmark_memory import source, digest_tokens
+from benchmark_client_io import prompt_matches
 from benchmark_niah import save, sha
 
 FROZEN=Path('/home/chaidi/qw3/benchmark/qw3_memory_comparison_20261004/frozen')
@@ -55,7 +56,7 @@ def analyze(args):
         r=json.loads(p.read_text())
         if r['status']!='completed':continue
         src=source(row);response=json.loads((d/'response.json').read_text());request=json.loads((d/'request.json').read_text())
-        assert response['choices'][0]['prompt_token_ids']==src['tokens']
+        assert prompt_matches(response['choices'][0],src['tokens'])
         assert r['token_sha256']==row['token_sha256']==digest_tokens(src['tokens'])
         assert r['prompt_sha256']==row['prompt_sha256'] and r['query_sha256']==row['query_sha256']
         assert r['raw_completion']==response['choices'][0]['text'] and r['usage']==response['usage']

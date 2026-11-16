@@ -11,7 +11,7 @@ import uuid
 
 from benchmark_memory import source, wait_terminal
 from benchmark_niah import CpuCredits, save, sha
-from benchmark_client_io import CaptureSlice, CompactResults, VERSION as CLIENT_IO_VERSION
+from benchmark_client_io import CaptureSlice, CompactResults, VERSION as CLIENT_IO_VERSION, compact_response
 
 SAMPLING = ('temperature', 'top_p', 'top_k', 'min_p', 'presence_penalty', 'repetition_penalty', 'seed')
 
@@ -88,7 +88,7 @@ def run(args):
             capture_slice=CaptureSlice(args.capture/name for name in ('bounded_refresh.jsonl','block_graph.jsonl','action_attention.jsonl','block_graph_inputs.jsonl'))
             sent=time.monotonic()
             with http.open(req,timeout=args.timeout) as stream:response=json.load(stream)
-            seconds=time.monotonic()-sent;save(directory/'response.json',response)
+            seconds=time.monotonic()-sent;save(directory/'response.json',compact_response(response,tokens))
             assert response['usage']['prompt_tokens']==len(tokens)
             assert response['choices'][0]['prompt_token_ids']==tokens
             rid=response['id'];terminal=wait_terminal(args.capture,rid)

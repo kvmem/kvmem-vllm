@@ -13,6 +13,7 @@ import time
 
 from benchmark_niah import save,sha
 from benchmark_memory import source as load_input
+from benchmark_client_io import prompt_matches
 from graph_v2_protocol import require
 from recover_hybrid_lme import preserve_case
 from recover_hybrid_mab import engine
@@ -94,7 +95,7 @@ def recover_cold(previous,target,ids):
             request['sampling_sha256']==sha(original) and request['thinking_token_budget']==0 and
             request['token_sha256']==row['token_sha256'] and request['prompt_tokens']==row['input_tokens'] and
             request['kvmem_query_span']==[row['query_begin'],row['query_end']], 'Saved sampling/input identity changed')
-        require(choice['prompt_token_ids']==src['tokens'] and response['usage']['prompt_tokens']==len(src['tokens']) and
+        require(prompt_matches(choice,src['tokens']) and response['usage']['prompt_tokens']==len(src['tokens']) and
             choice['finish_reason'] in ('stop','length') and len(choice['token_ids'])==response['usage']['completion_tokens']>0,
             'Saved response is incomplete or belongs to different input')
         match=lambda e:e['request_id'].startswith(response['id']+'-')

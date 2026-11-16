@@ -21,6 +21,8 @@ import uuid
 import numpy as np
 from tokenizers import Tokenizer
 
+from benchmark_client_io import compact_response
+
 TASKS = ['niah_single_2', 'niah_multikey_2', 'niah_multivalue', 'niah_multiquery']
 
 
@@ -197,7 +199,7 @@ def run_case(args, cfg, row, scorer):
         http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with http.open(request, timeout=args.timeout) as response:
             response = json.load(response)
-        save(directory/'response.json', response)
+        save(directory/'response.json', compact_response(response, tokens))
         assert response['usage']['prompt_tokens'] == len(tokens)
         raw = response['choices'][0]['text']
         evaluation = scorer(raw, row['expected'])

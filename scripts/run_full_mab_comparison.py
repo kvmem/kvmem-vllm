@@ -21,6 +21,7 @@ import urllib.request
 import uuid
 
 from prepare_full_mab_comparison import read, save, sha, digest, token_sha
+from benchmark_client_io import compact_response
 REPO=next(p for p in Path(__file__).resolve().parents if (p/'.git').exists())
 BASE=REPO/'artifacts/mab-pressure-multiowner-20261105-r10/formal'
 ARMS=('mean_k','layerwise')
@@ -216,7 +217,7 @@ def infer(memory,root,capture,workers=8):
                 started=time.perf_counter();http=urllib.request.build_opener(urllib.request.ProxyHandler({}))
                 request=urllib.request.Request(f"http://127.0.0.1:{profile['port']}/v1/completions",data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
                 with http.open(request,timeout=14400) as stream:response=json.load(stream)
-                elapsed=time.perf_counter()-started;save(directory/'response.json',response)
+                elapsed=time.perf_counter()-started;save(directory/'response.json',compact_response(response,tokens))
                 assert response['usage']['prompt_tokens']==len(tokens) and response['choices'][0]['prompt_token_ids']==tokens
                 rid=response['id'];terminal=wait_terminal(capture,rid)
                 refresh=[e for e in offset.read(capture/'bounded_refresh.jsonl') if e['request_id'].startswith(rid+'-')]
@@ -245,7 +246,10 @@ def infer(memory,root,capture,workers=8):
                     answer=text.split('</think>',1)[-1].strip(),raw_completion=text,usage=response['usage'],
                     seconds=elapsed,prompt_tokens=len(tokens),token_sha256=row['token_sha256'],prompt_sha256=row['prompt_sha256'],
                     query_sha256=row['query_sha256'],original_input_intact=True,attention=query,
-                    layerwise=dict(events=events,layers=layers),actual_query_method='mean_k_sequential_layerwise' if layerwise else 'mean_k',
+                    # The server's capture log keeps every event; the result points at the
+                    # request's slice (benchmark_client_io.result_events reads it back).
+                    layerwise=dict(events=offset.reference(capture/'layerwise_query.jsonl',rid+'-',events),layers=layers),
+                    actual_query_method='mean_k_sequential_layerwise' if layerwise else 'mean_k',
                     actual_pressure_method='accumulated_attention_per_layer' if layerwise else 'recency',
                     pressure_refreshes=len(pressures),finish_reason=finish,hit_output_cap=finish=='length',
                     prefix_reused=bool(done),prefix_tokens=prefix,prefix_sha256=token_sha(tokens[:prefix]),

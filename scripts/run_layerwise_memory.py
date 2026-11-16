@@ -16,7 +16,7 @@ import uuid
 import recall_comparison_protocol as p
 from benchmark_memory import source, wait_terminal, digest_tokens
 from benchmark_niah import CpuCredits
-from benchmark_client_io import CaptureSlice
+from benchmark_client_io import CaptureSlice, compact_response
 
 REPO=Path(__file__).resolve().parents[1]
 REFERENCE=REPO/'artifacts/fused-stable-quality-20261021-r1'
@@ -616,7 +616,7 @@ def infer(root,capture,*,workers=8):
                 req=urllib.request.Request(f"http://127.0.0.1:{profile['port']}/v1/completions",
                     data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
                 with http.open(req,timeout=3600) as stream:response=json.load(stream)
-                seconds=time.monotonic()-started;p.save(directory/'response.json',response)
+                seconds=time.monotonic()-started;p.save(directory/'response.json',compact_response(response,tokens))
                 if response['usage']['prompt_tokens']!=len(tokens) or response['choices'][0]['prompt_token_ids']!=tokens:
                     raise ValueError('Original full input identity changed')
                 rid=response['id'];terminal=wait_terminal(capture,rid)
@@ -647,7 +647,10 @@ def infer(root,capture,*,workers=8):
                     raw_completion=text,thinking_closed='</think>' in text,usage=response['usage'],
                     seconds=seconds,prompt_tokens=len(tokens),token_sha256=row['token_sha256'],
                     prompt_sha256=row['prompt_sha256'],query_sha256=row['query_sha256'],
-                    original_input_intact=True,attention=query[0],layerwise=dict(layers=layers,events=events),
+                    # The capture log keeps every event; the result points at this request's
+                    # slice (benchmark_client_io.result_events reads it back).
+                    original_input_intact=True,attention=query[0],
+                    layerwise=dict(layers=layers,events=offset.reference(capture/'layerwise_query.jsonl',rid+'-',events)),
                     pressure_refreshes=len(pressures),finish_reason=response['choices'][0]['finish_reason'],
                     hit_output_cap=response['choices'][0]['finish_reason']=='length',
                     prefix_reused=bool(done),prefix_tokens=prefix,prefix_sha256=digest_tokens(tokens[:prefix]))

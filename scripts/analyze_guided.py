@@ -12,6 +12,7 @@ from types import SimpleNamespace as NS
 
 import analyze_memory
 from benchmark_memory import source
+from benchmark_client_io import prompt_matches
 from benchmark_niah import save, sha
 from graph_v2_evaluation import validate_evaluation
 from guided_benchmark_protocol import require, validate_pair
@@ -75,7 +76,7 @@ def score_lme(root, arm, key):
         request = json.loads((path/'request.json').read_text())
         src = source(row)
         require(result['status'] == 'completed'
-                and response['choices'][0]['prompt_token_ids'] == src['tokens']
+                and prompt_matches(response['choices'][0], src['tokens'])
                 and result['token_sha256'] == row['token_sha256']
                 and result['prompt_sha256'] == row['prompt_sha256']
                 and result['raw_completion'] == response['choices'][0]['text']

@@ -11,6 +11,7 @@ import shutil
 
 from benchmark_niah import save, sha
 from benchmark_memory import source as load_input
+from benchmark_client_io import prompt_matches
 from benchmark_longmemeval import SAMPLING
 import hybrid_memory_protocol as policy
 import qualify_graph_niah as client
@@ -85,7 +86,7 @@ def prepare(root, previous):
             request['kvmem_query_span'] == [row['query_begin'],row['query_end']],
             'Original request sampling, seed, token identity or Query span differs')
         require(response['usage']['prompt_tokens'] == len(src['tokens']) == row['input_tokens'] and
-            choice['prompt_token_ids'] == src['tokens'] and choice['finish_reason'] in ('stop','length') and
+            prompt_matches(choice, src['tokens']) and choice['finish_reason'] in ('stop','length') and
             response['usage']['completion_tokens'] == len(choice['token_ids']) > 0,
             'Original saved response is incomplete or bound to different input')
         evidence = policy.audit_case(capture,response['id'],profile,request['kvmem_query_span'],

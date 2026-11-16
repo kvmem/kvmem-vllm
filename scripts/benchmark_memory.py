@@ -17,7 +17,7 @@ import uuid
 
 from benchmark_niah import CpuCredits, save, sha
 from benchmark_client_io import (CaptureSlice, ClientTiming, CompactResults, PreparedSequence,
-                                 VERSION as CLIENT_IO_VERSION)
+                                 VERSION as CLIENT_IO_VERSION, compact_response)
 
 
 def digest_tokens(tokens):
@@ -154,7 +154,7 @@ def run(args):
                                 data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'})
                             with timing.stage('http'):
                                 with http.open(req,timeout=args.timeout) as stream:response=json.load(stream)
-                            seconds=time.monotonic()-started;save(directory/'response.json',response)
+                            seconds=time.monotonic()-started;save(directory/'response.json',compact_response(response,tokens))
                             assert response['usage']['prompt_tokens']==len(tokens)
                             assert response['choices'][0]['prompt_token_ids']==tokens
                             rid=response['id']

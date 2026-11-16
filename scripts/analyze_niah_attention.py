@@ -10,6 +10,7 @@ import numpy as np
 from tokenizers import Tokenizer
 
 from benchmark_niah import save, TASKS
+from benchmark_client_io import prompt_matches
 from vllm_kvmem.serving.action_attention import ActionHistory
 
 
@@ -32,7 +33,7 @@ def audit(campaign, config, baseline):
         response = json.loads((directory / 'response.json').read_text())
         action = json.loads((directory / 'action_attention.json').read_text())
         prompt = np.fromfile(campaign / 'inputs' / (case + '.i32'), dtype='<i4').tolist()
-        assert response['choices'][0]['prompt_token_ids'] == prompt
+        assert prompt_matches(response['choices'][0], prompt)
         generated = response['choices'][0]['token_ids']
         assert len(generated) == response['usage']['completion_tokens']
         state = ActionHistory(options, markers)

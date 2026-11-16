@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import time
 
+from benchmark_client_io import result_events
 from run_layerwise_pressure_efficiency import signature
 
 
@@ -127,7 +128,7 @@ def verify_audit(report):
 
 
 def evidence(result, refresh):
-    return dict(events=result['layerwise']['events'], layers=result['layerwise']['layers'], refresh=refresh)
+    return dict(events=result_events(result), layers=result['layerwise']['layers'], refresh=refresh)
 
 
 def first_difference(before, after, path=''):
@@ -160,7 +161,7 @@ def canonical_signature(result, refresh):
     # Reuse the strict accepted pressure/Query signature, adding rolling stage
     # identity so prefill and decode events cannot accidentally compare equal.
     pressures, query = signature(evidence(result, refresh))
-    events = [e for e in result['layerwise']['events'] if e['event'] == 'pressure_selected']
+    events = [e for e in result_events(result) if e['event'] == 'pressure_selected']
     for pressure, event in zip(pressures, events):
         pressure.update(event_type=event['event_type'], query_source=event['query_source'],
                         selected_tokens=event['selected_tokens'])

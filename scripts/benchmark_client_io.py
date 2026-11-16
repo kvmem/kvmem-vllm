@@ -7,6 +7,7 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,48 @@ from threading import RLock
 import time
 
 VERSION = 'incremental-client-2'
+
+
+def token_digest(tokens):
+    """sha256 of the compact JSON token list (the same value as benchmark_memory.digest_tokens)."""
+    return hashlib.sha256(json.dumps(list(tokens), separators=(',', ':')).encode()).hexdigest()
+
+
+def compact_response(response, tokens=None):
+    """The response to save: each echoed prompt replaced by its length and digest.
+
+    With ``return_token_ids`` the server echoes the whole prompt in every
+    choice (8.6 MB for a 1M-token case, 99.9% of the file) next to the few
+    output tokens the run is about. Pass the prompt that was sent: an echo that
+    differs from it is kept in full, so the caller's own check fails with the
+    evidence on disk. Output token IDs, text, usage and metrics stay unchanged.
+    A response without an echo (streaming clients) is returned as is.
+    """
+    choices = response.get('choices') or []
+    if not any('prompt_token_ids' in choice for choice in choices):
+        return response
+    if tokens is not None and any(choice.get('prompt_token_ids') is not None and
+                                  list(choice['prompt_token_ids']) != list(tokens) for choice in choices):
+        return response
+    compacted = []
+    for choice in choices:
+        echoed = choice.get('prompt_token_ids')
+        if echoed is None:
+            compacted.append(choice)
+            continue
+        choice = {key: value for key, value in choice.items() if key != 'prompt_token_ids'}
+        choice['prompt_token_count'] = len(echoed)
+        choice['prompt_token_sha256'] = token_digest(echoed)
+        compacted.append(choice)
+    return dict(response, choices=compacted)
+
+
+def prompt_matches(choice, tokens):
+    """True when a saved choice, full or compacted, carries exactly ``tokens``."""
+    if choice.get('prompt_token_ids') is not None:
+        return list(choice['prompt_token_ids']) == list(tokens)
+    return (choice.get('prompt_token_count') == len(tokens) and
+            choice.get('prompt_token_sha256') == token_digest(tokens))
 
 
 class PreparedSequence:
@@ -132,7 +175,7 @@ class CaptureSlice:
     Rotation/truncation/rewrite is an error, never a whole-file fallback.
     """
     def __init__(self, paths):
-        self._marks, self._cache = {}, {}
+        self._marks, self._cache, self._spans = {}, {}, {}
         self.bytes_read = self.records_read = 0
         for value in paths:
             path = Path(value)
@@ -169,12 +212,56 @@ class CaptureSlice:
                 raise RuntimeError('Capture log disappeared during request') from None
             data = b''
         self.bytes_read += len(data)
+        begin = mark.offset if mark is not None else 0
         if mark is not None and not mark.at_line_boundary:
-            _,separator,data = data.partition(b'\n')
+            head,separator,data = data.partition(b'\n')
+            begin += len(head) + len(separator)
             if not separator:
                 data = b''
         data = data[:data.rfind(b'\n')+1]
         records = tuple(json.loads(line) for line in data.splitlines() if line.strip())
         self.records_read += len(records)
         self._cache[path] = records
+        self._spans[path] = (begin, begin + len(data))
         return records
+
+    def reference(self, value, request_prefix, events):
+        """Where a request's events sit in the capture log, for a result to keep instead of a copy.
+
+        The server's capture log already holds every event; ``capture_events``
+        reads them back from this byte range and checks the count.
+        """
+        path = Path(value)
+        self.read(path)
+        begin, end = self._spans[path]
+        return dict(capture_file=path.name, capture_dir=str(path.parent), begin=begin, end=end,
+                    request_prefix=request_prefix, count=len(events))
+
+
+def capture_events(reference, capture_dir=None):
+    """The events a result referenced with CaptureSlice.reference, read back from the capture log."""
+    directory = Path(capture_dir or reference['capture_dir'])
+    with (directory / reference['capture_file']).open('rb') as stream:
+        stream.seek(reference['begin'])
+        data = stream.read(reference['end'] - reference['begin'])
+    events = [json.loads(line) for line in data.splitlines() if line.strip()]
+    events = [e for e in events if str(e.get('request_id', '')).startswith(reference['request_prefix'])]
+    if len(events) != reference['count']:
+        raise ValueError('Capture log no longer holds the referenced events')
+    return events
+
+
+def result_events(result, case_dir=None):
+    """A saved result's layerwise events: copied inline (older runs) or referenced.
+
+    Cases live at RUN/run/answers/cases/ID and the server log at
+    RUN/run/server/capture; that location is used when the recorded absolute
+    one has moved.
+    """
+    events = (result.get('layerwise') or {}).get('events')
+    if events is None or isinstance(events, list):
+        return events or []
+    recorded = Path(events['capture_dir'])
+    if not (recorded / events['capture_file']).is_file() and case_dir is not None:
+        recorded = Path(case_dir).parents[2] / 'server' / 'capture'
+    return capture_events(events, recorded)
