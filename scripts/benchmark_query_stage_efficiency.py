@@ -470,10 +470,12 @@ def summarize(root):
         if read(dest/'status.json')['status']!='completed': raise ValueError('Incomplete trial')
         if read(dest/'run/cleanup.json')['gpu_processes']: raise ValueError('GPU remains owned')
         if dest!=first: comparisons.append(compare(first,dest,plan['case_ids']))
+        from benchmark_client_io import result_events
         cases=[read(dest/'run/answers/cases'/cid/'result.json') for cid in plan['case_ids']]
+        case_events=[result_events(case,dest/'run/answers/cases'/cid) for case,cid in zip(cases,plan['case_ids'])]
         durations=[];short=[];scoring=[];assembly=[]
-        for case in cases:
-            es=case['layerwise']['events'];ls=case['layerwise']['layers']
+        for case,es in zip(cases,case_events):
+            ls=case['layerwise']['layers']
             a=next(r for r in es if r['event']=='armed');b=next(r for r in es if r['event']=='completed')
             value=b['monotonic_at']-a['monotonic_at'];durations.append(value)
             if case['attention']['query_score_tokens']<=256: short.append(value)

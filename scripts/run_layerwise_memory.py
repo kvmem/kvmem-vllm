@@ -16,7 +16,7 @@ import uuid
 import recall_comparison_protocol as p
 from benchmark_memory import source, wait_terminal, digest_tokens
 from benchmark_niah import CpuCredits
-from benchmark_client_io import CaptureSlice, compact_response
+from benchmark_client_io import CaptureSlice, compact_response, result_events
 
 REPO=Path(__file__).resolve().parents[1]
 REFERENCE=REPO/'artifacts/fused-stable-quality-20261021-r1'
@@ -80,7 +80,7 @@ def supplemental_qualification(previous, rows):
     if (record['status']!='completed' or record['token_sha256']!=largest['token_sha256'] or
             not record['original_input_intact'] or record['prompt_tokens']!=largest['input_tokens']):
         raise ValueError('Largest input lacks a complete, input-bound first answer')
-    memory_pressure_audit(record['layerwise']['events'],p.read(
+    memory_pressure_audit(result_events(record,previous/'run/answers/cases'/largest['id']),p.read(
         previous/'run/answers/cases'/largest['id']/'events.json'),True,
         fixture['execution_flags'].get('layerwise_buffered_history',False))
     if [r['layer'] for r in record['layerwise']['layers']]!=list(range(16)):

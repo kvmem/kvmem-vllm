@@ -10,6 +10,7 @@ import regrade_flash as f
 from grade_mab_snapshot import EVALUATORS, verify
 from graph_v2_protocol import require
 from run_layerwise_memory import memory_pressure_audit
+from benchmark_client_io import result_events
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -46,7 +47,7 @@ def freeze(campaign, output, evaluation):
                     and x['charged_tokens'] <= profile['kvmem']['select_budget']
                     for x in layers), 'Query execution or Active budget changed')
         event_path = path.parent/'events.json'
-        pressures = memory_pressure_audit(result['layerwise']['events'], f.read(event_path), True,
+        pressures = memory_pressure_audit(result_events(result, path.parent), f.read(event_path), True,
             fixture['execution_flags'].get('layerwise_buffered_history', False),
             profile['kvmem']['select_budget'],
             fixture['execution_flags'].get('layerwise_rolling_decode', False))

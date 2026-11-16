@@ -40,13 +40,24 @@ def subset(fixture, ids):
     return selected
 
 
+def layerwise_events(result, case_dir):
+    """Inline events (older runs) or a capture-log reference (benchmark_client_io.result_events)."""
+    events = result['layerwise']['events']
+    if isinstance(events, list):
+        return events
+    # Imported here: frozen baselines put older scripts first on the path.
+    from benchmark_client_io import result_events
+    return result_events(result, case_dir)
+
+
 def choose_cases(baseline, *, exclude=(), refresh_only=False):
     fixture = read(baseline/'fixture.json')
     # Selection uses execution coverage only, never correctness or judge scores.
     long = []
     for row in fixture['rows']:
         result = read(baseline/'run/answers/cases'/row['id']/'result.json')
-        if any(e.get('event_type') == 'decode_pressure' for e in result['layerwise']['events']):
+        if any(e.get('event_type') == 'decode_pressure'
+               for e in layerwise_events(result, baseline/'run/answers/cases'/row['id'])):
             long.append(row['id'])
     if not long:
         raise ValueError('Reference has no accepted-output refresh sample')
@@ -212,7 +223,8 @@ def handoff_ready(plan, *, gpu_processes):
 
 def decode_coverage(arm, ids):
     return {cid: sum(e.get('event_type') == 'decode_pressure'
-                     for e in read(arm/'run/answers/cases'/cid/'result.json')['layerwise']['events'])
+                     for e in layerwise_events(read(arm/'run/answers/cases'/cid/'result.json'),
+                                              arm/'run/answers/cases'/cid))
             for cid in ids}
 
 

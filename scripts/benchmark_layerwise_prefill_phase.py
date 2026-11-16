@@ -146,7 +146,10 @@ def analyze_arm(root):
     clock=min(clocks,key=lambda r:abs(r['at']-release['at']))
     start=min(read(p)['at'] for p in (root/'run/answers/cases').glob('*/attempt.json'))
     end=release['at']+clock['wall_time']-clock['at']
-    records=[read(p) for p in (root/'run/answers/cases').glob('*/result.json')]
+    from benchmark_client_io import result_events
+    paths=sorted((root/'run/answers/cases').glob('*/result.json'))
+    records=[read(p) for p in paths]
+    record_events=[result_events(r,p.parent) for r,p in zip(records,paths)]
     assert len(records)==8 and all(r['original_input_intact'] and r['status']=='completed' for r in records)
     query=[]
     for p in (root/'run/answers/cases').glob('*/events.json'):
@@ -159,7 +162,7 @@ def analyze_arm(root):
     steps=lines(cap/'model_step_latency.jsonl')
     assert not any(e['decode_requests'] for e in steps if e['started_at']<release['at'])
     perf=read(root/'inference-performance.json')
-    pressure=[e for r in records for e in r['layerwise']['events'] if e.get('event_type')=='prefill_pressure']
+    pressure=[e for es in record_events for e in es if e.get('event_type')=='prefill_pressure']
     assert all(e.get('fallback_reason') is None for e in pressure)
     report=dict(history_tokens=release['history_tokens'],seconds=end-start,
         tokens_per_second=release['history_tokens']/(end-start),owners=8,

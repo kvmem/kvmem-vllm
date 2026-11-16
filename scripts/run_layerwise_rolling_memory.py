@@ -15,6 +15,7 @@ import sys
 import time
 
 import recall_comparison_protocol as p
+from benchmark_client_io import result_events
 
 REPO=Path(__file__).resolve().parents[1]
 DRIVERS={'scripts/run_layerwise_memory.py','scripts/run_layerwise_rolling_memory.py'}
@@ -157,7 +158,9 @@ def performance(campaign):
     work=p.read(campaign/'confirmed-work-performance.json')
     if perf['fresh_cases']!=102 or perf['inherited_cases'] or not work['all_submitted_completed']:
         raise ValueError('Performance requires 102 fresh, fence-confirmed responses')
-    results=[p.read(path) for path in (campaign/'run/answers/cases').glob('*/result.json')]
+    paths=sorted((campaign/'run/answers/cases').glob('*/result.json'))
+    results=[p.read(path) for path in paths]
+    events=[result_events(r,path.parent) for r,path in zip(results,paths)]
     wall=perf['inference_wall_seconds']
     return dict(inference_wall_seconds=wall,cases_per_hour=102*3600/wall,
         executed_prefill_tokens=work['completed']['public_prefill_tokens'],
@@ -165,8 +168,8 @@ def performance(campaign):
         output_tokens=sum(r['usage']['completion_tokens'] for r in results),
         output_tokens_per_wall_second=sum(r['usage']['completion_tokens'] for r in results)/wall,
         mean_request_seconds=sum(r['seconds'] for r in results)/102,
-        decode_refreshes=sum(e.get('event_type')=='decode_pressure' for r in results for e in r['layerwise']['events']),
-        cases_with_decode_refresh=sum(any(e.get('event_type')=='decode_pressure' for e in r['layerwise']['events']) for r in results),
+        decode_refreshes=sum(e.get('event_type')=='decode_pressure' for es in events for e in es),
+        cases_with_decode_refresh=sum(any(e.get('event_type')=='decode_pressure' for e in es) for es in events),
         concurrency_limit=perf['concurrency_limit'],
         scope='Whole inference wall time excluding model load and judge calls; token/s includes prefill, Query, maintenance and decode, not isolated kernel throughput.')
 

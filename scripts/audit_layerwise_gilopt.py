@@ -127,8 +127,8 @@ def verify_audit(report):
     return report
 
 
-def evidence(result, refresh):
-    return dict(events=result_events(result), layers=result['layerwise']['layers'], refresh=refresh)
+def evidence(result, refresh, case_dir=None):
+    return dict(events=result_events(result, case_dir), layers=result['layerwise']['layers'], refresh=refresh)
 
 
 def first_difference(before, after, path=''):
@@ -157,11 +157,11 @@ def first_difference(before, after, path=''):
     return None
 
 
-def canonical_signature(result, refresh):
+def canonical_signature(result, refresh, case_dir=None):
     # Reuse the strict accepted pressure/Query signature, adding rolling stage
     # identity so prefill and decode events cannot accidentally compare equal.
-    pressures, query = signature(evidence(result, refresh))
-    events = [e for e in result_events(result) if e['event'] == 'pressure_selected']
+    pressures, query = signature(evidence(result, refresh, case_dir))
+    events = [e for e in result_events(result, case_dir) if e['event'] == 'pressure_selected']
     for pressure, event in zip(pressures, events):
         pressure.update(event_type=event['event_type'], query_source=event['query_source'],
                         selected_tokens=event['selected_tokens'])
@@ -179,7 +179,7 @@ def compare_cases(before_dir, after_dir):
     controls = first_difference(requests[0], requests[1])
     if controls:
         raise ValueError('Input/sampling mismatch: '+repr(controls))
-    signs = [canonical_signature(r, read(p/'events.json')) for r, p in zip(results, roots)]
+    signs = [canonical_signature(r, read(p/'events.json'), p) for r, p in zip(results, roots)]
     pressure = first_difference(signs[0]['pressure'], signs[1]['pressure'], 'pressure')
     query = first_difference(signs[0]['query'], signs[1]['query'], 'query')
     choices = [read(p/'response.json')['choices'][0] for p in roots]
