@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import sys
 import time
+from vllm_kvmem.core.request_records import load_request
 
 
 def run(root):
@@ -29,7 +30,7 @@ def run(root):
             for owner in owners:
                 d=root/'bridge'/owner
                 first=next(d.glob('*/request.json'))
-                body=json.loads(first.read_text())
+                body=load_request(first)
                 assert owner.startswith('daily-') and body['prompt_cache_key']==row['session_id']
                 accepted=sorted(d.glob('*/accepted.json'))[-1]
                 token=json.loads(accepted.read_text())['token_ids'][-1]

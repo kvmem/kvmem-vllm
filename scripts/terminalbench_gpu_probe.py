@@ -14,6 +14,7 @@ import time
 import uuid
 
 import httpx
+from vllm_kvmem.core.request_records import load_request
 
 
 def read(path):
@@ -39,13 +40,13 @@ def prepare(source, tokenizer_path, protocol_path, output, tasks, turns=4):
     values = []
     for row in evidence['traces']:
         directory = source/'bridge'/row['owner']
-        body = read(directory/'00001/request.json')
+        body = load_request(directory/'00001/request.json')
         prepared = planner.prepare(to_anthropic(body), Trajectory())
         prefix = list(prepared[0])
         query = prepared[1]['kvmem_query_span']
         additions = []
         for turn in range(2, turns+1):
-            request = read(directory/f'{turn:05d}'/'request.json')
+            request = load_request(directory/f'{turn:05d}'/'request.json')
             users = [message['content'] for message in request['messages'] if message['role']=='user']
             if not users or not isinstance(users[-1], str):
                 raise ValueError('Probe requires an exact textual terminal observation')

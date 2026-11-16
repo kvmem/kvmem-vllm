@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from benchmarks.deepswe.claude_bridge import Planner, Protocol, Trajectory, backend_request, canonical
 from scripts.dsh_query_epoch import prepare_with_query_provenance
+from vllm_kvmem.core.request_records import RequestRecords, load_request
 
 
 def to_anthropic(body):
@@ -207,7 +208,7 @@ def restore_trajectory(planner,owner,directories):
     state=Trajectory()
     for turn,path in sorted(turns.items()):
         if turn!=state.turns+1:raise ValueError('Accepted history has a missing turn; refusing an inexact restore')
-        body=json.loads((path/'request.json').read_text());payload=to_anthropic(body)
+        body=load_request(path/'request.json');payload=to_anthropic(body)
         prepared,_=prepare_with_query_provenance(planner,payload,state,body)
         saved=json.loads((path/'plan.json').read_text())
         if len(prepared[0])!=saved['prompt_tokens'] or prepared[5]!=saved['exact_output_prefix_reused']:
@@ -266,6 +267,7 @@ def create_app(args,tokenizer):
         else:write()
     client=httpx.AsyncClient(trust_env=False,timeout=max(3600,(output_cap or args.gen_budget)/10))
     owners={};restored=set();key_owners={};closed_keys=set();args.output.mkdir(parents=True,exist_ok=True)
+    request_records={}   # owner -> RequestRecords: each turn saves only what changed
     def log(value):
         with (args.output/'requests.jsonl').open('a') as f:f.write(json.dumps(value,ensure_ascii=False)+'\n')
     @app.get('/health')
@@ -298,7 +300,7 @@ def create_app(args,tokenizer):
                 response.raise_for_status()
                 log(dict(at=time.time(),event='history_released',owner=owner,session_id=key,
                     cleanup_request_id=response.json()['id']))
-                del owners[owner];restored.discard(owner);released.append(owner)
+                del owners[owner];restored.discard(owner);released.append(owner);request_records.pop(owner,None)
         key_owners.pop(key,None)
         return dict(released=True,owners=released)
     @app.post('/v1/chat/completions')
@@ -360,7 +362,9 @@ def create_app(args,tokenizer):
                 if directory.exists() and (directory/'request.json').exists():
                     directory.rename(directory.with_name(directory.name+'-attempt-'+uuid.uuid4().hex[:8]))
                 directory.mkdir(parents=True,exist_ok=True)
-                await record(directory/'request.json',body)
+                saved_request=await asyncio.to_thread(request_records.setdefault(owner,RequestRecords()).record,
+                    directory.name,body,base=f'{state.turns:05d}' if state.turns else None)
+                await record(directory/'request.json',saved_request)
                 await record(directory/'plan.json',{k:v for k,v in data.items() if k!='prompt'}|
                     dict(prompt_tokens=len(tokens),exact_output_prefix_reused=prepared[5],
                          input_closure_tokens=getattr(prepared,'input_closure_tokens',0),

@@ -10,6 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+from vllm_kvmem.core.request_records import load_request
 
 try:
     from .terminalbench_query import TaskQuery, digest
@@ -53,7 +54,7 @@ def replay(root, max_owners=8, max_turns=32, task_names=None):
             continue
         instruction_path = root/'dataset/tasks'/task/'instruction.md'
         instruction = instruction_text(instruction_path)
-        first = read(directories[0]/'request.json')
+        first = load_request(directories[0]/'request.json')
         first_users = [m for m in first['messages'] if m['role'] == 'user']
         if len(first_users) != 1 or not isinstance(first_users[0]['content'], str):
             raise ValueError('Initial task source is ambiguous: '+task)
@@ -67,7 +68,7 @@ def replay(root, max_owners=8, max_turns=32, task_names=None):
         for index, directory in enumerate(directories[:max_turns]):
             if int(directory.name) != index+1:
                 break
-            body, plan = read(directory/'request.json'), read(directory/'plan.json')
+            body, plan = load_request(directory/'request.json'), read(directory/'plan.json')
             original = copy.deepcopy(body)
             proof = source.proof(body['messages'])
             if body != original:

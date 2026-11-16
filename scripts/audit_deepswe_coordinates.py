@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import time
+from vllm_kvmem.core.request_records import load_request
 
 
 def audit(run,cases):
@@ -27,7 +28,7 @@ def audit(run,cases):
         old=starts[task,turn]
         if old['exact_output_prefix_reused']:raise ValueError('Select an original canonical-fallback turn')
         directory=run/'bridge'/task/f'{turn:05d}'
-        payload=json.loads((directory/'request.json').read_text())
+        payload=load_request(directory/'request.json')
         reference=json.loads((directory/'plan.json').read_text())
         begin=time.perf_counter()
         tokens,plan,rendered,_,_,reused,locations=planner.prepare(payload,bridge.Trajectory())

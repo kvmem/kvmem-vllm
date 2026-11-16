@@ -521,6 +521,10 @@ def create_app(args, tokenizer):
     allowed = set(args.tasks.read_text().splitlines()) | {'preflight'}
     locks = {task:asyncio.Lock() for task in allowed}
     states = {task:Trajectory() for task in allowed}
+    # Each turn's request.json holds only what changed since the previous turn
+    # (vllm_kvmem.core.request_records.load_request rebuilds the whole request).
+    from vllm_kvmem.core.request_records import RequestRecords
+    request_records = {task:RequestRecords() for task in allowed}
     client = httpx.AsyncClient(trust_env=False,timeout=max(3600, output_cap / 10))
     inflight = 0
     credits = {}
@@ -629,7 +633,9 @@ def create_app(args, tokenizer):
                 tokens, plan, rendered, _, _, reused, _=prepared
                 directory=args.output/task/f'{state.turns+1:05d}'
                 directory.mkdir(parents=True,exist_ok=True)
-                (directory/'request.json').write_text(json.dumps(payload,ensure_ascii=False))
+                saved_request = await asyncio.to_thread(request_records[task].record, directory.name, payload,
+                    base=f'{state.turns:05d}' if state.turns else None)
+                (directory/'request.json').write_text(json.dumps(saved_request,ensure_ascii=False))
                 requested = payload.get('max_tokens', output_cap)
                 if type(requested) is not int or requested <= 0:
                     raise ValueError('max_tokens must be a positive integer')

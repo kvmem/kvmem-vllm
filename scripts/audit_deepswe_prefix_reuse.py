@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+from vllm_kvmem.core.request_records import load_request
 
 
 def audit(run):
@@ -20,9 +21,9 @@ def audit(run):
     for row in misses:
         task, turn = row['task'], row['turn']
         folder = run / 'bridge' / task
-        previous = json.loads((folder/f'{turn-1:05d}/request.json').read_text())
+        previous = load_request(folder/f'{turn-1:05d}/request.json')
         response = json.loads((folder/f'{turn-1:05d}/response.json').read_text())
-        current = json.loads((folder/f'{turn:05d}/request.json').read_text())
+        current = load_request(folder/f'{turn:05d}/request.json')
         before = protocol(request=previous)
         sent = protocol(request={**previous, 'messages': previous['messages'] +
                                [{'role':'assistant', 'content':response['content']}]})

@@ -1,5 +1,6 @@
 """Read-only evidence check for one pinned, unscored Agent runtime failure."""
 import json
+from vllm_kvmem.core.request_records import load_request
 
 try:
     from . import recover_terminalbench_network_audit as base
@@ -77,11 +78,11 @@ def validate(arm, lifecycle):
             'Original output-limit response is missing or incomplete')
     attempts = sorted((arm/prefix).glob('00636*'))
     require(len(attempts) == 9 and all(p.is_dir() for p in attempts), 'Query recovery request count differs')
-    last_request = read(arm/prefix/'00635/request.json')
+    last_request = load_request(arm/prefix/'00635/request.json')
     names = [raw_name, event_name, trajectory_name, prefix+'/00635/native.json', prefix+'/00635/accepted.json',
              prefix+'/00635/request.json', 'runtime/scripts/terminalbench_query.py']
     for directory in attempts:
-        request = read(directory/'request.json')
+        request = load_request(directory/'request.json')
         require(request.get('messages', [])[:-2] == last_request.get('messages')
                 and request['messages'][-2].get('role') == 'assistant'
                 and request['messages'][-1].get('role') == 'user'

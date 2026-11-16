@@ -8,6 +8,7 @@ import re
 import time
 
 from scripts.run_dsh_daily_suite import event_statistics, bridge_observations, save
+from vllm_kvmem.core.request_records import load_request
 
 
 def lines(path):
@@ -29,7 +30,7 @@ def summarize(root):
         for owner in obs['agent_owners']:
             for request in (root/'bridge'/owner).glob('*/request.json'):
                 turn=request.parent
-                body=json.loads(request.read_text())
+                body=load_request(request)
                 prepared=turn/'plan.json'
                 if not prepared.exists():continue
                 p=json.loads(prepared.read_text())

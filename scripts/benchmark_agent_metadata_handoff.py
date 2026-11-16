@@ -18,6 +18,7 @@ import time
 import psutil
 
 from scripts import run_agent_handoff_queue as q
+from vllm_kvmem.core.request_records import load_request
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -75,7 +76,7 @@ def restore_fixture(source, output, plan):
                 if evidence.get(rel) != digest:
                     raise ValueError('Original answer/journal changed: '+rel)
                 used[rel] = digest
-            body = q.read(path/'request.json')
+            body = load_request(path/'request.json')
             payload = to_anthropic(body)
             prepared = planner.prepare(payload, trajectory)
             saved = q.read(path/'plan.json')

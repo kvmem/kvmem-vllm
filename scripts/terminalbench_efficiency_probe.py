@@ -16,6 +16,7 @@ import traceback
 import uuid
 
 import httpx
+from vllm_kvmem.core.request_records import load_request
 
 
 CAPTURE_FILES = ('async_restore.jsonl', 'scheduler_refresh.jsonl', 'async_refresh.jsonl',
@@ -75,7 +76,7 @@ def prepare(short_fixture, tokenizer_path, output, owners=4, turns=5,
     values = []
     for owner in chosen:
         request_path = directories[owner['task']]/'00002/request.json'
-        body = read(request_path)
+        body = load_request(request_path)
         reasoning = next((m.get('reasoning_content') for m in body['messages']
                           if m['role'] == 'assistant' and m.get('reasoning_content')), None)
         if not isinstance(reasoning, str) or not reasoning:

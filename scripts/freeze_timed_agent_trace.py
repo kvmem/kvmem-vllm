@@ -14,6 +14,7 @@ import math
 from pathlib import Path
 import statistics
 import sys
+from vllm_kvmem.core.request_records import load_request
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -133,7 +134,9 @@ def choose_sources(run, users, threshold, turns, *, allow_shorter_history_fallba
         rows = []
         for path in selected:
             turn = int(path.name)
-            row = {name: read(path/(name+'.json')) for name in ('request','response','native','plan')}
+            # request.json may hold only the turn's changes; the frozen trace keeps the whole request.
+            row = {name: load_request(path/'request.json') if name == 'request' else read(path/(name+'.json'))
+                   for name in ('request','response','native','plan')}
             row.update(source_turn=turn,path=path,
                        start=events[task_id,turn,'start'],finish=events[task_id,turn,'finish'])
             output = row['native']['usage']['completion_tokens']
