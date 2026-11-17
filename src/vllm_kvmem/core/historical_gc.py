@@ -31,6 +31,11 @@ _POLICY_DEFAULTS = {'lru': {'keep_mandatory': True}, 'redundancy': {
     'thinking_only': False, 'pool_pairwise': False, 'all_history_references': False,
     'refresh_before_rank': False, 'epoch_peak': False, 'lru_fallback': False}}
 
+# Retire pure thinking once this many newer assistant turns have completed
+# (native HistoricalThinkingAgePolicy). Optional in every policy's parameters.
+THINKING_AGE_KEY = 'thinking_age_steps'
+
+
 def redundancy_layers(target_layers):
     if type(target_layers) is not int or target_layers <= 0:
         raise ValueError('Redundancy requires a positive target layer count')
@@ -219,7 +224,17 @@ class HistoricalGcSettings:
         if not isinstance(self.policy_params, dict):
             raise ValueError('historical_gc.policy_params must be an object')
         defaults = _POLICY_DEFAULTS[self.policy]
+        # Opt-in proactive age rule (any policy). Absent keeps the expanded
+        # parameters, and so every existing configuration, unchanged.
+        age = self.policy_params.get(THINKING_AGE_KEY, 0)
+        if type(age) is not int or not 0 <= age <= 1_000_000:
+            raise ValueError(f'historical_gc.policy_params.{THINKING_AGE_KEY} must be an integer in [0,1000000]')
+        if age and not (self.policy == 'redundancy' and self.policy_params.get('thinking_only') is True):
+            raise ValueError(f'historical_gc.policy_params.{THINKING_AGE_KEY} needs policy redundancy with '
+                             'thinking_only=true, which captures the accepted thinking labels')
         for key, value in self.policy_params.items():
+            if key == THINKING_AGE_KEY:
+                continue
             if key not in defaults:
                 raise ValueError(f'Unknown historical_gc.policy_params.{self.policy} parameter: {key!r}')
             default = defaults[key]

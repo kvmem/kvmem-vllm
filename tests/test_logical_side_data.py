@@ -51,9 +51,12 @@ class Scope:
     def publish_features(self, lease, value):
         return True
 
-    def publish_thinking(self, lease, thinking, known):
+    def publish_thinking(self, lease, thinking, known, turn=0):
         self.thinking.append((thinking, known))
         return True
+
+    def publish_turns(self, completed):
+        pass
 
 
 def prompt(rid, length, *, question=None):

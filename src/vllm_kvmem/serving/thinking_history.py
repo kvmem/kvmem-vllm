@@ -7,6 +7,8 @@ from collections import OrderedDict
 from bisect import bisect_right
 import weakref
 
+from .prompt_spans import combine_spans
+
 from .. import _native
 
 
@@ -64,8 +66,11 @@ class ThinkingHistory:
         self.closed = False
         self.generation_span = None
         self.generation_allowed = False
+        # Assistant-message ordinals of one binding: (key, begins, ends, completed).
+        self.turns = None
+        self.published_turns = None
         self.stats = dict(accepted_tokens=0, thinking_tokens=0, unknown_tokens=0,
-            pure_blocks=0, mixed_blocks=0, publications=0, invalidations=0,
+            pure_blocks=0, mixed_blocks=0, publications=0, invalidations=0, turn_index_errors=0,
             unsupported_template=int(layout is None))
 
     def note_append(self, history_begin, count, rows):
@@ -136,6 +141,48 @@ class ThinkingHistory:
         self.generation_span = (end + skip, length, 'assistant')
         self.generation_allowed = True
 
+    def _turn_index(self, binding):
+        """Exact assistant messages of this binding, from its outer role spans.
+
+        Ordinals are 1-based and count assistant messages from the start of
+        the conversation, so a continued session keeps every earlier ordinal.
+        The opt-in thinking age rule reads them; classification does not.
+        """
+        key = (id(binding), binding.namespace, binding.generation, len(binding.tokens),
+               len(binding.message_spans), len(binding.locality_spans), self.generation_span)
+        if self.turns is None or self.turns[0] != key:
+            try:
+                spans = combine_spans(binding.message_spans, binding.locality_spans)
+            except ValueError:
+                # Contradictory boundaries: no ordinals, so the age rule skips them.
+                spans = ()
+                self.stats['turn_index_errors'] += 1
+            begins = [lo for lo, _, role in spans if role == 'assistant']
+            ends = [hi for _, hi, role in spans if role == 'assistant']
+            # A prompt ending inside an assistant message continues it.
+            open_last = (self.generation_allowed and self.generation_span is None and
+                         bool(ends) and ends[-1] == len(binding.tokens))
+            self.turns = key, begins, ends, len(begins) - int(open_last)
+        return self.turns
+
+    def _turn_at(self, binding, position):
+        """Ordinal of the assistant message holding ``position`` (0 = none)."""
+        _, begins, ends, _ = self._turn_index(binding)
+        if position >= len(binding.tokens):
+            if not self.generation_allowed:
+                return 0
+            if self.generation_span is not None:
+                return len(begins) + 1
+            return len(begins) if ends and ends[-1] == len(binding.tokens) else 0
+        index = bisect_right(begins, position) - 1
+        return index + 1 if index >= 0 and position < ends[index] else 0
+
+    def _publish_turns(self, binding):
+        completed = self._turn_index(binding)[3]
+        if completed != self.published_turns:
+            self.scope.publish_turns(completed)
+            self.published_turns = completed
+
     def _classify(self, binding, begin, tokens, *, collect=True):
         """Apply exact outer role boundaries before inspecting body markers."""
         if self.parser is None:
@@ -195,6 +242,8 @@ class ThinkingHistory:
                     self._classify(binding, offset, binding.tokens[offset:min(history_begin, offset + 4096)], collect=False)
             self.seed_required = False
         self.through = history_begin
+        if self.parser is not None:
+            self._publish_turns(binding)
 
     def accept(self, binding, history_begin, retained, tokens, positions, repository):
         if not retained:
@@ -229,6 +278,8 @@ class ThinkingHistory:
                 # not infer that the newly observed suffix covers its prefix.
                 known = thinking = 0
             part = labels[start:start + count]
+            if offset == 0:
+                record._thinking_turn = self._turn_at(binding, history_begin + start)
             record._thinking_counts = (offset + count,
                 known + sum(value != 0 for value in part), thinking + part.count(2))
             self.publish(record, repository)
@@ -248,14 +299,15 @@ class ThinkingHistory:
             self.publications.pop(key, None)
             return False
         try:
-            result = self.scope.publish_thinking(lease, thinking, known)
+            turn = getattr(record, '_thinking_turn', 0)
+            result = self.scope.publish_thinking(lease, thinking, known, turn)
             if result:
                 self.stats['publications'] += 1
                 self.stats['pure_blocks' if thinking == known == record.count else 'mixed_blocks'] += 1
                 self.publications.pop(key, None)
                 record._thinking_counts = None
                 # Kept for prefix images: an imported session republishes it.
-                record._thinking_published = (thinking, known)
+                record._thinking_published = (thinking, known, turn)
             else:
                 # Retry metadata contention without keeping a deleted Record or
                 # its MeanK storage alive. The number is bounded by live records.

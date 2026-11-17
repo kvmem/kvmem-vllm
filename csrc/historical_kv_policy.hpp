@@ -26,6 +26,9 @@ struct HistoricalBlockMeta {
     // Accepted-token provenance for this exact generation. Unknown and mixed
     // records are not eligible for thinking-only redundancy.
     bool thinking_complete = false, thinking_only = false;
+    // 1-based ordinal of the assistant message holding this record's first
+    // token, published with the thinking labels. Zero means unknown.
+    uint32_t thinking_turn = 0;
     // Shared prefixes (docs/prefix-sharing.md, phase 2): this record's payload
     // is shared with other sessions or a prefix pool. Retiring it drops only
     // this session's reference and frees no CPU bytes (cpu_bytes is 0).
@@ -43,6 +46,9 @@ struct HistoricalPressure {
     uint64_t free_cpu_bytes = 0, low_cpu_bytes = 0, high_cpu_bytes = 0;
     uint64_t pending_cpu_bytes = 0;
     uint32_t requested_ready_slots = 0;
+    // Assistant messages complete in this scope's accepted history (from the
+    // session's exact message boundaries). Not a capacity signal.
+    uint64_t thinking_turns = 0;
     uint64_t scope_cpu_bytes = 0, scope_cpu_limit = UINT64_MAX, scope_pending_cpu_bytes = 0;
     // Shared prefixes: the part of scope_cpu_bytes held in shared payloads. The
     // scope's byte budget applies to its private bytes only.
@@ -56,7 +62,7 @@ struct HistoricalWorkBudget {
     size_t scan_blocks = 256, delete_blocks = 64;
 };
 
-enum class HistoricalDeleteReason { Lru, Redundancy, LossyPressure, LruFallback, LruRepresentativeFallback };
+enum class HistoricalDeleteReason { Lru, Redundancy, LossyPressure, LruFallback, LruRepresentativeFallback, ThinkingAge };
 enum class HistoricalCommitCode { Committed, AlreadyRetired, Shadow, Stale, Ineligible, Cancelled, Retry };
 
 struct HistoricalDeleteIntent {
@@ -73,6 +79,9 @@ struct HistoricalPolicyResult {
     HistoricalPolicyStatus status;
     size_t examined = 0, emitted = 0;
     bool progressed = false;
+    // Thinking age rule only: at the end of a pass, the old pure thinking it
+    // left because the current window, recent range or a hold protected it.
+    int64_t thinking_age_protected = -1;
 };
 
 // The manager retains/acknowledges every intent before clearing this batch.

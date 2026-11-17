@@ -2789,7 +2789,8 @@ PYBIND11_MODULE(_native, m) {
         .def("update", &HistoryScope::update, py::arg("lease"), py::arg("flags"), py::arg("use_seq") = 0)
         .def("mark_shared", &HistoryScope::mark_shared, py::arg("lease"))
         .def("publish_thinking", &HistoryScope::publish_thinking, py::arg("lease"),
-             py::arg("thinking_tokens"), py::arg("known_tokens"))
+             py::arg("thinking_tokens"), py::arg("known_tokens"), py::arg("turn") = 0)
+        .def("publish_turns", &HistoryScope::publish_turns, py::arg("completed"))
         .def("configure_features", &HistoryScope::configure_features,
              py::arg("layers"), py::arg("kv_heads"), py::arg("q_heads"), py::arg("dim"))
         .def("publish_features", [](HistoryScope &scope, const KvMemRepository::Lease &lease, py::buffer buffer) {
@@ -2847,6 +2848,7 @@ PYBIND11_MODULE(_native, m) {
             HSTAT(lru_fallback_retired); HSTAT(lru_representative_retired);
             HSTAT(thinking_classified); HSTAT(thinking_pure);
             HSTAT(shared_marked); HSTAT(shared_released);
+            HSTAT(thinking_age_retired); HSTAT(thinking_age_ineligible); HSTAT(thinking_age_protected);
 #undef HSTAT
             return result;
         });

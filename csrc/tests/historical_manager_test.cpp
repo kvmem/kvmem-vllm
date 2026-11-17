@@ -881,6 +881,51 @@ static void builtin_commit_rechecks_pressure_and_recent_range() {
     }
 }
 
+
+static void thinking_age_retires_through_the_manager_and_respects_the_window() {
+    for (const auto mode : {HistoricalGcMode::Delete, HistoricalGcMode::Shadow}) {
+        Fixture fixture(mode, false, {}, 1, false, {{"thinking_age_steps", int64_t(2)}});
+        for (unsigned i = 0; i < 6; ++i) fixture.append();    // 2 ready slots: no LRU pressure
+        auto &scope = *fixture.scope;
+        check(scope.publish_thinking(fixture.gpu[0], 4, 4, 1), "turn 1 publication failed");
+        check(scope.publish_thinking(fixture.gpu[1], 4, 4, 2), "turn 2 publication failed");
+        check(scope.publish_thinking(fixture.gpu[2], 2, 4, 2), "mixed publication failed");
+        check(scope.publish_thinking(fixture.gpu[3], 4, 4, 3), "turn 3 publication failed");
+        check(scope.publish_thinking(fixture.gpu[4], 4, 4, 0), "unknown-turn publication failed");
+        scope.publish_turns(2);
+        fixture.step(8);
+        check(scope.stats().decisions == 0, "age rule acted before a turn two steps newer completed");
+        scope.publish_turns(3);
+        fixture.step(8);
+        const auto first = scope.stats();
+        if (mode == HistoricalGcMode::Shadow) {
+            check(first.shadow_decisions == 1 && first.retired == 0, "shadow age decision changed history");
+            continue;
+        }
+        check(first.retired == 1 && first.thinking_age_retired == 1 && !fixture.repo->try_pin(fixture.handles[0]),
+              "turn-1 thinking was not retired once turn 3 completed");
+        check(scope.update(fixture.gpu[3], HistoricalSealed | HistoricalGpu | HistoricalCurrentWindow),
+              "current-window publication failed");
+        scope.publish_turns(5);
+        fixture.step(8);
+        const auto second = scope.stats();
+        check(second.thinking_age_retired == 2 && !fixture.repo->try_pin(fixture.handles[1]),
+              "turn-2 thinking was not retired");
+        check(second.thinking_age_protected == 1 && bool(fixture.repo->try_pin(fixture.handles[3])),
+              "the current window lost thinking to the age rule, or the gauge missed it");
+        for (unsigned i : {2u, 4u, 5u})
+            check(bool(fixture.repo->try_pin(fixture.handles[i])), "mixed, unknown or answer record was retired");
+        check(scope.update(fixture.gpu[3], HistoricalSealed | HistoricalGpu), "window release failed");
+        scope.publish_turns(6);
+        fixture.step(8);
+        check(scope.stats().thinking_age_retired == 3 && !fixture.repo->try_pin(fixture.handles[3]) &&
+              scope.stats().thinking_age_protected == 0,
+              "protected thinking was not retried after the next turn");
+        check(scope.stats().lru_fallback_retired == 0 && scope.stats().lossy_retired == 0,
+              "age retirement was counted as pressure fallback");
+    }
+}
+
 int main() {
     try {
         lru_retirement_and_cpu_reclamation_do_not_wait_for_gpu();
@@ -915,6 +960,7 @@ int main() {
         pure_scoring_progress_keeps_the_worker_burst_running();
         lru_fallback_does_not_require_query_or_feature_guards();
         builtin_commit_rechecks_pressure_and_recent_range();
+        thinking_age_retires_through_the_manager_and_respects_the_window();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

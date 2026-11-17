@@ -23,7 +23,7 @@ using Payload = HistoricalPayloadArena;
     X(policy_failures) X(shadow_decisions) X(admission_attempts) X(admission_retries) \
     X(redundancy_retired) X(lossy_retired) X(rejected_ineligible) X(cancelled_decisions) \
     X(lru_fallback_retired) X(lru_representative_retired) X(thinking_classified) X(thinking_pure) \
-    X(shared_marked) X(shared_released)
+    X(shared_marked) X(shared_released) X(thinking_age_retired) X(thinking_age_ineligible) X(thinking_age_protected)
 
 struct AtomicStats {
 #define FIELD(name) std::atomic<uint64_t> name{0};
@@ -50,7 +50,7 @@ struct PublishedBlock {
     std::atomic<uint32_t> engine_flags{0};
     std::atomic<uint32_t> policy_holds{0}, current_holds{0};
     std::atomic<uint64_t> thinking_version{0}, thinking_generation{0};
-    std::atomic<uint32_t> thinking_flags{0};
+    std::atomic<uint32_t> thinking_flags{0}, thinking_turn{0};
     std::atomic_flag policy_gate = ATOMIC_FLAG_INIT;
     std::atomic<uint64_t> cpu_event{0}, cpu_ack{0}, slot_event{0}, slot_ack{0};
     // Shared prefixes: the generation whose payload this session shares with
@@ -104,9 +104,11 @@ bool sample(const PublishedBlock &source, uint32_t slot, BlockView &out) {
     if (thinking_version & 1) return false;
     const auto thinking_generation = source.thinking_generation.load(std::memory_order_relaxed);
     const auto thinking_flags = source.thinking_flags.load(std::memory_order_relaxed);
+    const auto thinking_turn = source.thinking_turn.load(std::memory_order_relaxed);
     if (thinking_version != source.thinking_version.load(std::memory_order_acquire)) return false;
     out.meta.thinking_complete = thinking_generation == out.meta.handle.generation && (thinking_flags & 1);
     out.meta.thinking_only = out.meta.thinking_complete && (thinking_flags & 2);
+    out.meta.thinking_turn = out.meta.thinking_complete ? thinking_turn : 0;
     out.meta.shared = out.meta.handle.generation &&
         source.shared_generation.load(std::memory_order_relaxed) == out.meta.handle.generation;
     out.payload = {source.payload_slot.load(std::memory_order_relaxed),
@@ -117,6 +119,13 @@ bool sample(const PublishedBlock &source, uint32_t slot, BlockView &out) {
     out.meta.sealed = out.meta.sealed && out.payload.generation != 0;
     return source.version.load(std::memory_order_acquire) == version &&
            source.engine_version.load(std::memory_order_acquire) == engine_version;
+}
+
+// These retirements do not depend on Mean-K features or the current question.
+bool feature_independent(HistoricalDeleteReason reason) {
+    return reason == HistoricalDeleteReason::Lru || reason == HistoricalDeleteReason::LruFallback ||
+           reason == HistoricalDeleteReason::LruRepresentativeFallback ||
+           reason == HistoricalDeleteReason::ThinkingAge;
 }
 
 bool begin_publish(PublishedBlock &block, uint64_t &version) {
@@ -201,6 +210,7 @@ struct HistoricalScopeState {
     std::atomic<uint64_t> use_stamp{0};
     std::atomic<uint64_t> history_end{0}, recent_begin{0};
     std::atomic<uint32_t> requested_ready{0};
+    std::atomic<uint64_t> thinking_turns{0};
     std::atomic<uint64_t> requested_cpu_limit{UINT64_MAX};
     std::atomic<bool> closing{false}, resources_closed{false}, paused{false};
     std::atomic<uint64_t> pause_request{0}, pause_ack{UINT64_MAX};
@@ -483,6 +493,7 @@ struct HistoricalScopeState {
         result.high_cpu_bytes = config.cpu_free_high;
         result.pending_cpu_bytes = global_pending;
         result.requested_ready_slots = requested_ready.load(std::memory_order_acquire);
+        result.thinking_turns = thinking_turns.load(std::memory_order_acquire);
         const auto shared_released = stats.shared_released.load(std::memory_order_relaxed);
         result.scope_cpu_bytes = (stats.published.load(std::memory_order_relaxed) -
                                   stats.cpu_released.load(std::memory_order_relaxed) - shared_released) *
@@ -557,8 +568,7 @@ struct HistoricalScopeState {
         // No scoring or feature copying occurs under these guards. The
         // source guard freezes question/feature identity until retirement.
         HistoricalFeatureSource::CommitGuard feature_guard;
-        if (intent.reason != HistoricalDeleteReason::Lru && intent.reason != HistoricalDeleteReason::LruFallback &&
-                intent.reason != HistoricalDeleteReason::LruRepresentativeFallback) {
+        if (!feature_independent(intent.reason)) {
             if (!features) return Code::Ineligible;
             feature_guard = features->try_commit_guard(intent);
             if (!feature_guard.acquired) return Code::Retry;
@@ -608,6 +618,8 @@ struct HistoricalScopeState {
                     stats.retired.fetch_add(1, std::memory_order_relaxed);
                     if (intent.reason == HistoricalDeleteReason::Redundancy)
                         stats.redundancy_retired.fetch_add(1, std::memory_order_relaxed);
+                    if (intent.reason == HistoricalDeleteReason::ThinkingAge)
+                        stats.thinking_age_retired.fetch_add(1, std::memory_order_relaxed);
                     if (intent.reason == HistoricalDeleteReason::LossyPressure)
                         stats.lossy_retired.fetch_add(1, std::memory_order_relaxed);
                     if (intent.reason == HistoricalDeleteReason::LruFallback ||
@@ -619,7 +631,11 @@ struct HistoricalScopeState {
                     }
                 }
             } else if (code == Code::Stale) stats.stale.fetch_add(1, std::memory_order_relaxed);
-            else if (code == Code::Ineligible) stats.rejected_ineligible.fetch_add(1, std::memory_order_relaxed);
+            else if (code == Code::Ineligible) {
+                stats.rejected_ineligible.fetch_add(1, std::memory_order_relaxed);
+                if (intent.reason == HistoricalDeleteReason::ThinkingAge)
+                    stats.thinking_age_ineligible.fetch_add(1, std::memory_order_relaxed);
+            }
             ++batch_cursor;
         }
         clear_batch();
@@ -713,6 +729,8 @@ struct HistoricalScopeState {
                                              {config.scan_blocks, config.delete_blocks}, batch);
             stats.examined.fetch_add(result.examined, std::memory_order_relaxed);
             stats.decisions.fetch_add(result.emitted, std::memory_order_relaxed);
+            if (result.thinking_age_protected >= 0)
+                stats.thinking_age_protected.store(uint64_t(result.thinking_age_protected), std::memory_order_relaxed);
             policy_round_done = result.status == HistoricalPolicyStatus::Complete ||
                                 result.status == HistoricalPolicyStatus::NoCandidate;
             if (!batch.empty()) {
@@ -810,8 +828,7 @@ struct HistoricalScopeState {
                     shadow[intent->witness.slot] == intent->witness.generation) return Code::Ineligible;
             entry.witness = std::move(witness);
         }
-        if (intent->reason != HistoricalDeleteReason::Lru && intent->reason != HistoricalDeleteReason::LruFallback &&
-                intent->reason != HistoricalDeleteReason::LruRepresentativeFallback) {
+        if (!feature_independent(intent->reason)) {
             // Validated now (the round's linearization point) and not held
             // across the cross-rank agreement: feature publishers take this lock.
             if (!features) return Code::Ineligible;
@@ -933,6 +950,8 @@ struct HistoricalScopeState {
             if (code == Code::Committed) {
                 if (intent.reason == HistoricalDeleteReason::Redundancy)
                     stats.redundancy_retired.fetch_add(1, std::memory_order_relaxed);
+                if (intent.reason == HistoricalDeleteReason::ThinkingAge)
+                    stats.thinking_age_retired.fetch_add(1, std::memory_order_relaxed);
                 if (intent.reason == HistoricalDeleteReason::LossyPressure)
                     stats.lossy_retired.fetch_add(1, std::memory_order_relaxed);
                 if (intent.reason == HistoricalDeleteReason::LruFallback ||
@@ -943,7 +962,11 @@ struct HistoricalScopeState {
                         stats.lru_representative_retired.fetch_add(1, std::memory_order_relaxed);
                 }
             } else if (code == Code::Stale) stats.stale.fetch_add(1, std::memory_order_relaxed);
-            else if (code == Code::Ineligible) stats.rejected_ineligible.fetch_add(1, std::memory_order_relaxed);
+            else if (code == Code::Ineligible) {
+                stats.rejected_ineligible.fetch_add(1, std::memory_order_relaxed);
+                if (intent.reason == HistoricalDeleteReason::ThinkingAge)
+                    stats.thinking_age_ineligible.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         clear_batch();
         if (policy_round_done) round_active = false;
@@ -1223,7 +1246,7 @@ bool HistoricalGcScope::publish_features(const Repo::Lease &lease, const float *
     return true;
 }
 bool HistoricalGcScope::publish_thinking(const Repo::Lease &lease, uint32_t thinking_tokens,
-                                        uint32_t known_tokens) {
+                                        uint32_t known_tokens, uint32_t turn) {
     if (!state_ || state_->closing.load(std::memory_order_acquire)) return false;
     if (!state_->repository->owns(lease))
         throw std::invalid_argument("Historical thinking has a foreign repository lease");
@@ -1244,11 +1267,15 @@ bool HistoricalGcScope::publish_thinking(const Repo::Lease &lease, uint32_t thin
         ? (1u | (thinking_tokens == record.token_count ? 2u : 0u)) : 0u;
     const auto version = published.thinking_version.fetch_add(1, std::memory_order_acq_rel);
     published.thinking_flags.store(flags, std::memory_order_relaxed);
+    published.thinking_turn.store(turn, std::memory_order_relaxed);
     published.thinking_generation.store(record.handle.generation, std::memory_order_relaxed);
     published.thinking_version.store(version + 2, std::memory_order_release);
     if ((flags & 1) && !(previous & 1)) state_->stats.thinking_classified.fetch_add(1, std::memory_order_relaxed);
     if ((flags & 2) && !(previous & 2)) state_->stats.thinking_pure.fetch_add(1, std::memory_order_relaxed);
     return true;
+}
+void HistoricalGcScope::publish_turns(uint64_t completed) {
+    if (state_) state_->thinking_turns.store(completed, std::memory_order_release);
 }
 uint64_t HistoricalGcScope::begin_question(uint64_t expected_tokens) {
     if (!state_ || state_->closing.load(std::memory_order_acquire) || !state_->features) return 0;
