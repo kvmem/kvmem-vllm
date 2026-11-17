@@ -296,6 +296,15 @@ def main():
     p.add_argument('--gc', choices=['none','lru','redundancy'], default='none',
         help='historical GC (delete mode, automatic watermarks); redundancy = agent fixture policy, thinking_only off')
     p.add_argument('--repository-blocks', type=int, help='per-request retained-history capacity in 32-token blocks')
+    p.add_argument('--gc-thinking-only', action='store_true',
+        help='with --gc redundancy: keep the agent policy\'s thinking_only (captures accepted thinking labels)')
+    p.add_argument('--thinking-age-steps', type=int, default=0,
+        help='with --gc-thinking-only: retire pure thinking once this many newer assistant turns complete')
+    p.add_argument('--session-capacity', type=int, help='retained session owners (default max(8, --seqs))')
+    p.add_argument('--keep-reasoning-end', action='store_true',
+        help="keep the agent fixture's reasoning_end_str (needed for request thinking budgets)")
+    p.add_argument('--serve-only', action='store_true',
+        help='start the server, wait until healthy, then keep serving until terminated (no workload)')
     p.add_argument('--lifecycle-trace', action='store_true', help='KVMEM_LIFECYCLE_TRACE=1 (GC eviction trace per rank)')
     p.add_argument('--step-marks', action='store_true', help='per-step host phase marks (model_step_latency.jsonl per rank)')
     p.add_argument('--native-max-mib', type=int, help='action_native_max_bytes in MiB (default 512)')
@@ -321,6 +330,10 @@ def main():
     p.add_argument('--portable-scores', action='store_true',
         help='KVMEM_NATIVE_ATTENTION_FORCE_UNSUPPORTED=1: portable reference scorer (the 4090/sm89 path)')
     args=p.parse_args()
+    if args.thinking_age_steps and not args.gc_thinking_only:
+        raise SystemExit('--thinking-age-steps needs --gc-thinking-only')
+    if args.gc_thinking_only and args.gc != 'redundancy':
+        raise SystemExit('--gc-thinking-only needs --gc redundancy')
     root=BASE/'runs'/args.label
     root.mkdir(parents=True, exist_ok=False)
     shutil.copy2(Path(__file__),root/'benchmark.py')
@@ -336,7 +349,7 @@ def main():
         max_num_batched_tokens=args.prefill_chunk*args.physical_chunks+args.seqs*(args.mtp+1),
         request_planning_batch_tokens=args.prefill_chunk*args.physical_chunks+args.seqs*(args.mtp+1),
         kv_cache_memory_bytes=None if args.kv_gib is None else int(args.kv_gib*2**30),
-        reasoning_end_str=None)
+        reasoning_end_str=profile.get('reasoning_end_str') if args.keep_reasoning_end else None)
     kv=profile['kvmem']
     kv.update(select_budget=args.select,gen_budget=args.gen,session_capacity=max(8,args.seqs),
         cpu_read_cache_bytes=int(args.cpu_history_gib*2**30),cpu_history_cache_bytes_per_request=int(args.cpu_per_request_gib*2**30),
@@ -353,12 +366,20 @@ def main():
         else:
             # kv.update above already set the fixture's own historical_gc to None: reread it.
             gc=json.loads((BASE/'runtime/benchmarks/gate/agent.json').read_text())['profile']['kvmem']['historical_gc']
-            gc['policy_params'].update(thinking_only=False)
-            gc['policy_params'].pop('query_capture_bytes',None)
+            if args.gc_thinking_only:
+                # Host staging for the accepted Question rows of one scheduler batch.
+                gc['policy_params'].update(thinking_only=True,query_capture_bytes=128*2**20)
+                if args.thinking_age_steps:
+                    gc['policy_params']['thinking_age_steps']=args.thinking_age_steps
+            else:
+                gc['policy_params'].update(thinking_only=False)
+                gc['policy_params'].pop('query_capture_bytes',None)
         gc.pop('ready_low',None); gc.pop('ready_high',None)
         kv['historical_gc']=gc
     if args.repository_blocks:
         kv['repository_blocks']=args.repository_blocks
+    if args.session_capacity:
+        kv['session_capacity']=args.session_capacity
     if args.step_marks:
         kv['step_latency_interval']=1
     if args.native_max_mib:
@@ -504,6 +525,16 @@ def main():
             if time.monotonic()>deadline: raise TimeoutError('Server startup')
             time.sleep(2)
         print('SERVER READY',flush=True)
+        if args.serve_only:
+            save(root/'status.json',dict(stage='serving',at=time.time(),port=PORT,
+                served_model_name=profile['served_model_name']))
+            stop=[]
+            signal.signal(signal.SIGTERM,lambda *_: stop.append(1))
+            while not stop and proc.poll() is None:
+                time.sleep(2)
+            save(root/'status.json',dict(stage='stopped' if stop else 'server_exited',at=time.time(),
+                returncode=proc.poll()))
+            return
         save(root/'status.json',dict(stage='measuring',at=time.time()))
         if args.qualify:
             subprocess.run([sys.executable, str(BASE/'runtime/scripts/qualify_dflash_rolling.py'),
