@@ -35,6 +35,7 @@ batch size (user decision 2026-11-16 for the A800).
 import importlib.abc
 import importlib.machinery
 import sys
+from functools import partial
 
 from ..core import settings as _settings
 
@@ -100,6 +101,74 @@ def padded(common):
     return common.num_actual_tokens > int(common.query_start_loc_cpu[common.num_reqs])
 
 
+# FlashInfer 0.6.18 BatchPrefillWithPagedKVCacheWrapper.plan always passes
+# uniform_q_len=0 as the last FA2 plan argument. In CUDA-graph mode the
+# scheduler then sizes query tiles for the ragged worst case, one request
+# holding all but batch_size - 1 rows: 16 requests x 2 verify tokens plan
+# 128-row tiles for 12 packed rows each. Its uniform_q_len branch (scheduler.cuh)
+# sizes tiles for the real length instead; every request must then have
+# exactly that many rows, padded requests included.
+_FA2_PLAN_ARGS = 20
+
+
+class _UniformPlanModule:
+    """A wrapper's FA2 module whose plan() promises `uniform` rows per request."""
+    __slots__ = ('module', 'uniform')
+
+    def __init__(self, module, uniform):
+        self.module, self.uniform = module, uniform
+
+    def __getattr__(self, name):
+        return getattr(self.module, name)
+
+    def plan(self, *args):
+        # [.., is_cuda_graph (11), .., fixed_split, disable_split, colocated_ctas, uniform_q_len]
+        if len(args) != _FA2_PLAN_ARGS or args[11] is not True or args[-2] != 0 or args[-1] != 0:
+            raise RuntimeError('KVMEM_FA2_VERIFY_GRAPH: unexpected FlashInfer FA2 plan arguments')
+        return self.module.plan(*args[:-1], self.uniform)
+
+
+def uniform_wrapper_class(base):
+    """base with plan_uniform(): plan() with the FA2 scheduler told every request
+    has `rows` query rows. _cached_module is otherwise unchanged (the native
+    stats overlay swaps it around each run)."""
+    class UniformVerifyWrapper(base):
+        _kvmem_uniform_rows = 0
+
+        @property
+        def _cached_module(self):
+            module = self.__dict__.get('_kvmem_cached_module')
+            rows = self._kvmem_uniform_rows
+            return _UniformPlanModule(module, rows) if rows and module is not None else module
+
+        @_cached_module.setter
+        def _cached_module(self, value):
+            if isinstance(value, _UniformPlanModule):
+                value = value.module
+            self.__dict__['_kvmem_cached_module'] = value
+
+        def plan_uniform(self, rows, **kwargs):
+            self._kvmem_uniform_rows = rows
+            try:
+                return self.plan(**kwargs)
+            finally:
+                self._kvmem_uniform_rows = 0
+
+    return UniformVerifyWrapper
+
+
+def _check_plan_abi(wrapper_cls):
+    import inspect
+    try:
+        source = inspect.getsource(wrapper_cls.plan)
+    except (AttributeError, OSError, TypeError):
+        source = ''
+    if (source.count('args.append(0)  # uniform_q_len') != 1 or
+            source.count('args.append(0)  # num_colocated_ctas') != 1):
+        raise RuntimeError('KVMEM_FA2_VERIFY_GRAPH: FlashInfer prefill plan ABI changed '
+                           '(uniform_q_len / num_colocated_ctas)')
+
+
 def install(module):
     """Patch the imported FlashInfer backend module (idempotent)."""
     missing = [name for name in _REQUIRED if not hasattr(module, name)]
@@ -111,6 +180,8 @@ def install(module):
         raise RuntimeError('KVMEM_FA2_VERIFY_GRAPH: FlashInfer backend lacks ' + ', '.join(missing))
     if getattr(builder, '_kvmem_fa2_verify_graph', False):
         return
+    _check_plan_abi(module.BatchPrefillWithPagedKVCacheWrapper)
+    uniform_wrapper = uniform_wrapper_class(module.BatchPrefillWithPagedKVCacheWrapper)
     import torch
     from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -147,7 +218,7 @@ def install(module):
             return state['eager']
         wrapper = state['graph'].get(num_reqs)
         if wrapper is None:
-            wrapper = module.BatchPrefillWithPagedKVCacheWrapper(
+            wrapper = uniform_wrapper(
                 self._get_workspace_buffer(), layout, use_cuda_graph=True,
                 qo_indptr_buf=torch.zeros(num_reqs + 1, dtype=torch.int32, device=self.device),
                 paged_kv_indptr_buf=self.paged_kv_indptr.gpu[:num_reqs + 1],
@@ -183,7 +254,18 @@ def install(module):
         num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
         paged_kv_indices = self._compute_flashinfer_kv_metadata(
             num_blocks_np, seq_lens_np, common.block_table_tensor, num_reqs, page_size)
-        qo_indptr_cpu = common.query_start_loc_cpu[:num_reqs + 1]
+        wrapper = _verify_wrapper(self, num_reqs, state['limit'])
+        # A graph wrapper replays only full-width verification (vLLM's FULL
+        # uniform batches): plan it with every request, padding included, at
+        # exactly `width` rows so its query tiles fit 1 + k rows. Padded
+        # requests have no KV; their rows are padding tokens (vLLM pads the
+        # token count to at least num_reqs * width) and are never sampled.
+        uniform = (width if isinstance(wrapper, uniform_wrapper) and width == state['limit'] and
+                   common.num_actual_tokens >= num_reqs * width else 0)
+        if uniform:
+            qo_indptr_cpu = torch.arange(0, (num_reqs + 1) * width, width, dtype=torch.int32)
+        else:
+            qo_indptr_cpu = common.query_start_loc_cpu[:num_reqs + 1]
         paged_kv_indptr_cpu = self.paged_kv_indptr.cpu[:num_reqs + 1]
         last_page_len_cpu = self.paged_kv_last_page_len.cpu[:num_reqs]
         kv_lens_cpu = module.get_seq_lens(paged_kv_indptr_cpu, last_page_len_cpu, page_size)
@@ -192,8 +274,8 @@ def install(module):
             paged_kv_indptr_cpu = paged_kv_indptr_cpu.pin_memory()
             last_page_len_cpu = last_page_len_cpu.pin_memory()
             kv_lens_cpu = kv_lens_cpu.pin_memory()
-        wrapper = _verify_wrapper(self, num_reqs, state['limit'])
-        wrapper.plan(
+        plan = partial(wrapper.plan_uniform, uniform) if uniform else wrapper.plan
+        plan(
             qo_indptr=qo_indptr_cpu, paged_kv_indptr=paged_kv_indptr_cpu, paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=last_page_len_cpu, seq_lens=kv_lens_cpu,
             num_qo_heads=self.num_qo_heads, num_kv_heads=self.num_kv_heads, head_dim_qk=self.head_dim,

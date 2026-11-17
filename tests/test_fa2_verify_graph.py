@@ -72,10 +72,53 @@ class _Builder:
         raise AssertionError('not reached')
 
 
-def _patched_builder():
-    module = NS(FlashInferMetadataBuilder=type('B', (_Builder,), {}),
-                **{name: object() for name in fvg._REQUIRED if name != 'FlashInferMetadataBuilder'})
+class _FakeFA2Module:
+    """FlashInfer's compiled FA2 module: records plan arguments."""
+    def __init__(self):
+        self.plans = []
+
+    def plan(self, *args):
+        self.plans.append(args)
+        return 'plan-info'
+
+    def paged_run(self, *args):
+        return 'ran'
+
+
+class _FakePrefillWrapper:
+    """BatchPrefillWithPagedKVCacheWrapper in CUDA-graph mode, reduced to the FA2 plan ABI."""
+    def __init__(self, float_workspace, layout, use_cuda_graph=False, **buffers):
+        self.use_cuda_graph, self.buffers, self.kwargs = use_cuda_graph, buffers, None
+        self._cached_module = None
+
+    def plan(self, **kwargs):
+        if self._cached_module is None or not isinstance(self._cached_module, (_FakeFA2Module, fvg._UniformPlanModule)):
+            self._cached_module = _FakeFA2Module()
+        self.kwargs = kwargs
+        args = [None] * 11 + [self.use_cuda_graph] + [None] * 4
+        args.append(-1)  # fixed_split_size
+        args.append(False)  # disable_split_kv
+        args.append(0)  # num_colocated_ctas
+        args.append(0)  # uniform_q_len
+        self._plan_info = self._cached_module.plan(*args)
+
+
+def _fake_module(builder_base=None):
+    from contextlib import nullcontext
+    module = NS(FlashInferMetadataBuilder=type('B', (builder_base or _Builder,), {}),
+                BatchPrefillWithPagedKVCacheWrapper=_FakePrefillWrapper,
+                FlashInferMetadata=lambda **kw: NS(**kw), FIDecode=lambda wrapper: NS(wrapper=wrapper),
+                get_flashinfer_layout_string=lambda layout: 'NHD', PIN_MEMORY=False,
+                gpu_sync_allowed=nullcontext,
+                get_seq_lens=lambda indptr, last, page: (indptr[1:] - indptr[:-1] - 1).clamp(min=0) * page + last)
+    for name in fvg._REQUIRED:
+        assert hasattr(module, name), name
     fvg.install(module)
+    return module
+
+
+def _patched_builder():
+    module = _fake_module()
     builder = object.__new__(module.FlashInferMetadataBuilder)
     builder.calls = []
     builder._kvmem_verify = dict(limit=5, graph={}, eager=None)
@@ -155,3 +198,116 @@ def test_install_patches_the_pinned_backend():
 def test_install_refuses_an_unknown_backend():
     with pytest.raises(RuntimeError):
         fvg.install(NS())
+
+
+def test_uniform_plan_module_passes_the_row_count_only_to_the_fa2_planner():
+    module = _FakeFA2Module()
+    proxy = fvg._UniformPlanModule(module, 2)
+    args = (None,) * 11 + (True,) + (None,) * 4 + (-1, False, 0, 0)
+    assert proxy.plan(*args) == 'plan-info' and module.plans[-1][-1] == 2 and module.plans[-1][:-1] == args[:-1]
+    assert proxy.paged_run() == 'ran'                       # everything else is the real module
+    for bad in (args[:-1], args[:11] + (False,) + args[12:], args[:-1] + (3,), args[:-2] + (1, 0)):
+        with pytest.raises(RuntimeError, match='plan arguments'):
+            proxy.plan(*bad)
+
+
+def test_uniform_wrapper_swaps_modules_like_the_native_overlay():
+    cls = fvg.uniform_wrapper_class(_FakePrefillWrapper)
+    wrapper = cls(None, 'NHD', use_cuda_graph=True)
+    wrapper.plan_uniform(2)
+    real = wrapper._cached_module
+    assert isinstance(real, _FakeFA2Module) and real.plans[-1][-1] == 2
+    wrapper.plan()                                          # an ordinary plan stays worst case
+    assert real.plans[-1][-1] == 0
+    # The overlay saves the module, installs its own for one run, then restores it.
+    overlay = _FakeFA2Module()
+    saved = wrapper._cached_module
+    wrapper._cached_module = overlay
+    assert wrapper._cached_module is overlay
+    wrapper._cached_module = saved
+    assert wrapper._cached_module is real
+    # A proxy assigned back (saved during a uniform plan) is unwrapped.
+    wrapper._kvmem_uniform_rows = 2
+    proxied = wrapper._cached_module
+    wrapper._kvmem_uniform_rows = 0
+    wrapper._cached_module = proxied
+    assert wrapper._cached_module is real
+
+    def fail(**kw):
+        raise ValueError('plan failed')
+    wrapper.plan = fail
+    with pytest.raises(ValueError):
+        wrapper.plan_uniform(2)
+    assert wrapper._kvmem_uniform_rows == 0
+
+
+def test_installed_flashinfer_plan_abi_is_the_one_patched():
+    prefill = pytest.importorskip('flashinfer.prefill')
+    fvg._check_plan_abi(prefill.BatchPrefillWithPagedKVCacheWrapper)
+    with pytest.raises(RuntimeError, match='ABI changed'):
+        fvg._check_plan_abi(_Builder)
+
+
+class _KVBuilder(_Builder):
+    """FlashInferMetadataBuilder state the verification build reads."""
+    def _compute_flashinfer_kv_metadata(self, num_blocks, seq_lens, block_table, num_reqs, page_size):
+        self.paged_kv_indptr.cpu[0] = 0
+        self.paged_kv_indptr.cpu[1:num_reqs + 1] = torch.as_tensor(num_blocks).cumsum(0)
+        last = torch.as_tensor(seq_lens) % page_size
+        self.paged_kv_last_page_len.cpu[:num_reqs] = torch.where((last == 0) & (torch.as_tensor(seq_lens) != 0),
+                                                                 page_size, last)
+        return torch.zeros(int(self.paged_kv_indptr.cpu[num_reqs]), dtype=torch.int32)
+
+    def _get_workspace_buffer(self):
+        return None
+
+
+def _kv_builder(limit):
+    module = _fake_module(_KVBuilder)
+    b = object.__new__(module.FlashInferMetadataBuilder)
+    b.calls, b.page_size, b.device = [], 16, 'cpu'
+    b._kvmem_verify = dict(limit=limit, graph={}, eager=None)
+    b.enable_cuda_graph, b._decode_cudagraph_max_bs, b.kv_cache_layout = True, 64, 'NHD'
+    b.paged_kv_indptr = NS(cpu=torch.zeros(33, dtype=torch.int32), gpu=torch.zeros(33, dtype=torch.int32))
+    b.paged_kv_last_page_len = NS(cpu=torch.zeros(32, dtype=torch.int32), gpu=torch.zeros(32, dtype=torch.int32))
+    b.paged_kv_indices = torch.zeros(1024, dtype=torch.int32)
+    b.num_qo_heads, b.num_kv_heads, b.head_dim, b.sm_scale, b.window_left = 12, 2, 256, 1.0, -1
+    b.logits_soft_cap, b.q_data_type_decode, b.q_data_type_prefill = None, torch.bfloat16, torch.bfloat16
+    b.kv_cache_dtype, b.model_config = torch.float8_e4m3fn, NS(dtype=torch.bfloat16)
+    b.prefill_fixed_split_size, b.disable_split_kv = -1, False
+    return b
+
+
+def _batch(lens, actual, seq_lens):
+    c = common(lens, actual=actual)
+    c.causal, c.seq_lens = True, torch.tensor(seq_lens, dtype=torch.int32)
+    c.block_table_tensor, c.slot_mapping = None, None
+    return c
+
+
+def test_full_graph_batch_plans_every_request_at_the_verification_width():
+    """3 requests padded to a 4-request graph: the padded request gets 2 query rows
+    and no KV, and the FA2 scheduler is told every request has exactly 2 rows."""
+    b = _kv_builder(limit=2)
+    meta = b.build(0, _batch([2, 2, 2, 0], 8, [40, 33, 18, 0]))
+    wrapper = meta.decode.wrapper
+    assert b._kvmem_verify['graph'][4] is wrapper and wrapper._max_total_num_rows == 8
+    assert wrapper.kwargs['qo_indptr'].tolist() == [0, 2, 4, 6, 8]
+    assert wrapper.kwargs['seq_lens'].tolist() == [40, 33, 18, 0]
+    assert wrapper._cached_module.plans[-1][-1] == 2
+    assert meta.num_decode_tokens == 8 and meta.num_decodes == 4
+
+
+def test_unpadded_graph_sized_batch_also_plans_uniform_rows():
+    b = _kv_builder(limit=2)
+    meta = b.build(0, _batch([2, 2], 4, [40, 33]))
+    assert meta.decode.wrapper.kwargs['qo_indptr'].tolist() == [0, 2, 4]
+    assert meta.decode.wrapper._cached_module.plans[-1][-1] == 2
+
+
+def test_narrower_than_full_width_keeps_the_worst_case_plan():
+    """Only full-width batches replay a FULL graph; others keep the exact qo_indptr."""
+    b = _kv_builder(limit=5)
+    meta = b.build(0, _batch([3, 3], 6, [40, 33]))
+    assert meta.decode.wrapper.kwargs['qo_indptr'].tolist() == [0, 3, 6]
+    assert meta.decode.wrapper._cached_module.plans[-1][-1] == 0
