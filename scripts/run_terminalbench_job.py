@@ -18,9 +18,9 @@ import tomllib
 import httpx
 import psutil
 try:
-    from .terminalbench_network import reclaim_trial_networks, assert_direct_docker, DIRECT_CONTAINER_ENV
+    from .terminalbench_network import reclaim_trial_networks, assert_direct_docker, container_env
 except ImportError:
-    from terminalbench_network import reclaim_trial_networks, assert_direct_docker, DIRECT_CONTAINER_ENV
+    from terminalbench_network import reclaim_trial_networks, assert_direct_docker, container_env
 
 
 GIB = 1024**3
@@ -115,8 +115,9 @@ async def run(root, config_path):
         if 'proxy' in key.lower():
             del os.environ[key]
     download_policy = assert_direct_docker()
-    if any(config.environment.env.get(key) != value for key, value in DIRECT_CONTAINER_ENV.items()):
-        raise ValueError('New job config must explicitly disable container proxies')
+    expected = container_env(json.loads((root/'manifest.json').read_text()))
+    if any(config.environment.env.get(key) != value for key, value in expected.items()):
+        raise ValueError('Job container proxies must be explicitly disabled, or exactly the declared relay')
     job_dir = config.jobs_dir / config.job_name
     if job_dir.exists():
         raise ValueError('Refuse an attempted job directory; recovery requires a separate audit')

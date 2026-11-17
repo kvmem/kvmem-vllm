@@ -211,7 +211,8 @@ def freeze_runtime(repo, runtime):
                'terminalbench_harness.py', 'terminalbench_pty.py', 'terminalbench_tool_bundle.py',
                'terminalbench_verifier_cache.py',
                'terminalbench_query.py', 'terminalbench_replay.py', 'terminalbench_gpu_probe.py',
-               'qualify_thinking_gc_preflight.py', 'gpu_efficiency_monitor.py')
+               'qualify_thinking_gc_preflight.py', 'gpu_efficiency_monitor.py',
+               'terminalbench_proxy_relay.py')
     for name in scripts:
         shutil.copy2(repo/'scripts'/name, runtime/'scripts'/name)
     shutil.copy2(repo/'benchmarks/deepswe/claude_bridge.py', runtime/'benchmarks/deepswe/claude_bridge.py')
