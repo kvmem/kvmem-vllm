@@ -75,6 +75,7 @@ def physical_config(config):
         # Do not extend this exception
         # to ordinary no-GC serving or a different logical/physical geometry.
         if (config.model_config.max_model_len != 524288 or
+                getattr(config.parallel_config, 'tensor_parallel_size', 1) != 1 or
                 _settings.get('KVMEM_RECALL_CONCURRENT_OWNERS', '1') not in ('1', '2', '4', '8') or
                 str(config.scheduler_config.max_num_seqs) != _settings.get('KVMEM_RECALL_CONCURRENT_OWNERS', '1') or
                 gc is not None or
@@ -95,8 +96,10 @@ def physical_config(config):
             config.cache_config.mamba_cache_mode != 'none' or
             config.cache_config.num_gpu_blocks_override is not None or
             config.model_config.original_max_model_len == -1 or
+            # TP=2 ranks own disjoint heads with identical local geometry (check_specs).
+            getattr(config.parallel_config, 'tensor_parallel_size', 1) not in (1, 2) or
             any(getattr(config.parallel_config, field, 1) != 1 for field in
-                ('tensor_parallel_size','pipeline_parallel_size','decode_context_parallel_size',
+                ('pipeline_parallel_size','decode_context_parallel_size',
                  'prefill_context_parallel_size'))):
         raise ValueError('Unqualified bounded logical KV planning configuration')
     frame = options.memory.select_budget + options.memory.gen_budget
@@ -110,13 +113,13 @@ def physical_config(config):
 
 def check_specs(specs, *, allow_dflash=False, expected_workers=1):
     from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
-    if (expected_workers not in ((1, 2) if allow_dflash else (1,)) or
+    if (expected_workers not in (1, 2) or
             len(specs) != expected_workers or any(not row for row in specs)):
         raise ValueError('Bounded logical planning requires every declared worker')
     # TP ranks own disjoint heads with identical local cache geometry. Native
     # planning still receives each rank's available bytes independently.
     if any(row != specs[0] for row in specs[1:]):
-        raise ValueError('DFlash2 TP workers disagree on local cache geometry')
+        raise ValueError('TP workers disagree on local cache geometry')
     for row in specs:
         if not any(type(spec) is FullAttentionSpec for spec in row.values()):
             raise ValueError('No bounded full-attention cache')

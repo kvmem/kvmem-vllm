@@ -222,7 +222,8 @@ def review(root):
     final_gc=archive.get('historical_gc') or {}
     gc_counters=('retired','redundancy_retired','lru_fallback_retired','lru_representative_retired',
                  'lossy_retired','cpu_released','slots_released','thinking_classified','thinking_pure',
-                 'policy_failures','decisions','examined','ticks')
+                 'policy_failures','decisions','examined','ticks',
+                 'thinking_age_retired','thinking_age_ineligible','thinking_age_passes')
     formal_gc=({key:final_gc.get(key,0)-before_gc.get(key,0) for key in gc_counters}
                if before_gc is not None else None)
     # Stopped task containers retain each original filesystem for diagnosis.

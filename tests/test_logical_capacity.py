@@ -90,9 +90,18 @@ def test_rejects_unqualified_runtime(tmp_path,change):
     if change=='rolling':cfg.kv_transfer_config.kv_connector_extra_config['kvmem']['rolling_active_window']=False
     if change=='apc':cfg.cache_config.enable_prefix_caching=True
     if change=='async':cfg.scheduler_config.async_scheduling=True
-    if change=='tp':cfg.parallel_config.tensor_parallel_size=2
+    if change=='tp':cfg.parallel_config.tensor_parallel_size=4
     if change=='override':cfg.cache_config.num_gpu_blocks_override=100000
     with pytest.raises(ValueError):physical_config(cfg)
+
+
+def test_tp2_bounded_planning_uses_the_frame_on_identical_ranks(tmp_path):
+    cfg=config(tmp_path)
+    single=physical_config(cfg)
+    cfg.parallel_config.tensor_parallel_size=2
+    bounded=physical_config(cfg)
+    assert bounded is not cfg and cfg.model_config.max_model_len==10000000
+    assert bounded.model_config.max_model_len==single.model_config.max_model_len<cfg.model_config.max_model_len
 
 
 def test_prior_lengths_use_native_planner_without_changes():

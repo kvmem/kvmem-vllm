@@ -380,6 +380,12 @@ def main():
         kv['repository_blocks']=args.repository_blocks
     if args.session_capacity:
         kv['session_capacity']=args.session_capacity
+    if args.gc_thinking_only:
+        # Explicit copies of the automatic watermarks (HistoricalGcSettings.native):
+        # the thinking GC preflight sizes its fixture from the profile.
+        blocks=kv['repository_blocks']
+        low=max(1,blocks//20)
+        kv['historical_gc'].update(ready_low=low,ready_high=max(low+1,blocks//10))
     if args.step_marks:
         kv['step_latency_interval']=1
     if args.native_max_mib:
