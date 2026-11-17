@@ -24,13 +24,18 @@ A profile's `kvmem` block (K128K/G32K example):
 "qsa_split_selector": true, "qsa_streaming": true, "qsa_hot_pages": 3, "qsa_ring_pages": 1,
 "archive_backend": "nvme", "cpu_read_cache_bytes": 0, "nvme_max_bytes": 137438953472,
 "archive_io_max_bytes": 17179869184, "archive_direct_reads": true, "archive_direct_threads": 8,
-"archive_layout": "layer"
+"archive_layout": "layer", "batched_cpu_append": true, "async_cpu_scatter": true
 ```
 
 - `qsa_ring_pages`: one step of one request (a prefill chunk or the atomic
   Query replay) must fit in `qsa_ring_pages * 3008 - 8` tokens. Two ring pages
   allow ~6K-token prefill chunks (`prefill_chunk_tokens` and
   `query_replay_budget` 5952 with `request_planning_batch_tokens` 6019).
+- Decode host path: `fused_gdn_metadata` (default on) writes the per-step
+  metadata of all GDN cache groups with one launch
+  (adapters/gdn_metadata_fusion.py); `batched_cpu_append` and
+  `async_cpu_scatter` publish accepted tokens to the CPU window in one native
+  call on the scatter worker instead of per request on the engine thread.
 - KVMem's per-layer strategies run on the same layout. `strategy_path: "layer"`
   selects per layer at the final Query, the first
   `KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS` layers sharing the global selection
@@ -70,7 +75,15 @@ All 2,606 records of a layer-major run passed the whole-record digest check
 after being rebuilt from their per-layer groups. With several concurrent
 requests the eager reference itself is not reproducible run to run (two runs
 of the resident combined-method reference disagree on all 4 concurrent
-requests), so concurrent outputs are not compared.
+requests), so concurrent outputs are not compared. At K128K with 184K-token
+prompts and 512 outputs, two runs of the same single-request configuration
+also differ (with or without `B12X_DYNAMIC_DETERMINISTIC_OUTPUT=1`). The
+decode host-path changes are therefore verified byte for byte inside the
+server: `KVMEM_GDN_FUSION_CHECK=1` reruns vLLM's own update after each fused
+launch and compared all 21,000 group updates of a run (every buffer and
+metadata field, no difference), and with `verify_archive_on_finish` all
+47,752 archived records of the async-scatter run matched their accepted
+capture checksums.
 
 ### Reselection from SSD
 
@@ -142,12 +155,46 @@ rows. It also capped the KV pool at the 4,080 pages 16 requests need
 GPU memory stayed free, and the final-Query MeanK scoring of several requests
 ran out of memory during prefill.
 
+### Decode host path
+
+The configuration of the 16-request row above (K128K/G32K, 184K prompts,
+2,112-token batches, capped pool) on the current code, changing only the
+decode host path (the first row is that configuration: 62.7 ms here, 63.4 ms
+above on the previous commit). Median decode step and steady decode
+throughput:
+
+| Host path | 1 request | 4 requests | 16 requests |
+| --- | --- | --- | --- |
+| vLLM per-group GDN metadata, per-request append | 23.9 ms | 32.8 ms, 275 tok/s | 62.7 ms, 633 tok/s |
+| + fused GDN metadata | 21.1 ms | 31.8 ms, 274 tok/s | 61.1 ms, 685 tok/s |
+| + batched CPU append | 20.8 ms | 31.1 ms, 293 tok/s | 60.1 ms, 677 tok/s |
+| + asynchronous CPU scatter | 22.4 ms | 30.3 ms, 299 tok/s | 54.1 ms, 753 tok/s |
+
+With all three, 16 requests decode 19% faster (753 vs 633 tok/s), about 2.1x
+the 5-request resident maximum. Asynchronous scatter costs a single request
+about 1.6 ms per step (the hand-off to the scatter worker) and pays from 4
+requests up. A profile of the vendor path at 16 requests found
+the GPU busy 62% of each step (45 ms of kernels: MoE and dense GEMMs two
+thirds, QSA attention and indexer 10%, three-tier residency 2%). Most of the
+rest was host work, exposed by synchronous scheduling: vLLM rebuilt the GDN
+metadata of 36 of the 50 one-layer cache groups (13 QSA and 37 GDN layers with
+MTP) per step through its generic path, since its cheap paths need prefix
+caching or uniform-decode graphs, and KVMem appended every request's accepted
+tokens on the engine thread before the next forward. Removing host work also
+exposes the previous step's draft graph and capture copies (about 3-4 ms of
+GPU work it used to hide), so step times fall by less than the host time
+removed.
+
 ## Limitations and future targets
 
-1. **Per-request decode cost.** At equal concurrency the three-tier layout
-   decodes 16% slower (268 vs 318 tok/s at 4 requests). At K128K, 18.6% of the
-   groups QSA selects per step miss the 3 hot pages. Targets: an adaptive hot
-   set, prefetching the next step's likely groups, a fused plan-and-copy kernel.
+1. **Per-request decode cost.** At equal concurrency the three-tier decode
+   step is 3% longer than the resident one (33.4 vs 32.4 ms at 4 requests);
+   the 16% lower throughput in that row comes from different output text
+   (MTP acceptance) inside the measurement window, not from the step. At
+   K128K, about 5% of the groups QSA selects per decode step miss the 3 hot
+   pages (steady decode, 16 requests).
+   Targets: an adaptive hot set, prefetching the next step's likely groups, a
+   fused plan-and-copy kernel.
 2. **Concurrency vs batch size.** Larger prefill batches need more activation
    memory: with the 6,019-token batch the KV pool falls from 4,361 to 2,303
    pages (7 three-tier requests, 2 resident). The 799 reserved pages are sized
@@ -182,7 +229,10 @@ ran out of memory during prefill.
    streaming; the window is rebuilt per request.
 8. **Synchronous scheduling.** KVMem's refresh transactions require it; on a
    single request, asynchronous scheduling alone made plain vLLM decode 49%
-   faster. Target: asynchronous-safe refresh.
+   faster. After the host-path changes, a 16-request step is still about
+   10 ms longer than its GPU work: sampling, MTP proposal, scheduling and
+   publication run after the target graph and before the next one. Target:
+   asynchronous-safe refresh, so this host work overlaps the GPU.
 9. **CPU archive path.** Without the SSD tier, reselection still uses the
    original buffered assembly (5.15 s at K128K). Target: the same pinned ring
    and DMA path for records in RAM.
