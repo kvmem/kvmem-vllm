@@ -7,8 +7,11 @@ so each step synchronizes the GPU and the GPU then idles while the CPU builds
 and launches the next step.
 
 Between two draft-step builds vLLM changes the lengths in exactly one place,
-``_update_draft_inputs_kernel``: each of the first ``num_reqs`` lengths becomes
-``min(length + 1, max_model_len)``; padded entries are untouched. After the
+``_update_draft_inputs_kernel``: each of the first ``n`` lengths becomes
+``min(length + 1, max_model_len)``. ``n`` is the request count the kernel was
+launched for: ``num_reqs`` when the draft step runs eagerly or piecewise, but
+the padded count of the batch descriptor when it replays a FULL CUDA graph
+(the graph was captured with every padded request). After the
 first draft step of a proposal has read the real lengths, every later step's
 lengths are therefore known on the CPU without a synchronization. The builder
 receives exactly the values it would have read, so its plans are unchanged.
@@ -46,6 +49,23 @@ def _known_seq_lens(tensor, read):
     return torch.Tensor._make_subclass(KnownCpuSeqLens, tensor)
 
 
+def updated_rows(batch_desc, num_reqs):
+    """How many leading lengths _update_draft_inputs_kernel advances for this step."""
+    from vllm.config import CUDAGraphMode
+    padded = getattr(batch_desc, 'num_reqs', None)
+    if getattr(batch_desc, 'cg_mode', None) == CUDAGraphMode.FULL and padded:
+        return padded
+    return num_reqs
+
+
+def advance(lengths, rows, max_model_len):
+    """The CPU lengths after one draft step that advanced the first ``rows``."""
+    import torch
+    out = lengths.clone()
+    out[:rows] = torch.clamp(out[:rows] + 1, max=max_model_len)
+    return out
+
+
 class _Checks:
     """Predicted lengths awaiting comparison with the real ones."""
 
@@ -74,7 +94,6 @@ class _Checks:
 
 def install():
     """Patch the autoregressive drafter and the FlashInfer builder (idempotent)."""
-    import torch
     from vllm.v1.attention.backends import flashinfer
     from vllm.v1.worker.gpu.spec_decode import speculator as base
     from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
@@ -126,11 +145,12 @@ def install():
                 _MODE.reset(token)
             # This build read the real lengths: every earlier copy has landed.
             checks.verify()
-            self._kvmem_draft_seq_lens = (dict(step=step, num_reqs=num_reqs, cpu=state['cpu'])
+            self._kvmem_draft_seq_lens = (dict(step=step, num_reqs=num_reqs, cpu=state['cpu'],
+                                               rows=updated_rows(batch_desc, num_reqs))
                                           if state.get('cpu') is not None else None)
             return result
-        predicted = last['cpu'].clone()
-        predicted[:num_reqs] = torch.clamp(predicted[:num_reqs] + 1, max=self.max_model_len)
+        # The previous step's draft generation advanced last['rows'] lengths.
+        predicted = advance(last['cpu'], last['rows'], self.max_model_len)
         state = dict(cpu=predicted, checks=checks)
         token = _MODE.set(('use', state))
         try:
@@ -138,7 +158,8 @@ def install():
                                       seq_lens_cpu_upper_bound, step, *args, **kwargs)
         finally:
             _MODE.reset(token)
-        self._kvmem_draft_seq_lens = dict(step=step, num_reqs=num_reqs, cpu=predicted)
+        self._kvmem_draft_seq_lens = dict(step=step, num_reqs=num_reqs, cpu=predicted,
+                                          rows=updated_rows(batch_desc, num_reqs))
         return result
 
     builder.build = build

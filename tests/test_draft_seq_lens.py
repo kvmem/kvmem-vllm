@@ -63,3 +63,19 @@ def test_checks_raise_on_a_wrong_prediction():
     checks.add(real, torch.tensor([3, 5, 0], dtype=torch.int32))
     with pytest.raises(RuntimeError, match='predicted draft sequence lengths'):
         checks.verify()
+
+
+def test_full_graph_draft_steps_advance_every_padded_length():
+    """A FULL draft graph replays the update kernel for the padded request count
+    (the failure seen on 2xRTX 4090: 3 requests in a 4-request graph)."""
+    from types import SimpleNamespace as NS
+    from vllm.config import CUDAGraphMode
+    lengths = torch.tensor([1505, 577, 1025, 0], dtype=torch.int32)
+    full = NS(cg_mode=CUDAGraphMode.FULL, num_reqs=4)
+    assert dsl.updated_rows(full, 3) == 4
+    assert dsl.advance(lengths, dsl.updated_rows(full, 3), 262144).tolist() == [1506, 578, 1026, 1]
+    for eager in (NS(cg_mode=CUDAGraphMode.NONE, num_reqs=None), NS(cg_mode=CUDAGraphMode.PIECEWISE, num_reqs=4)):
+        assert dsl.updated_rows(eager, 3) == 3
+        assert dsl.advance(lengths, 3, 262144).tolist() == [1506, 578, 1026, 0]
+    # Lengths stop at max_model_len, as the kernel clamps them.
+    assert dsl.advance(torch.tensor([10, 9], dtype=torch.int32), 2, 10).tolist() == [10, 10]
