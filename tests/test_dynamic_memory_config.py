@@ -70,7 +70,7 @@ def test_planner_requires_one_complete_window_and_preserves_logical_length(monke
     bounded = physical_config(config)
     assert bounded.model_config.max_model_len == 96
     assert config.model_config.max_model_len == 1024
-    monkeypatch.setattr('vllm_kvmem.serving.logical_capacity.check_specs', lambda _: None)
+    monkeypatch.setattr('vllm_kvmem.serving.logical_capacity.check_specs', lambda *_, **__: None)
     group = NS(kv_cache_spec=NS(max_num_blocks_per_req=lambda cfg, length: 6))
     planner = wrap_planner(lambda cfg, specs, available: [NS(num_blocks=available[0], kv_cache_groups=[group])])
     assert planner(config, [{}], [7])[0].num_blocks == 7
