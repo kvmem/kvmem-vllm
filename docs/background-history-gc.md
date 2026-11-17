@@ -99,6 +99,33 @@ LRU 会减少未来可检索的上下文，不能保证任务语义与保留完�
 应通过策略的 mandatory 规则表达。所有历史均受保护且预算不足时，准入仍需等待
 会话释放或其他容量变化。
 
+## 张量并行（TP）
+
+TP 下每个 rank 归档自己的 KV head 分片，句柄是 rank 本地的 (slot, generation)；
+所有跨 rank 的选择校验都要求同一时刻各 rank 的逻辑记录集 (history_begin, count)
+完全一致。因此 TP 只允许 `mode: delete`（或 `off`）且 `keep_mandatory: true`，
+由 leader 决策、所有 rank 在同一 engine step 提交：
+
+1. rank 0 的 native worker 以 `PROPOSE` 模式运行策略，只生成 intent，不自行退休；
+   rank ≥ 1 以 `FOLLOW` 模式运行，只执行释放任务，从不运行策略。
+2. 每个 engine step，runner 在 `advance_publication`（含 `pump_refresh`）之后于
+   主线程调用 `tensor_parallel.gc_sync`。rank 0 把待处理 intent 以逻辑块广播；
+   空 step 只有一次小广播。
+3. 每个 rank 在本地检查但不提交（`external_prepare`）：逻辑块恰好存在一次、已封页
+   且已归档、不在当前窗口/recent/hold/mandatory 中、scope 未暂停、所属请求没有
+   进行中的 refresh/restore。通过的记录保留 policy gate，scope 在 release 前不确认
+   pause。
+4. MIN all-reduce 决定后，所有 rank 按相同顺序退休同一集合（`external_commit`），
+   并在同一调用中从 `authority.records`、按层历史、action 分数和 query 边界中移除；
+   随后 `external_release` 才开始各 rank 异步的 CPU/slot 释放。TP 下 `drain` 只完成
+   已移除记录的释放；若活动记录在同步提交之外被释放，直接报错。
+5. follower 上逻辑块缺失、重复或几何不同（且在其已发布历史内）时，所有 rank 一同
+   抛出 `RuntimeError`，不继续分叉。
+
+rank 0 的策略只看到本 rank 的一半 head（Mean-K 特征、Question、importance 与余弦
+分组都是本地 KV head），是 TP=1 策略的近似，并对所有 rank 一致生效。该路径目前只有
+CPU 测试（`tests/test_tp_historical_gc.py`，含两进程 Gloo），尚无 GPU 服务验证。
+
 ## 指标
 
 `capture/archive.json`、`capture/progress.json` 和 scheduler resources 提供：

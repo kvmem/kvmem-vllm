@@ -183,6 +183,9 @@ def make_probe_runner(base):
                     self._kvmem_probe_output / 'continuous_archive', record_bytes,
                     self.vllm_config.scheduler_config.max_num_seqs if self._kvmem_bounded_target else 1,
                     max_query_tokens=self.vllm_config.scheduler_config.max_num_batched_tokens)
+                # TP: rank 0 proposes historical-GC retirements, the others follow.
+                from .tensor_parallel import configure_history_gc
+                configure_history_gc(self._kvmem_prepared_archive)
             self._kvmem_saved_capture = None
             self._kvmem_window_adapter = None
             self._kvmem_window_batch = None
@@ -723,6 +726,14 @@ def make_probe_runner(base):
                     runtime.advance_publication(scheduler_output.num_scheduled_tokens, refresh)
                 if timing is not None:
                     timing.mark('publication')
+                if getattr(runtime, 'tp_history_gc', False):
+                    # Every rank reaches this point once per step, after the
+                    # same pump_refresh collectives: the historical-GC commit
+                    # point (rank 0 proposes, all ranks retire the agreed set).
+                    from .tensor_parallel import gc_sync
+                    gc_sync(runtime, refresh, sessions)
+                    if timing is not None:
+                        timing.mark('history_gc')
             if not dummy_run and getattr(self, "_kvmem_window_adapter", None) is not None:
                 for request_id in scheduler_output.finished_req_ids:
                     self._kvmem_window_adapter.free(request_id)

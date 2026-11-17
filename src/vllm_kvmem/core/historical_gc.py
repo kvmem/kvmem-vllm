@@ -320,7 +320,28 @@ class HistoricalAuthorityGc:
                 del self.pending_index[key]
         return not self.pending_index
 
-    def drain(self, records, discarded=None, retired=None):
+    def retire_synchronized(self, records, keys, retired):
+        """Tensor parallelism: drop records every rank retired in this engine step.
+
+        Called by serving.tensor_parallel.gc_sync on each rank, in the same
+        order, before the native round starts their CPU release. The live
+        record set therefore changes at the same logical moment everywhere;
+        the release completes later per rank and only finishes in drain().
+        """
+        for key in keys:
+            record = records.pop(key)
+            self.retired_index[key] = record
+            self.reclaimed_records += 1
+            retired.append((record.history_begin, *key))
+
+    def drain(self, records, discarded=None, retired=None, synchronized=False):
+        """Consume native completions.
+
+        ``synchronized`` (tensor parallelism, live authority): records leave the
+        index only through retire_synchronized. A CPU completion for a record
+        that is still listed would remove it at a rank-local time, so it is a
+        protocol violation and fails loudly instead.
+        """
         discarded = {} if discarded is None else discarded
         if self.stopped:
             # Finalization freezes the logical live view independently of CPU
@@ -342,6 +363,9 @@ class HistoricalAuthorityGc:
             if event.cpu:
                 if record is not None and not record.archived:
                     continue
+                if synchronized and record is not None:
+                    raise RuntimeError('Historical GC released a live tensor-parallel record '
+                                       'outside the synchronized commit')
                 if not self.archive.retire_cpu_record(self.memory.request_id, event.handle):
                     continue
                 if removed is not None:

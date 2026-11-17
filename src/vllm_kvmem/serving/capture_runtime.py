@@ -223,6 +223,10 @@ class CaptureRuntime(EarlyCaptureFeedback):
             self.archive = make_shared_archive(self.options, output / 'continuous_archive', record_bytes,
                 max_reqs if getattr(runner, '_kvmem_bounded_target', False) else 1,
                 max_query_tokens=max_tokens)
+        # TP: leader-decided historical GC, committed by runner via gc_sync
+        # once per engine step on every rank (idempotent for a prepared archive).
+        from .tensor_parallel import configure_history_gc
+        self.tp_history_gc = configure_history_gc(self.archive) is not None
         if (_settings.get('KVMEM_LIFECYCLE_TRACE') == '1' and
                 getattr(self.archive, '_history_worker', None) is not None):
             self.archive.history_scope_metrics_path = output / 'historical_gc_scopes.jsonl'

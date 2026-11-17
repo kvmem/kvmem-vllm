@@ -17,6 +17,12 @@ struct HistoricalManagerState;
 struct HistoricalScopeState;
 
 enum class HistoricalGcMode { Off, Shadow, Delete };
+// Who commits retirements. Local: this worker's own native thread (TP=1).
+// Tensor parallelism keeps one archive per rank and every rank must retire the
+// same logical blocks at the same engine step: the leader (rank 0) only
+// PROPOSEs its policy's intents, followers never run the policy, and all
+// ranks commit an agreed set through the external_* scope calls.
+enum class HistoricalGcCommit { Local, Propose, Follow };
 enum HistoricalBlockFlag : uint32_t {
     HistoricalSealed = 1, HistoricalMandatory = 2, HistoricalGpu = 4, HistoricalCurrentWindow = 8
 };
@@ -108,6 +114,23 @@ public:
     // completion is not itself permission to reuse its metadata.
     std::vector<HistoricalCompletion> completions(size_t limit = 64);
     bool acknowledge(const HistoricalCompletion &);
+    // Synchronized commits (commit mode Propose/Follow). Each call excludes the
+    // native worker for its own duration only; between prepare and release the
+    // prepared records keep their policy gates (no new holds), the scope does
+    // not acknowledge a pause, and their retired slots start no release job.
+    // Leader only: its pending policy batch, unchanged until committed. Empty
+    // while paused/closing or after pressure withdrew the batch.
+    std::vector<qw3::KvMemBlockHandle> external_proposals();
+    bool external_proposal_ready() const;
+    // Check, without retiring, whether each handle is retirable now: live,
+    // sealed, not current window/recent/held/mandatory, and on the leader the
+    // strategy's own intent checks. True keeps that record prepared.
+    std::vector<bool> external_prepare(const std::vector<qw3::KvMemBlockHandle> &);
+    // Retire exactly these prepared handles, in order (the set every rank
+    // agreed on). After release, the leader reports every batch intent to its policy.
+    std::vector<bool> external_commit(const std::vector<qw3::KvMemBlockHandle> &);
+    // Drop prepared state; committed slots may then start their CPU release.
+    void external_release();
     HistoricalGcStats stats() const;
     bool close();
 private:
@@ -132,6 +155,7 @@ public:
         uint64_t cpu_free_low = 0, cpu_free_high = 0;
         size_t scan_blocks = 256, delete_blocks = 64;
         HistoricalGcMode mode = HistoricalGcMode::Off;
+        HistoricalGcCommit commit = HistoricalGcCommit::Local;
         // Compatibility fallback; explicit policy_params take precedence.
         bool keep_mandatory = true, background = true;
         std::string policy = "lru";
@@ -144,6 +168,9 @@ public:
     // Sole registration producer. Empty means scope capacity/admission failed.
     std::shared_ptr<HistoricalGcScope> register_scope(std::shared_ptr<qw3::KvMemRepository>,
                                                    std::unique_ptr<HistoricalKvPolicy> = {});
+    // Before any scope registers (tensor-parallel role); same mode is a no-op.
+    void set_commit(HistoricalGcCommit);
+    HistoricalGcCommit commit() const;
     // Manual test driver; production uses the single native worker thread.
     void advance();
     bool close();

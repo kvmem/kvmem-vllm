@@ -2724,12 +2724,17 @@ PYBIND11_MODULE(_native, m) {
         .value("OFF", HistoryMode::Off)
         .value("SHADOW", HistoryMode::Shadow)
         .value("DELETE", HistoryMode::Delete);
+    using HistoryCommit = vllm_kvmem::HistoricalGcCommit;
+    py::enum_<HistoryCommit>(m, "HistoricalGcCommit")
+        .value("LOCAL", HistoryCommit::Local)
+        .value("PROPOSE", HistoryCommit::Propose)
+        .value("FOLLOW", HistoryCommit::Follow);
     py::class_<HistoryWorker::Config>(m, "HistoricalGcConfig")
         .def(py::init<>())
 #define HCFG(name) .def_readwrite(#name, &HistoryWorker::Config::name)
         HCFG(max_scopes) HCFG(scope_capacity) HCFG(poll_ms) HCFG(ready_low) HCFG(ready_high)
         HCFG(cpu_free_low) HCFG(cpu_free_high) HCFG(scan_blocks) HCFG(delete_blocks)
-        HCFG(mode) HCFG(policy) HCFG(keep_mandatory) HCFG(background)
+        HCFG(mode) HCFG(commit) HCFG(policy) HCFG(keep_mandatory) HCFG(background)
 #undef HCFG
         .def_property("policy_params", [](const HistoryWorker::Config &config) {
             return config.policy_params;
@@ -2819,6 +2824,16 @@ PYBIND11_MODULE(_native, m) {
              py::arg("retained_cpu_bytes") = UINT64_MAX)
         .def("completions", &HistoryScope::completions, py::arg("limit") = 64)
         .def("acknowledge", &HistoryScope::acknowledge)
+        // Tensor-parallel synchronized commits (serving/tensor_parallel.gc_sync).
+        .def("external_proposals", &HistoryScope::external_proposals,
+             py::call_guard<py::gil_scoped_release>())
+        .def_property_readonly("external_proposal_ready", &HistoryScope::external_proposal_ready)
+        .def("external_prepare", &HistoryScope::external_prepare, py::arg("handles"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("external_commit", &HistoryScope::external_commit, py::arg("allowed"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("external_release", &HistoryScope::external_release,
+             py::call_guard<py::gil_scoped_release>())
         .def("close", &HistoryScope::close)
         .def_property_readonly("stats", [](const HistoryScope &scope) {
             const auto stats = scope.stats();
@@ -2852,6 +2867,8 @@ PYBIND11_MODULE(_native, m) {
             py::gil_scoped_release no_gil;
             worker.advance();
         })
+        .def("set_commit", &HistoryWorker::set_commit, py::arg("mode"))
+        .def_property_readonly("commit", &HistoryWorker::commit)
         .def("close", &HistoryWorker::close);
     m.attr("HISTORY_SEALED") = py::int_(uint32_t(vllm_kvmem::HistoricalSealed));
     m.attr("HISTORY_MANDATORY") = py::int_(uint32_t(vllm_kvmem::HistoricalMandatory));

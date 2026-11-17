@@ -371,6 +371,13 @@ class RequestAuthority:
                 raise ValueError('Historical KV management and legacy repository GC cannot share an authority')
             from ..core.historical_gc import HistoricalAuthorityGc
             self.gc = HistoricalAuthorityGc(self.memory, archive)
+            if active():
+                # Leader-decided GC: records leave this index only in the
+                # rank-synchronous tensor_parallel.gc_sync, never at a
+                # rank-local completion time.
+                from .tensor_parallel import register_gc_authority
+                self._tp_history_gc = True
+                register_gc_authority(self)
         elif gc_config is not None:
             from ..core.repository_gc import AuthorityGc
             self.gc = AuthorityGc(self.memory, archive, gc_config, gc_progress)
@@ -388,7 +395,12 @@ class RequestAuthority:
         retired = []
         finalizing = getattr(self.gc, 'stopped', False)
         if getattr(self.gc, 'native_history', False):
-            self.gc.drain(self.records, self.discarded_records, retired=retired)
+            if self.__dict__.get('_tp_history_gc', False):
+                # Finalization and close may release live records at local times.
+                self.gc.drain(self.records, self.discarded_records, retired=retired,
+                              synchronized=not finalizing and not self.closing)
+            else:
+                self.gc.drain(self.records, self.discarded_records, retired=retired)
         else:
             self.gc.drain(self.records, self.discarded_records)
         if retired and not finalizing:
@@ -400,6 +412,26 @@ class RequestAuthority:
         for key, record in staged:
             if key not in self.discarded_records:
                 self._return_record_buffers(record)
+
+    def retire_synchronized(self, keys):
+        """Tensor-parallel GC: remove the records every rank just retired.
+
+        Runs inside tensor_parallel.gc_sync while the native round still holds
+        its prepared records, so no CPU completion can precede the removal.
+        """
+        retired = []
+        self.gc.retire_synchronized(self.records, keys, retired)
+        return retired
+
+    def finish_synchronized_retirements(self, retired):
+        """The metadata pruning drain applies after a retirement, at the same step on every rank."""
+        if not retired:
+            return
+        if not getattr(self.gc, 'stopped', False):
+            self._trace_evictions(retired)
+        self._pending_cache_retire.extend(retired)
+        self._drain_cache_retirements()
+        self._prune_history_metadata()
 
     def _trace_evictions(self, retired):
         """Strategy layer: the historical-GC evictor's decisions join the decision trace.

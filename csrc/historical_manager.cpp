@@ -130,7 +130,7 @@ struct HistoricalScopeStorage {
     HistoricalScopeStorage(size_t capacity, const HistoricalGcWorker::Config &config)
         : capacity(capacity), records(new PublishedBlock[capacity]), jobs(capacity),
           completion_words((capacity+63)/64), completion_bits(new std::atomic<uint64_t>[completion_words]),
-          shadow(capacity, 0),
+          shadow(capacity, 0), external_slots(capacity, 0),
           features(make_historical_feature_source(config.policy, config.policy_params, capacity)),
           policy(make_historical_kv_policy(config.policy, config.policy_params, capacity, config.keep_mandatory)),
           batch(config.delete_blocks) {
@@ -143,6 +143,7 @@ struct HistoricalScopeStorage {
             new (&records[i]) PublishedBlock();
             jobs[i] = {};
             shadow[i] = 0;
+            external_slots[i] = 0;
         }
         for (size_t i = 0; i < completion_words; ++i) completion_bits[i].store(0, std::memory_order_relaxed);
         policy->reset();
@@ -157,6 +158,8 @@ struct HistoricalScopeStorage {
     size_t completion_words;
     std::unique_ptr<std::atomic<uint64_t>[]> completion_bits;
     std::vector<uint64_t> shadow;
+    // Synchronized commits: slots prepared or committed by an external round.
+    std::vector<uint8_t> external_slots;
     std::shared_ptr<HistoricalFeatureSource> features;
     std::unique_ptr<HistoricalKvPolicy> policy;
     HistoricalDecisionBatch batch;
@@ -170,7 +173,8 @@ struct HistoricalScopeState {
         : repository(std::move(r)), arena(std::move(a)), config(c), incarnation(epoch),
           storage(std::move(buffers)), records(storage->records.get()), jobs(storage->jobs),
           completion_words(storage->completion_words), completion_bits(storage->completion_bits.get()),
-          shadow(storage->shadow), features(storage->features), custom_policy(std::move(p)),
+          shadow(storage->shadow), external_slots(storage->external_slots),
+          features(storage->features), custom_policy(std::move(p)),
           policy(custom_policy ? custom_policy.get() : storage->policy.get()), batch(storage->batch), snapshot(storage->snapshot) {
         if (config.ready_high > repository->capacity())
             throw std::invalid_argument("Historical scope watermarks exceed repository capacity");
@@ -187,6 +191,7 @@ struct HistoricalScopeState {
     const size_t completion_words;
     std::atomic<uint64_t> *completion_bits;
     std::vector<uint64_t> &shadow;
+    std::vector<uint8_t> &external_slots;
     std::shared_ptr<HistoricalFeatureSource> features;
     std::unique_ptr<HistoricalKvPolicy> custom_policy;
     HistoricalKvPolicy *policy;
@@ -203,6 +208,20 @@ struct HistoricalScopeState {
     bool round_active = false, snapshot_ready = false, policy_round_done = false;
     uint32_t shadow_slots = 0;
     uint64_t shadow_bytes = 0;
+    // Synchronized commits (config.commit != Local). The native thread and the
+    // external_* calls are serialized by the manager's advance flag; between
+    // prepare and release a round's entries keep their policy gates.
+    struct ExternalEntry {
+        Handle handle;
+        PublishedBlock *gate = nullptr;
+        Repo::Lease live, witness;
+        HistoricalCommitCode local = HistoricalCommitCode::Stale, result = HistoricalCommitCode::Stale;
+        bool ready = false, committed = false;
+    };
+    std::vector<ExternalEntry> external;
+    std::atomic<bool> external_inflight{false}, proposal_ready{false};
+    uint64_t batch_serial = 0, proposal_serial = UINT64_MAX;
+    bool external_committed = false;
 
     void signal_completion(uint32_t slot) {
         completion_bits[slot / 64].fetch_or(uint64_t{1} << (slot % 64), std::memory_order_release);
@@ -438,7 +457,7 @@ struct HistoricalScopeState {
                 shadow_bytes -= arena->record_bytes();
                 global_pending -= arena->record_bytes();
             }
-            if (!job.active) {
+            if (!job.active && !external_slots[slot]) {
                 const auto retired = repository->retired_at(slot);
                 if (retired.generation) {
                     const auto finalized = repository->retire_permanently(retired);
@@ -603,10 +622,16 @@ struct HistoricalScopeState {
             else if (code == Code::Ineligible) stats.rejected_ineligible.fetch_add(1, std::memory_order_relaxed);
             ++batch_cursor;
         }
-        batch.clear_after_ack();
-        batch_cursor = 0;
+        clear_batch();
         if (policy_round_done) round_active = false;
         return true;
+    }
+
+    void clear_batch() noexcept {
+        batch.clear_after_ack();
+        batch_cursor = 0;
+        ++batch_serial;
+        proposal_ready.store(false, std::memory_order_release);
     }
 
     void cancel_batch() noexcept {
@@ -614,8 +639,7 @@ struct HistoricalScopeState {
             policy->on_result(batch.values()[batch_cursor], HistoricalCommitCode::Cancelled);
             stats.cancelled_decisions.fetch_add(1, std::memory_order_relaxed);
         }
-        batch.clear_after_ack();
-        batch_cursor = 0;
+        clear_batch();
     }
 
     bool tick(uint64_t &global_pending) {
@@ -639,11 +663,18 @@ struct HistoricalScopeState {
             return progress;
         }
         if (paused.load(std::memory_order_acquire)) {
-            pause_ack.store(pause_request.load(std::memory_order_acquire), std::memory_order_release);
+            // A synchronized round's prepared records may still be retired:
+            // its owner's acknowledgement waits until the round is released.
+            if (!external_inflight.load(std::memory_order_acquire))
+                pause_ack.store(pause_request.load(std::memory_order_acquire), std::memory_order_release);
             return progress;
         }
+        if (config.commit == HistoricalGcCommit::Follow) return progress;
         try {
-            if (!batch.empty()) return commit_batch(global_pending) || progress;
+            if (!batch.empty()) {
+                if (config.commit == HistoricalGcCommit::Propose) return progress;
+                return commit_batch(global_pending) || progress;
+            }
             if (config.mode == HistoricalGcMode::Off) return progress;
             const auto current_pressure = pressure(global_pending);
             if (!round_active) {
@@ -684,8 +715,11 @@ struct HistoricalScopeState {
             stats.decisions.fetch_add(result.emitted, std::memory_order_relaxed);
             policy_round_done = result.status == HistoricalPolicyStatus::Complete ||
                                 result.status == HistoricalPolicyStatus::NoCandidate;
-            if (!batch.empty()) commit_batch(global_pending);
-            else if (policy_round_done) round_active = false;
+            if (!batch.empty()) {
+                if (config.commit == HistoricalGcCommit::Propose)
+                    proposal_ready.store(true, std::memory_order_release);
+                else commit_batch(global_pending);
+            } else if (policy_round_done) round_active = false;
             return result.examined || result.emitted || result.progressed || progress;
         } catch (...) {
             // A failed strategy must not stop reclamation of earlier commits.
@@ -694,6 +728,248 @@ struct HistoricalScopeState {
             stats.policy_failures.fetch_add(1, std::memory_order_relaxed);
             return progress;
         }
+    }
+
+    // ---- Synchronized commits (tensor parallelism) ------------------------
+    // Every call below runs under the manager's advance flag. The leader keeps
+    // its policy batch; all ranks prepare the agreed logical blocks with the
+    // checks of commit_one, retire exactly the agreed subset, then release.
+
+    static bool contains(const std::vector<Handle> &values, Handle handle) {
+        return std::find(values.begin(), values.end(), handle) != values.end();
+    }
+
+    void external_drop(ExternalEntry &entry) noexcept {
+        if (entry.gate) {
+            entry.gate->policy_gate.clear(std::memory_order_release);
+            entry.gate = nullptr;
+        }
+        entry.live.reset();
+        entry.witness.reset();
+        entry.ready = false;
+    }
+
+    // commit_one's mechanism checks before strategy eligibility. On success
+    // the record's policy gate stays held by the entry (no new holds) and its
+    // lease keeps the generation's identity until release.
+    HistoricalCommitCode external_check(ExternalEntry &entry, BlockView &current) {
+        using Code = HistoricalCommitCode;
+        const auto handle = entry.handle;
+        if (handle.slot >= jobs.size() || !handle.generation) return Code::Stale;
+        auto &record = records[handle.slot];
+        if (record.policy_gate.test_and_set(std::memory_order_acquire)) return Code::Retry;
+        entry.gate = &record;
+        auto live = repository->try_pin(handle);
+        if (!live) return repository->retired_at(handle.slot) == handle ? Code::AlreadyRetired : Code::Stale;
+        if (!sample(record, handle.slot, current)) return Code::Retry;
+        current.meta.live = true;
+        if (current.meta.handle != handle) return Code::Stale;
+        if (current.current_window) return Code::Ineligible;
+        const auto recent = recent_begin.load(std::memory_order_acquire);
+        const auto end = history_end.load(std::memory_order_acquire);
+        if (end && live.record().token_begin < end && live.record().token_end() > recent)
+            current.meta.mandatory = true;
+        entry.live = std::move(live);
+        return Code::Committed;
+    }
+
+    // The leader's own intent, with the sequential semantics of commit_batch:
+    // a block that witnesses an earlier prepared retirement stays (the policy
+    // carries it), and a block prepared for retirement witnesses nothing.
+    HistoricalCommitCode external_leader(ExternalEntry &entry, std::vector<Handle> &retiring,
+                                         std::vector<Handle> &witnesses) {
+        using Code = HistoricalCommitCode;
+        const HistoricalDeleteIntent *intent = nullptr;
+        for (const auto &value : batch.values())
+            if (value.handle == entry.handle) { intent = &value; break; }
+        if (!intent || intent->incarnation != incarnation) return Code::Stale;
+        if (contains(witnesses, entry.handle)) return Code::Ineligible;
+        const bool redundancy = intent->reason == HistoricalDeleteReason::Redundancy;
+        if (redundancy && (!features || !intent->witness.generation || intent->witness.slot >= jobs.size() ||
+                           intent->witness.slot == entry.handle.slot || contains(retiring, intent->witness)))
+            return Code::Ineligible;
+        BlockView current;
+        const auto code = external_check(entry, current);
+        if (code != Code::Committed) return code;
+        current.meta.feature_version = intent->feature_version;
+        if (!policy->permits_intent(current.meta, *intent)) return Code::Ineligible;
+        // Followers apply this generic rule to their own metadata; keep the
+        // leader's vote on the same terms (the TP profile requires keep_mandatory).
+        if (!current.meta.sealed || current.meta.mandatory) return Code::Ineligible;
+        if (redundancy) {
+            auto &other = records[intent->witness.slot];
+            if (other.policy_gate.test_and_set(std::memory_order_acquire)) return Code::Retry;
+            struct Unlock {
+                PublishedBlock &block;
+                ~Unlock() { block.policy_gate.clear(std::memory_order_release); }
+            } unlock{other};
+            BlockView view;
+            if (!sample(other, intent->witness.slot, view)) return Code::Retry;
+            auto witness = repository->try_pin(intent->witness);
+            if (!witness || view.meta.handle != intent->witness || !view.meta.sealed ||
+                    shadow[intent->witness.slot] == intent->witness.generation) return Code::Ineligible;
+            entry.witness = std::move(witness);
+        }
+        if (intent->reason != HistoricalDeleteReason::Lru && intent->reason != HistoricalDeleteReason::LruFallback &&
+                intent->reason != HistoricalDeleteReason::LruRepresentativeFallback) {
+            // Validated now (the round's linearization point) and not held
+            // across the cross-rank agreement: feature publishers take this lock.
+            if (!features) return Code::Ineligible;
+            const auto guard = features->try_commit_guard(*intent);
+            if (!guard.acquired) return Code::Retry;
+            if (!guard.valid) return Code::Ineligible;
+        }
+        retiring.push_back(entry.handle);
+        if (redundancy) witnesses.push_back(intent->witness);
+        return Code::Committed;
+    }
+
+    // Followers never run the policy. They refuse only what this rank must
+    // keep: unsealed (I/O still publishing), current window, recent, held or
+    // otherwise mandatory generations.
+    HistoricalCommitCode external_follower(ExternalEntry &entry) {
+        BlockView current;
+        const auto code = external_check(entry, current);
+        if (code != HistoricalCommitCode::Committed) return code;
+        if (!current.meta.sealed || current.meta.mandatory) return HistoricalCommitCode::Ineligible;
+        return code;
+    }
+
+    std::vector<Handle> external_proposals(uint64_t global_pending) {
+        std::vector<Handle> result;
+        if (config.commit != HistoricalGcCommit::Propose || batch.empty() ||
+                closing.load(std::memory_order_acquire) || paused.load(std::memory_order_acquire))
+            return result;
+        try {
+            // As commit_batch: a withdrawn scheduler target cancels the batch.
+            if (!policy->permits_pressure(pressure(global_pending))) {
+                cancel_batch();
+                if (policy_round_done) round_active = false;
+                return result;
+            }
+        } catch (...) {
+            cancel_batch();
+            paused.store(true, std::memory_order_release);
+            stats.policy_failures.fetch_add(1, std::memory_order_relaxed);
+            return result;
+        }
+        proposal_serial = batch_serial;
+        result.reserve(batch.values().size());
+        for (const auto &intent : batch.values()) result.push_back(intent.handle);
+        return result;
+    }
+
+    std::vector<bool> external_prepare(const std::vector<Handle> &handles) {
+        using Code = HistoricalCommitCode;
+        if (config.commit == HistoricalGcCommit::Local)
+            throw std::logic_error("Historical external commits require a tensor-parallel commit mode");
+        external_release_entries();
+        external.clear();
+        external_committed = false;
+        std::vector<bool> votes(handles.size(), false);
+        const bool closed = closing.load(std::memory_order_acquire) || paused.load(std::memory_order_acquire);
+        std::vector<Handle> retiring, witnesses;
+        external.reserve(handles.size());
+        bool any = false;
+        for (size_t i = 0; i < handles.size(); ++i) {
+            external.emplace_back();
+            auto &entry = external.back();
+            entry.handle = handles[i];
+            const auto code = closed ? Code::Ineligible
+                : config.commit == HistoricalGcCommit::Propose ? external_leader(entry, retiring, witnesses)
+                                                               : external_follower(entry);
+            entry.local = code;
+            entry.ready = code == Code::Committed;
+            if (!entry.ready) {
+                external_drop(entry);
+                if (code == Code::Retry) stats.retries.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            external_slots[entry.handle.slot] = 1;
+            votes[i] = any = true;
+        }
+        if (any) external_inflight.store(true, std::memory_order_release);
+        return votes;
+    }
+
+    std::vector<bool> external_commit(const std::vector<Handle> &allowed) {
+        using Code = HistoricalCommitCode;
+        std::vector<bool> results(allowed.size(), false);
+        for (size_t i = 0; i < allowed.size(); ++i) {
+            ExternalEntry *entry = nullptr;
+            for (auto &value : external)
+                if (value.ready && !value.committed && value.handle == allowed[i]) { entry = &value; break; }
+            if (!entry) continue; // Not prepared here: the caller fails every rank.
+            // The held lease keeps this generation's identity; Retry is only
+            // bounded CAS contention with concurrent pins.
+            auto result = Repo::RetireResult::Retry;
+            for (unsigned attempt = 0; attempt < 65536 && result == Repo::RetireResult::Retry; ++attempt) {
+                result = repository->retire_permanently(entry->handle);
+                if (result == Repo::RetireResult::Retry) std::this_thread::yield();
+            }
+            if (result != Repo::RetireResult::Committed && result != Repo::RetireResult::AlreadyRetired) continue;
+            entry->committed = true;
+            entry->result = result == Repo::RetireResult::Committed ? Code::Committed : Code::AlreadyRetired;
+            results[i] = true;
+            if (result == Repo::RetireResult::Committed) stats.retired.fetch_add(1, std::memory_order_relaxed);
+        }
+        external_committed = true;
+        return results;
+    }
+
+    // The leader reports every intent of the batch it proposed, exactly once.
+    void external_resolve() noexcept {
+        using Code = HistoricalCommitCode;
+        if (batch.empty() || proposal_serial != batch_serial) return;
+        for (const auto &intent : batch.values()) {
+            const ExternalEntry *entry = nullptr;
+            for (const auto &value : external)
+                if (value.handle == intent.handle) { entry = &value; break; }
+            auto code = Code::Ineligible; // Refused by some rank, or not prepared.
+            if (entry && entry->committed) code = entry->result;
+            else if (entry && (entry->local == Code::Stale || entry->local == Code::AlreadyRetired))
+                code = entry->local;
+            policy->on_result(intent, code);
+            if (code == Code::Committed) {
+                if (intent.reason == HistoricalDeleteReason::Redundancy)
+                    stats.redundancy_retired.fetch_add(1, std::memory_order_relaxed);
+                if (intent.reason == HistoricalDeleteReason::LossyPressure)
+                    stats.lossy_retired.fetch_add(1, std::memory_order_relaxed);
+                if (intent.reason == HistoricalDeleteReason::LruFallback ||
+                        intent.reason == HistoricalDeleteReason::LruRepresentativeFallback) {
+                    stats.lru_fallback_retired.fetch_add(1, std::memory_order_relaxed);
+                    stats.lossy_retired.fetch_add(1, std::memory_order_relaxed);
+                    if (intent.reason == HistoricalDeleteReason::LruRepresentativeFallback)
+                        stats.lru_representative_retired.fetch_add(1, std::memory_order_relaxed);
+                }
+            } else if (code == Code::Stale) stats.stale.fetch_add(1, std::memory_order_relaxed);
+            else if (code == Code::Ineligible) stats.rejected_ineligible.fetch_add(1, std::memory_order_relaxed);
+        }
+        clear_batch();
+        if (policy_round_done) round_active = false;
+    }
+
+    void external_release_entries() noexcept {
+        for (auto &entry : external) {
+            external_drop(entry);
+            if (entry.handle.slot < external_slots.size()) external_slots[entry.handle.slot] = 0;
+        }
+    }
+
+    void external_release(uint64_t &global_pending) {
+        external_release_entries();
+        // Committed slots start their CPU release only now, after the caller
+        // removed them from its live index: earlier, a completion could reach
+        // a drain while the record was still listed.
+        for (const auto &entry : external)
+            if (entry.committed && !jobs[entry.handle.slot].active) start(entry.handle, global_pending);
+        // Then the leader resolves the batch it proposed, so its next policy
+        // step sees these pending credits as commit_batch would. A round that
+        // never reached commit (an aborted agreement) keeps the batch pending.
+        if (config.commit == HistoricalGcCommit::Propose && external_committed) external_resolve();
+        external.clear();
+        external_committed = false;
+        external_inflight.store(false, std::memory_order_release);
     }
 };
 
@@ -721,6 +997,9 @@ struct HistoricalManagerState {
     std::mutex sleep_mutex;
     std::condition_variable wake;
     uint64_t pending_cpu_bytes = 0; // Sole backend owner; never allocatable credit.
+    // Tensor-parallel role, fixed before the first scope registers.
+    std::atomic<HistoricalGcCommit> commit{HistoricalGcCommit::Local};
+    std::atomic<bool> registered{false};
 
     bool advance() {
         if (advancing.test_and_set(std::memory_order_acquire)) return false;
@@ -790,9 +1069,21 @@ HistoricalGcWorker::HistoricalGcWorker(Config config, std::shared_ptr<Payload> a
              (!config.cpu_free_low || config.cpu_free_low >= config.cpu_free_high ||
               config.cpu_free_high > uint64_t(arena->capacity())*arena->record_bytes())))
         throw std::invalid_argument("Invalid historical GC worker capacity or watermarks");
+    if (config.commit != HistoricalGcCommit::Local && config.mode == HistoricalGcMode::Shadow)
+        throw std::invalid_argument("Synchronized historical commits do not support shadow mode");
     shared_ = std::make_shared<HistoricalManagerState>(config, std::move(arena));
+    shared_->commit.store(config.commit, std::memory_order_release);
     worker_ = std::make_unique<Worker>(shared_);
 }
+void HistoricalGcWorker::set_commit(HistoricalGcCommit mode) {
+    if (mode == shared_->commit.load(std::memory_order_acquire)) return;
+    if (mode != HistoricalGcCommit::Local && shared_->config.mode == HistoricalGcMode::Shadow)
+        throw std::invalid_argument("Synchronized historical commits do not support shadow mode");
+    if (shared_->registered.load(std::memory_order_acquire))
+        throw std::logic_error("Historical commit mode must be chosen before any scope registers");
+    shared_->commit.store(mode, std::memory_order_release);
+}
+HistoricalGcCommit HistoricalGcWorker::commit() const { return shared_->commit.load(std::memory_order_acquire); }
 HistoricalGcWorker::~HistoricalGcWorker() { close(); }
 
 std::shared_ptr<HistoricalGcScope> HistoricalGcWorker::register_scope(std::shared_ptr<Repo> repository,
@@ -819,8 +1110,11 @@ std::shared_ptr<HistoricalGcScope> HistoricalGcWorker::register_scope(std::share
         buffers = std::make_shared<HistoricalScopeStorage>(repository->capacity(), shared_->config);
         shared_->metadata_allocations.fetch_add(1, std::memory_order_relaxed);
     }
+    shared_->registered.store(true, std::memory_order_release);
+    auto config = shared_->config;
+    config.commit = shared_->commit.load(std::memory_order_acquire);
     auto state = std::make_shared<HistoricalScopeState>(std::move(repository), shared_->arena,
-                                                       shared_->config, handle.generation, std::move(policy), std::move(buffers));
+                                                       config, handle.generation, std::move(policy), std::move(buffers));
     auto scope = std::shared_ptr<HistoricalGcScope>(new HistoricalGcScope(shared_, state, {}));
     shared_->scopes[handle.slot] = state;
     scope->registry_handle_ = handle;
@@ -1040,6 +1334,46 @@ void HistoricalGcScope::request_capacity(uint32_t ready_slots, uint64_t retained
     state_->requested_cpu_limit.store(retained_cpu_bytes, std::memory_order_release);
 }
 HistoricalGcStats HistoricalGcScope::stats() const { return state_ ? state_->stats.snapshot() : final_stats_; }
+
+namespace {
+// The native worker holds this flag for each advance() over all scopes. An
+// external call takes it for its own short duration only, never across a
+// cross-rank agreement (callers release the GIL while waiting).
+struct AdvanceExclusion {
+    std::atomic_flag &flag;
+    explicit AdvanceExclusion(std::atomic_flag &value) : flag(value) {
+        for (unsigned spin = 0; flag.test_and_set(std::memory_order_acquire); ++spin) {
+            if (spin < 64) std::this_thread::yield();
+            else std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+    }
+    ~AdvanceExclusion() { flag.clear(std::memory_order_release); }
+};
+}
+
+std::vector<Handle> HistoricalGcScope::external_proposals() {
+    if (!state_) return {};
+    AdvanceExclusion exclusive(owner_->advancing);
+    return state_->external_proposals(owner_->pending_cpu_bytes);
+}
+bool HistoricalGcScope::external_proposal_ready() const {
+    return state_ && state_->proposal_ready.load(std::memory_order_acquire);
+}
+std::vector<bool> HistoricalGcScope::external_prepare(const std::vector<Handle> &handles) {
+    if (!state_) return std::vector<bool>(handles.size(), false);
+    AdvanceExclusion exclusive(owner_->advancing);
+    return state_->external_prepare(handles);
+}
+std::vector<bool> HistoricalGcScope::external_commit(const std::vector<Handle> &allowed) {
+    if (!state_) return std::vector<bool>(allowed.size(), false);
+    AdvanceExclusion exclusive(owner_->advancing);
+    return state_->external_commit(allowed);
+}
+void HistoricalGcScope::external_release() {
+    if (!state_) return;
+    AdvanceExclusion exclusive(owner_->advancing);
+    state_->external_release(owner_->pending_cpu_bytes);
+}
 
 std::vector<HistoricalCompletion> HistoricalGcScope::completions(size_t limit) {
     if (!limit) throw std::invalid_argument("Historical completion budget must be positive");

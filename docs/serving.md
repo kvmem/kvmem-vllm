@@ -49,7 +49,10 @@ activations, FP8 E4M3 KV and native MTP4. Copy it and set `model`, `tokenizer`
 and `hf_config_path` to the local checkpoint. The launcher also accepts
 `-tp 2` as an override. Set `kvmem.query_replay_cobatch` to `false` so the two workers
 enter private Query forwards together. Use static GPU admission, retained
-CPU history and synchronous vLLM scheduling. Each worker owns 12 query heads,
+CPU history and synchronous vLLM scheduling. Historical GC is accepted in
+`delete` mode only: rank 0's policy proposes and every worker retires the same
+logical blocks at the same step ([historical GC under TP](background-history-gc.md#张量并行tp);
+CPU-tested only). Each worker owns 12 query heads,
 two KV heads and its target, draft and recurrent-state shards.
 TP workers use the ordinary publication gate. The launcher sets
 `KVMEM_GIL_GATE_DRAIN_OPEN=0` for TP, so a local engine wait does not admit
