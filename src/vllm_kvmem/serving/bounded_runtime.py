@@ -56,10 +56,12 @@ def install_bounded_target(runner):
         from ..core.options import RuntimeOptions
         draft_contract = DraftContract.from_vllm(runner.vllm_config, RuntimeOptions.from_vllm(runner.vllm_config).memory)
     cpu_query_checkpoint = _settings.get('KVMEM_QUERY_CHECKPOINT_CPU') == '1'
+    query_widths = (2, 4, 8) if _settings.get('KVMEM_DFLASH_COMPILED_MULTI') == '1' else (2,)
     if cpu_query_checkpoint and (draft_contract is None or
             getattr(runner.speculative_config, 'method', None) != 'dflash' or
-            draft_contract.query_tokens != 2 or options.async_refresh):
-        raise ValueError('CPU query checkpoints require synchronous DFlash2 k=1')
+            draft_contract.query_tokens not in query_widths or options.async_refresh):
+        raise ValueError('CPU query checkpoints require synchronous DFlash2 k=1 '
+                         '(3 or 7 with experimental_dflash_compiled_multi)')
     runner._kvmem_draft_contract = draft_contract
     if (runner.vllm_config.max_concurrent_batches != 1 or
             runner.vllm_config.cache_config.enable_prefix_caching or

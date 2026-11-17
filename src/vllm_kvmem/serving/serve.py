@@ -26,6 +26,9 @@ DEFAULTS = {
     'verify_request_swap': False,
     'experimental_dflash_query_planning': False,
     'experimental_dflash_async_refresh': False,
+    # Opt-in: compiled-graph (and TP=2) DFlash2 with 3 or 7 draft tokens; only
+    # k=1 is qualified there. Single-GPU full_graph DFlash already allows 1/3/7.
+    'experimental_dflash_compiled_multi': False,
     'draft_tokens': 7,
     'draft_method': 'dflash',
     'draft_quantization': None,
@@ -143,6 +146,12 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
         raise ValueError('experimental_dflash_query_planning must be boolean')
     if type(cfg['experimental_dflash_async_refresh']) is not bool:
         raise ValueError('experimental_dflash_async_refresh must be boolean')
+    if type(cfg['experimental_dflash_compiled_multi']) is not bool:
+        raise ValueError('experimental_dflash_compiled_multi must be boolean')
+    if cfg['experimental_dflash_compiled_multi'] and cfg['draft_method'] != 'dflash':
+        raise ValueError('experimental_dflash_compiled_multi applies to DFlash2 only')
+    # Compiled-graph and TP=2 DFlash2 draft depths: k=1 qualified, 3 and 7 behind the opt-in.
+    compiled_depths = (1, 3, 7) if cfg['experimental_dflash_compiled_multi'] else (1,)
     if cfg['draft_method'] not in ('dflash', 'mtp'):
         raise ValueError('draft_method must be dflash or mtp')
     allowed_depths = (1, 3, 7) if cfg['draft_method'] == 'dflash' else (1, 2, 3, 4, 7)
@@ -155,10 +164,11 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
     is_gguf = cfg['model_format'] == 'gguf'
     if cfg['execution_mode'] == 'compiled_graph':
         compiled_dflash = (cfg['draft_method'] == 'dflash' and
-            cfg['experimental_dflash_query_planning'] and cfg['draft_tokens'] == 1)
+            cfg['experimental_dflash_query_planning'] and cfg['draft_tokens'] in compiled_depths)
         if is_gguf or not (cfg['draft_method'] == 'mtp' or compiled_dflash):
             raise ValueError('Compiled capture requires native safetensors Qwen MTP or '
-                             'experimental DFlash2 k=1 query planning')
+                             'experimental DFlash2 k=1 query planning '
+                             '(k=3/7 with experimental_dflash_compiled_multi)')
     if cfg['draft_method'] == 'mtp' and (is_gguf or cfg['draft_quantization'] is not None):
         raise ValueError('Bounded MTP requires native safetensors quantization metadata')
     if not is_gguf and 'mm_proj' in cfg:
@@ -203,10 +213,11 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
         raise ValueError('tensor_parallel_size must be a positive integer')
     if cfg['tensor_parallel_size'] > 1:
         dflash_tp = (cfg['draft_method'] == 'dflash' and cfg['tensor_parallel_size'] == 2
-            and cfg['draft_tokens'] == 1 and cfg['execution_mode'] == 'compiled_graph'
+            and cfg['draft_tokens'] in compiled_depths and cfg['execution_mode'] == 'compiled_graph'
             and cfg['experimental_dflash_query_planning'])
         if is_gguf or (cfg['draft_method'] != 'mtp' and not dflash_tp):
-            raise ValueError('Tensor-parallel serving requires native MTP or compiled planned DFlash2 k=1 TP=2')
+            raise ValueError('Tensor-parallel serving requires native MTP or compiled planned DFlash2 k=1 TP=2 '
+                             '(k=3/7 with experimental_dflash_compiled_multi)')
     # Explicit Query planning resolves this native threshold to zero. Saved
     # resolved profiles must remain valid inputs to the launcher.
     if type(cfg['long_prefill_token_threshold']) is not int or cfg['long_prefill_token_threshold'] < 0:
@@ -434,6 +445,8 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
     env['KVMEM_BOUNDED_MTP' if cfg['draft_method'] == 'mtp' else 'KVMEM_BOUNDED_DFLASH'] = '1'
     if cfg['experimental_dflash_async_refresh']:
         env['KVMEM_DFLASH_ASYNC_REFRESH'] = '1'
+    if cfg['experimental_dflash_compiled_multi']:
+        env['KVMEM_DFLASH_COMPILED_MULTI'] = '1'
     if cfg['draft_method'] == 'mtp':
         # The DFlash loader patch is unrelated to native MTP and may not exist
         # in otherwise compatible vendor builds.

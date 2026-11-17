@@ -302,6 +302,8 @@ def main():
     p.add_argument('--env', action='append', default=[], metavar='KEY=VALUE',
         help='extra server environment (e.g. KVMEM_* A/B flags); repeatable')
     p.add_argument('--dry-run-only', action='store_true', help='validate and save the launch plan, start no server')
+    p.add_argument('--dflash-multi', action='store_true',
+                   help='experimental_dflash_compiled_multi: compiled/TP DFlash2 with --draft-tokens 3 or 7')
     p.add_argument('--copy-check', metavar='CONCURRENCIES', help='greedy verbatim-copy check, e.g. 1,3,5,8 (copy_check_workload.py)')
     p.add_argument('--copy-lines', type=int, default=40, help='passage lines per copy request (~38 tokens each)')
     p.add_argument('--dflash-async', action='store_true',
@@ -367,6 +369,8 @@ def main():
             experimental_dflash_query_planning=True)
         if args.compiled_dflash:
             profile['cudagraph_capture_sizes'] = [int(n) for n in args.capture_sizes.split(',')]
+        if args.dflash_multi:
+            profile['experimental_dflash_compiled_multi']=True
         if args.dflash_async:
             # Keep the MTP layerwise lifecycle (async refresh/restore, native scores); drop what is
             # MTP-only or not yet qualified with DFlash2 (coalescing, opaque capture, sessions, residency).
