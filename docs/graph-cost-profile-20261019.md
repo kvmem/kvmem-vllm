@@ -117,9 +117,9 @@ read/write 均为 0。CPU 控制／计数／边界／CLI 回归共 47 项通过�
 在项目根目录使用项目虚拟环境。以一个已通过的完整 C8 验收目录为 reference：
 
 ```sh
-PYTHONPATH=src /home/chaidi/kvmem-vllm/.venv/bin/python -B scripts/benchmark_graph_cost.py prepare --reference artifacts/p-restore-prefix-fix-20261019/native-C8-r3 --output /tmp/kvmem-cost-new
-/home/chaidi/kvmem-vllm/.venv/bin/python -B /tmp/kvmem-cost-new/frozen/benchmark_graph_cost.py run --output /tmp/kvmem-cost-new
-/home/chaidi/kvmem-vllm/.venv/bin/python -B scripts/analyze_graph_cost.py --root /tmp/kvmem-cost-new --output /tmp/kvmem-cost-new/comparison.json
+PYTHONPATH=src .venv/bin/python -B scripts/benchmark_graph_cost.py prepare --reference artifacts/p-restore-prefix-fix-20261019/native-C8-r3 --output /tmp/kvmem-cost-new
+.venv/bin/python -B /tmp/kvmem-cost-new/frozen/benchmark_graph_cost.py run --output /tmp/kvmem-cost-new
+.venv/bin/python -B scripts/analyze_graph_cost.py --root /tmp/kvmem-cost-new --output /tmp/kvmem-cost-new/comparison.json
 ```
 
 run 会等待 GPU 和内存空闲，不停止其他任务。它分别保留原快照门禁及独立

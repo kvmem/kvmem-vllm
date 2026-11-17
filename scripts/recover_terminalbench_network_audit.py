@@ -25,7 +25,7 @@ ERROR = f"TimeoutExpired(['docker', 'diff', '{CID}'], 60)"
 ALLOWED_ERROR = dict(trial=TRIAL, error=ERROR)
 CHECKED_SHA = '903f63ed33b7032fd5019c8954492f1f0d379e739c145448a2ee41ef0e0f559e'
 TASKS = 89
-PYTHON = '/home/chaidi/kvmem-vllm/.venv/bin/python'
+PYTHON = sys.executable
 
 
 def read(path):

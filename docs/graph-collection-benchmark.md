@@ -18,7 +18,7 @@ Prepare a fresh artifact during an available CPU window:
 
 ```sh
 CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   scripts/benchmark_graph_collection.py prepare \
   --output /absolute/path/to/new-collection-pair
 ```
@@ -27,7 +27,7 @@ Use the frozen controller for validation and execution:
 
 ```sh
 CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   /absolute/path/to/new-collection-pair/frozen/benchmark_graph_collection.py \
   validate --output /absolute/path/to/new-collection-pair
 ```

@@ -33,7 +33,7 @@ except ImportError:
     from run_terminalbench_job import DEFAULT_CONTAINER_MEMORY_BYTES, HOST_MEMORY_RESERVE_BYTES, validate_memory_budget
 
 REPO = Path('/home/chaidi/kvmem-freetoken/kvmem-vllm')
-PYTHON = '/home/chaidi/kvmem-vllm/.venv/bin/python'
+PYTHON = sys.executable
 HARBOR_PYTHON = '/tmp/kvmem-terminus-20261026-env/bin/python'
 BRIDGE_MAX_SESSIONS = 16
 

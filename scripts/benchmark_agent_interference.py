@@ -11,6 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import sys
 import threading
 import time
 
@@ -70,7 +71,7 @@ def prepare(source, fixture, output):
         q.save(arm/'status.json',dict(status='prepared'))
         arms[name]=dict(profile_sha256=q.sha(arm/'profile.json'),native=native,cap=cap,trace=trace,verify=verify)
     q.save(output/'manifest.json',dict(source=str(source),source_manifest_sha256=q.sha(source/'manifest.json'),
-        fixture_source=str(fixture),fixture_sha256=q.sha(fixture),python='/home/chaidi/kvmem-vllm/.venv/bin/python',
+        fixture_source=str(fixture),fixture_sha256=q.sha(fixture),python=sys.executable,
         arms=arms,files={str(p.relative_to(runtime)):q.sha(p) for p in runtime.rglob('*') if p.is_file()},
         scope='Fixed real histories, constrained tokens, seven decoding peers plus one tool return. '
               'No original Agent answers rerun. Diagnostic throughput is not real Agent throughput.',

@@ -65,7 +65,7 @@ Prepare one pair using a new directory:
 
 ```sh
 CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   scripts/benchmark_graph_v2_stream.py prepare \
   --candidate raw-k-cache-window --pairs 1 \
   --output /absolute/path/to/new-stream-attempt
@@ -81,7 +81,7 @@ Validate with the frozen controller:
 
 ```sh
 CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   /absolute/path/to/new-stream-attempt/frozen/benchmark_graph_v2_stream.py \
   validate --output /absolute/path/to/new-stream-attempt
 ```

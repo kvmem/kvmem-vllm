@@ -66,7 +66,7 @@ active／restore字节、active／queued请求及原生running／waiting均归�
 输入沿用此前长文测试的冻结token IDs；本次只有一个批次，不提供多轮误差范围。
 
 ```bash
-/home/chaidi/kvmem-vllm/.venv/bin/python \
+.venv/bin/python \
   scripts/qualify_elastic_long_output.py \
   --launch artifacts/elastic-serving-20261013/final-service/launch.json \
   --input artifacts/elastic-serving-20261013/hot-32k-c8-c32/input.json \

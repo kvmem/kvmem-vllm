@@ -150,7 +150,7 @@ k2长输入有1／41条异常：C32的client_index7在第38个输出token出现�
 新的独立运行目录（已有目录会拒绝覆盖）：
 
 ```sh
-/home/chaidi/kvmem-vllm/.venv/bin/python \
+.venv/bin/python \
   artifacts/native-mtp-20261013/launch_native_fp8_inherit.py \
   --k 3 --run k3-fp8-reproduction
 ```

@@ -120,7 +120,7 @@ R1 保持原始失败记录：`fallback-async-r1` 已完成 6 个模型回答并
 
 ```bash
 CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
-  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -B \
   -m pytest -q -p no:cacheprovider \
   tests/test_guided_policy.py tests/test_query_history.py \
   tests/test_context_continuation.py tests/test_prefill_attention.py \
@@ -134,7 +134,7 @@ CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
 
 ```bash
 ALIGNMENT_REPRO_OUT=/home/chaidi/kvmem-freetoken/kvmem-vllm/artifacts/qw3-alignment-natural-async-repro
-PYTHONPATH=src /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+PYTHONPATH=src .venv/bin/python -B \
   scripts/benchmark_block_graph.py prepare \
   --output "$ALIGNMENT_REPRO_OUT" --arm collect --port 18628 \
   --fixture artifacts/qw3-alignment-20261018/fixture.json \
@@ -142,7 +142,7 @@ PYTHONPATH=src /home/chaidi/kvmem-vllm/.venv/bin/python -B \
   --qualifier scripts/qualify_context_alignment.py
 
 PYTHONPATH="$ALIGNMENT_REPRO_OUT/runtime/src" \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   "$ALIGNMENT_REPRO_OUT/runtime/scripts/benchmark_block_graph.py" run \
   --output "$ALIGNMENT_REPRO_OUT" --arm collect \
   --fixture "$ALIGNMENT_REPRO_OUT/fixture.json"

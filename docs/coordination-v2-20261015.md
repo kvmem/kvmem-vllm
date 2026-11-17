@@ -41,7 +41,7 @@ chunked prefill、连续批处理以及 KVMem 的逐请求异步重选。CPU 历
 该示例关闭新增协调策略，保留 CPU 历史、异步重选和注意力评分。
 
 ```bash
-PYTHONPATH=src /home/chaidi/kvmem-vllm/.venv/bin/python scripts/qualify_coordination.py \
+PYTHONPATH=src .venv/bin/python scripts/qualify_coordination.py \
   --config /absolute/path/to/native-profile.json \
   --output /absolute/path/to/offline-results \
   --cases offline --arms B0 --pairs 1 --step-latency-interval 4 \
@@ -297,7 +297,7 @@ p95 为 50.3/50.9 ms，表现接近。
 准备命令使用 **native serving profile**，不是 elastic gateway profile；elastic 启动计划中的 `mean_k_backend_profile` / `backend-profile.json` 是对应 native 配置。以下命令只生成配置与固定样本，不查询或使用 GPU，也不启动模型：
 
 ```bash
-PYTHONPATH=src /home/chaidi/kvmem-vllm/.venv/bin/python scripts/qualify_coordination.py \
+PYTHONPATH=src .venv/bin/python scripts/qualify_coordination.py \
   --config /absolute/path/to/native-profile.json \
   --output /absolute/path/to/fresh-v2-qualification \
   --arms B0 B2 B3 B4 --pairs 5 --step-latency-interval 4 --prepare-only
