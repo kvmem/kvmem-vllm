@@ -42,7 +42,7 @@ From the repository root, prepare with the intended final absolute location:
 
 ```sh
 CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
-/home/chaidi/kvmem-vllm/.venv/bin/python -B scripts/benchmark_graph_v2_ablation.py prepare \
+.venv/bin/python -B scripts/benchmark_graph_v2_ablation.py prepare \
   --output /data/chaidi/kvmem-vllm-experiments/graph-v2-fixed-ablation-20261018-r1 \
   --source artifacts/graph-v2-sessions-20261018/sync-r1
 ```
@@ -51,10 +51,10 @@ Run the frozen controller after the GPU is available. The run command starts
 four separately owned servers sequentially and never retries a failed arm.
 
 ```sh
-/home/chaidi/kvmem-vllm/.venv/bin/python -B \
+.venv/bin/python -B \
   /data/chaidi/kvmem-vllm-experiments/graph-v2-fixed-ablation-20261018-r1/frozen/benchmark_graph_v2_ablation.py run \
   --output /data/chaidi/kvmem-vllm-experiments/graph-v2-fixed-ablation-20261018-r1
-/home/chaidi/kvmem-vllm/.venv/bin/python -B \
+.venv/bin/python -B \
   /data/chaidi/kvmem-vllm-experiments/graph-v2-fixed-ablation-20261018-r1/frozen/analyze_graph_v2_ablation.py \
   --campaign /data/chaidi/kvmem-vllm-experiments/graph-v2-fixed-ablation-20261018-r1
 ```

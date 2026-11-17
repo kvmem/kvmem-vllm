@@ -5,6 +5,7 @@ No GPU runs. Source-level logical copied bytes are not profiler DRAM counters.
 import argparse
 from collections import Counter, defaultdict
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -121,7 +122,7 @@ def analyze(root, wrapper):
     sources=[Path(__file__),Path(__file__).with_name('analyze_matched_14k_nsight.py'),
         Path(__file__).with_name('compare_prefill_nsight.py'),wrapper]
     sources += [root/a/name for a in ['native','kvmem'] for name in ['trace.sqlite','server.log','plan.json']]
-    gdn_source=Path('/home/chaidi/kvmem-vllm/.venv/lib/python3.12/site-packages/vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py')
+    gdn_source=Path(importlib.util.find_spec('vllm').origin).parent/'model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py'
     sources.append(gdn_source)
     result['gdn_source']=dict(path=str(gdn_source),lines=[1537,1590],
         operation='GDN recurrent state update, output assignment core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0), then gated RMS norm. 176160768 bytes = 14336*48*128*BF16(2).')

@@ -83,7 +83,7 @@ seed 和长度相同；没有以本次吞吐证明跨并发的输出质量等价
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
-/home/chaidi/kvmem-vllm/.venv/bin/python scripts/qualify_decode.py \
+.venv/bin/python scripts/qualify_decode.py \
   --users-file artifacts/multi-user-20261013/users.json \
   --capture artifacts/multi-user-20261013/multi-server-tensorcore/capture \
   --output artifacts/decode-scaling-20261013/retest

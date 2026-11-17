@@ -34,7 +34,7 @@ From the repository root, prepare one screening pair:
 
 ```sh
 CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   scripts/benchmark_graph_v2_agents.py prepare \
   --candidate raw-k-cache --pairs 1 \
   --output /absolute/path/to/new-agent-screen
@@ -52,7 +52,7 @@ Validate the frozen experiment without using the GPU:
 ```sh
 CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
   PYTHONPATH=/absolute/path/to/new-agent-screen/frozen/src \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   /absolute/path/to/new-agent-screen/frozen/scripts/benchmark_graph_v2_agents.py \
   validate --output /absolute/path/to/new-agent-screen
 ```

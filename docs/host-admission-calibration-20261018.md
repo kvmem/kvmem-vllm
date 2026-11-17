@@ -238,7 +238,7 @@ mixed 步骤有 377 次，模型步中位数约 577.55 ms；对照为 355 次、
 CUDA_GC_REFERENCE="$PWD/artifacts/calibrated-fp8-agents-20261018-candidate-r3"
 CUDA_GC_REPRO="$PWD/artifacts/calibrated-fp8-agents-repro-gc"
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$CUDA_GC_REFERENCE/runtime/rolling-candidate-v2/src" \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   "$CUDA_GC_REFERENCE/frozen/scripts/benchmark_aligned_fp8_agents.py" \
   --prepare-only --output "$CUDA_GC_REPRO" --port 18664 \
   --reference artifacts/fp8-weight-performance-20261017-r1 \
@@ -254,7 +254,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$CUDA_GC_REFERENCE/runtime/rolling-candida
   --allow-production-change src/vllm_kvmem/serving/serve.py
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$CUDA_GC_REPRO/runtime/rolling-candidate-v2/src" \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   "$CUDA_GC_REPRO/frozen/scripts/benchmark_aligned_fp8_agents.py" \
   --run-prepared --output "$CUDA_GC_REPRO"
 ```
@@ -266,12 +266,12 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$CUDA_GC_REPRO/runtime/rolling-candidate-v
 HOST_CALIBRATION_OUT=/home/chaidi/kvmem-freetoken/kvmem-vllm/artifacts/host-calibration-repro.json
 FP8_BASELINE_OUT=/home/chaidi/kvmem-freetoken/kvmem-vllm/artifacts/calibrated-fp8-baseline-repro
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B scripts/benchmark_aligned_fp8_agents.py \
+  .venv/bin/python -B scripts/benchmark_aligned_fp8_agents.py \
   --calibrate-host --reference artifacts/aligned-fp8-agents-20261018-baseline-r3 \
   --output "$HOST_CALIBRATION_OUT"
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B scripts/benchmark_aligned_fp8_agents.py \
+  .venv/bin/python -B scripts/benchmark_aligned_fp8_agents.py \
   --prepare-only --reference artifacts/fp8-weight-performance-20261017-r1 \
   --runtime artifacts/aligned-fp8-agents-20261018-baseline-r3/runtime/rolling-candidate-v2 \
   --alignment-qualification artifacts/qw3-alignment-20261018-natural-async-r2 \
@@ -279,7 +279,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
   --host-calibration "$HOST_CALIBRATION_OUT" --output "$FP8_BASELINE_OUT" --port 18632
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$FP8_BASELINE_OUT/runtime/rolling-candidate-v2/src" \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   "$FP8_BASELINE_OUT/frozen/scripts/benchmark_aligned_fp8_agents.py" \
   --run-prepared --output "$FP8_BASELINE_OUT"
 ```

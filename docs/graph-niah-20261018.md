@@ -177,11 +177,11 @@ r2 首波完成时，8 个客户端并发提交的请求已经全部执行；观
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src" \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B scripts/benchmark_graph_niah.py prepare \
+  .venv/bin/python -B scripts/benchmark_graph_niah.py prepare \
   --output artifacts/graph-niah256k-repro
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src" \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   artifacts/graph-niah256k-repro/frozen/benchmark_graph_niah.py run \
   --output artifacts/graph-niah256k-repro
 ```

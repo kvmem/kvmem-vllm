@@ -32,7 +32,7 @@ From the repository root, prepare a new directory:
 
 ```sh
 CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   scripts/benchmark_graph_v2_performance.py prepare \
   --candidate cpu-direct-record-seal \
   --profile artifacts/graph-overhead-20261018/gpu-r2/after/profile.json \
@@ -42,7 +42,7 @@ CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
 Use that directory's frozen controller for `validate` or `run`:
 
 ```sh
-/home/chaidi/kvmem-vllm/.venv/bin/python -B \
+.venv/bin/python -B \
   /absolute/path/to/new-experiment/frozen/benchmark_graph_v2_performance.py \
   validate --output /absolute/path/to/new-experiment
 ```

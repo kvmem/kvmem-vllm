@@ -267,7 +267,7 @@ CPU leases、GPU owned blocks、下载、历史 KV、checkpoint 和图内存均�
 ```bash
 FP8_CANDIDATE_OUT=/home/chaidi/kvmem-freetoken/kvmem-vllm/artifacts/aligned-fp8-agents-repro
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B scripts/benchmark_aligned_fp8_agents.py \
+  .venv/bin/python -B scripts/benchmark_aligned_fp8_agents.py \
   --prepare-only --output "$FP8_CANDIDATE_OUT" \
   --reference artifacts/fp8-weight-performance-20261017-r1 --runtime "$PWD" \
   --alignment-qualification artifacts/qw3-alignment-20261018-sealed-copy-natural-async-r1 \
@@ -278,12 +278,12 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
   --port 18616
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$FP8_CANDIDATE_OUT/runtime/rolling-candidate-v2/src" \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   "$FP8_CANDIDATE_OUT/frozen/scripts/benchmark_aligned_fp8_agents.py" \
   --run-qualification --output "$FP8_CANDIDATE_OUT"
 
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$FP8_CANDIDATE_OUT/runtime/rolling-candidate-v2/src" \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B \
+  .venv/bin/python -B \
   "$FP8_CANDIDATE_OUT/frozen/scripts/benchmark_aligned_fp8_agents.py" \
   --run-prepared --output "$FP8_CANDIDATE_OUT"
 ```

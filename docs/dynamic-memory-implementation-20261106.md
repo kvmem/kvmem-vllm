@@ -149,7 +149,7 @@ worker 交接也保持失败状态：故障注入确认删除失败时不发 dro
 相关 CPU 回归命令如下，结果为 **97 passed，1 GPU 测试 skipped**。覆盖描述符关闭前失败、关闭后失败及复用、重复删除/关闭不得误关无关文件、后台失败写盘回滚，以及已有精确快照、会话、历史分层和 SSD worker 测试；不包含整模型性能或层级兼容验收。
 
 ```bash
-PYTHONPATH=src:scripts /home/chaidi/kvmem-vllm/.venv/bin/python -m pytest -q \
+PYTHONPATH=src:scripts .venv/bin/python -m pytest -q \
   tests/test_checkpoint_storage.py tests/test_request_checkpoint.py \
   tests/test_session_swap.py tests/test_tiered_storage.py \
   tests/test_tiered_reclamation.py tests/test_request_swap_worker_ssd.py

@@ -187,9 +187,9 @@ elastic profile 的图字段位于顶层；direct `serve` profile 的同名字�
 ```bash
 cd /home/chaidi/kvmem-freetoken/kvmem-vllm
 export PYTHONPATH=/home/chaidi/kvmem-freetoken/kvmem-vllm/src
-/home/chaidi/kvmem-vllm/.venv/bin/python -m vllm_kvmem elastic-serve \
+.venv/bin/python -m vllm_kvmem elastic-serve \
   --config examples/query-block-graph-elastic.json --run-dir /tmp/kvmem-graph-elastic --dry-run
-/home/chaidi/kvmem-vllm/.venv/bin/python -m vllm_kvmem serve \
+.venv/bin/python -m vllm_kvmem serve \
   --config /path/to/direct-graph-profile.json --run-dir /tmp/kvmem-graph-direct --dry-run
 ```
 
@@ -209,7 +209,7 @@ direct 与 elastic 两入口共享验证。locality-only 可同时关闭 `action
 
 ```bash
 PYTHONPATH=/home/chaidi/kvmem-freetoken/kvmem-vllm/src \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B scripts/analyze_block_graph.py \
+  .venv/bin/python -B scripts/analyze_block_graph.py \
   --input /path/to/capture/block_graph_inputs.jsonl \
   --output-dir /tmp/kvmem-graph-offline
 ```
@@ -222,7 +222,7 @@ PYTHONPATH=/home/chaidi/kvmem-freetoken/kvmem-vllm/src \
 
 ```bash
 PYTHONPATH=/home/chaidi/kvmem-freetoken/kvmem-vllm/src \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B scripts/analyze_block_graph.py \
+  .venv/bin/python -B scripts/analyze_block_graph.py \
   --input artifacts/block-graph-model-20261018-collect-r3/server/capture/block_graph_inputs.jsonl \
   --fixture artifacts/block-graph-model-fixture-20261018.json \
   --traces artifacts/block-graph-model-20261018-collect-r3/qualification/traces.json \
@@ -249,7 +249,7 @@ PYTHONPATH=/home/chaidi/kvmem-freetoken/kvmem-vllm/src \
 cd /home/chaidi/kvmem-freetoken/kvmem-vllm
 CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 PYTHONPATH=/home/chaidi/kvmem-freetoken/kvmem-vllm/src \
-/home/chaidi/kvmem-vllm/.venv/bin/python -B -m pytest -q -p no:cacheprovider \
+.venv/bin/python -B -m pytest -q -p no:cacheprovider \
   --basetemp=/tmp/kvmem-graph-regression \
   tests/test_core.py tests/test_state_retrieval.py tests/test_action_attention.py \
   tests/test_prefill_attention.py tests/test_query_history.py tests/test_request_plan.py \
@@ -280,7 +280,7 @@ CPU host 组件实测：[block-graph-host-20261018-r3/results.json](../artifacts
 
 ```bash
 PYTHONPATH=/home/chaidi/kvmem-freetoken/kvmem-vllm/src \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B scripts/benchmark_block_graph_host.py \
+  .venv/bin/python -B scripts/benchmark_block_graph_host.py \
   --history-tokens 262144 --block-tokens 32 --repeats 50 \
   --output /tmp/kvmem-block-graph-host.json
 ```
@@ -324,10 +324,10 @@ r1 曾因退休记录读取过早及释放控制请求的所有权门禁失败�
 
 ```bash
 PYTHONPATH=/home/chaidi/kvmem-freetoken/kvmem-vllm/src \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B scripts/benchmark_block_graph.py prepare \
+  .venv/bin/python -B scripts/benchmark_block_graph.py prepare \
   --arm multi --output /tmp/kvmem-graph-multi-r1 --fixture /tmp/kvmem-graph-shared-fixture.json
 PYTHONPATH=/home/chaidi/kvmem-freetoken/kvmem-vllm/src \
-  /home/chaidi/kvmem-vllm/.venv/bin/python -B scripts/benchmark_block_graph.py run \
+  .venv/bin/python -B scripts/benchmark_block_graph.py run \
   --arm multi --output /tmp/kvmem-graph-multi-r1 --fixture /tmp/kvmem-graph-shared-fixture.json
 ```
 
