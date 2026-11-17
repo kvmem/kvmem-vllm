@@ -11,4 +11,4 @@ exec venv/bin/python benchmark.py --label "$label" --serve-only --tp 2 --draft-m
   --strategy layerwise --select 36864 --gen 16384 --seqs 8 --max-submit 8 --max-len 10000000 --prefill-chunk 1024 \
   --kv-gib 10.15 --cpu-history-gib 64 --cpu-per-request-gib 8 --checkpoint-gib 12 --native-max-mib 4096 \
   --gc redundancy --gc-thinking-only "${extra[@]}" --repository-blocks 8192 --session-capacity 10 \
-  --keep-reasoning-end --env KVMEM_FA2_VERIFY_GRAPH=1
+  --keep-reasoning-end --query-replay-budget 4096 --env KVMEM_FA2_VERIFY_GRAPH=1

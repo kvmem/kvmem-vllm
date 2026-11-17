@@ -303,6 +303,9 @@ def main():
     p.add_argument('--session-capacity', type=int, help='retained session owners (default max(8, --seqs))')
     p.add_argument('--keep-reasoning-end', action='store_true',
         help="keep the agent fixture's reasoning_end_str (needed for request thinking budgets)")
+    p.add_argument('--query-replay-budget', type=int,
+        help='largest atomic Query (tokens) one request may replay; default --prefill-chunk. Agent '
+             'task instructions need more (the agent profiles use 4096)')
     p.add_argument('--serve-only', action='store_true',
         help='start the server, wait until healthy, then keep serving until terminated (no workload)')
     p.add_argument('--lifecycle-trace', action='store_true', help='KVMEM_LIFECYCLE_TRACE=1 (GC eviction trace per rank)')
@@ -345,7 +348,8 @@ def main():
         served_model_name='kvmem-throughput',port=PORT,max_model_len=args.max_len,
         max_num_seqs=args.seqs,tensor_parallel_size=args.tp,draft_tokens=args.mtp,
         execution_mode='eager' if args.eager else 'compiled_graph',
-        gpu_memory_utilization=args.util,query_replay_budget=args.prefill_chunk,prefill_chunk_tokens=args.prefill_chunk,
+        gpu_memory_utilization=args.util,query_replay_budget=args.query_replay_budget or args.prefill_chunk,
+        prefill_chunk_tokens=args.prefill_chunk,
         max_num_batched_tokens=args.prefill_chunk*args.physical_chunks+args.seqs*(args.mtp+1),
         request_planning_batch_tokens=args.prefill_chunk*args.physical_chunks+args.seqs*(args.mtp+1),
         kv_cache_memory_bytes=None if args.kv_gib is None else int(args.kv_gib*2**30),
