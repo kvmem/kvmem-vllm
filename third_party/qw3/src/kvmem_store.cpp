@@ -252,6 +252,7 @@ void KvMemStore::install_repository_block(KvMemRepository::Lease lease, uint32_t
     b.history_pos_start = r.token_begin;
     b.in_current_frame = protect_current_window_ && current_frame;
     blocks_[slot] = b;
+    repository_installed_end_ = std::max<uint32_t>(repository_installed_end_, slot + 1);
     repository_gc_flags_[slot] = 0; // never inherit backing/index validity from the old generation
     total_tokens_ = std::max(total_tokens_, r.token_begin + valid_tokens);
     repository_resident_leases_[slot] = std::move(lease);

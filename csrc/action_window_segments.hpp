@@ -35,7 +35,9 @@ inline WindowSegments window_segments(const qw3::KvMemStore &store,
         int64_t position;
     };
     std::vector<Record> records;
-    for (const auto &block : store.blocks()) {
+    const auto &blocks = store.blocks();
+    for (size_t i = 0, end = store.repository_scan_end(); i < end; ++i) {
+        const auto &block = blocks[i];
         if (block.repository_generation && block.n_tokens &&
                 (block.in_working_set || block.tier == qw3::KvTier::GPU))
             records.push_back({block.history_pos_start, block.n_tokens, block.baked_pos});

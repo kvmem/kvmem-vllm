@@ -3042,7 +3042,9 @@ PYBIND11_MODULE(_native, m) {
         .def("working_records", [](const KvMemStore &store) {
             // Value tuples only: no block/Store views survive into a checkpoint.
             std::vector<std::tuple<uint32_t, uint64_t, uint64_t, uint32_t, int64_t>> records;
-            for (const auto &block : store.blocks()) {
+            const auto &blocks = store.blocks();
+            for (size_t i = 0, end = store.repository_scan_end(); i < end; ++i) {
+                const auto &block = blocks[i];
                 if (block.repository_generation && block.n_tokens &&
                         (block.in_working_set || block.tier == KvTier::GPU))
                     records.emplace_back(block.block_id, block.repository_generation,

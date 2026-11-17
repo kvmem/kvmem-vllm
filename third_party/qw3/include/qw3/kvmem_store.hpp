@@ -434,6 +434,13 @@ public:
     const KvMemStoreConfig &config() const { return cfg_; }
     uint32_t block_count() const { return static_cast<uint32_t>(blocks_.size()); }
     const std::vector<KvMemBlock> &blocks() const { return blocks_; }
+    // Exclusive bound of the blocks a scan for repository-installed blocks must
+    // visit: every block with a nonzero repository_generation lies below it.
+    // A bounded store sizes blocks_ to the repository capacity, so scans that
+    // stop here skip the never-installed tail with the same result.
+    size_t repository_scan_end() const {
+        return repository_ ? std::min<size_t>(repository_installed_end_, blocks_.size()) : blocks_.size();
+    }
     void attach_gc(std::shared_ptr<KvMemGc> gc);
     const std::shared_ptr<KvMemGc> &gc() const { return gc_; }
     const std::shared_ptr<const KvMemGc::View> &gc_view() const { return gc_view_; }
@@ -779,6 +786,7 @@ private:
     KvMemStoreConfig cfg_;
     uint32_t runtime_select_budget_ = 0;
     std::vector<KvMemBlock> blocks_;
+    uint32_t repository_installed_end_ = 0;  // one past the highest slot ever installed
     uint64_t total_tokens_ = 0;  // cumulative history, not allocated KV capacity
 };
 

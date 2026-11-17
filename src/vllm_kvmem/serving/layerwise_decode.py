@@ -391,7 +391,9 @@ def _fused_identities(controller, rid, begin, local, count, starts, counts, batc
 
 def attach_packet(controller, pending, rid, authority, starts, counts, masses):
     begin, count = pending.history_begin, pending.candidate_count
-    local = sum(map(int, counts)) - count
+    # Integer segment lengths: one NumPy sum instead of a Python loop per segment.
+    local = (int(counts.sum()) if isinstance(counts, np.ndarray) and counts.dtype.kind in 'iu'
+             else sum(map(int, counts))) - count
     logical = history = None
     if layer_batch_enabled():
         fused = _fused_identities(controller, rid, begin, local, count, starts, counts, batch=True)
