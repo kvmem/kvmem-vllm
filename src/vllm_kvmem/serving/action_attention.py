@@ -1244,6 +1244,51 @@ class ActionRuntime:
         end = int(np.searchsorted(starts, extent-1, side='right'))
         return starts[:end], np.minimum(counts[:end], extent-starts[:end]), history[:end].tolist()
 
+    def _portable_layer_scores(self, captured, scoring_layers, row_ids, positions, native_index,
+                               starts, counts, length, prefill):
+        """KVMEM_PORTABLE_SCORE_LAYERS: [layers, rows, segments] reference masses of
+        every scoring layer from one page_attention_layers pass, equal to stacking
+        the per-layer page_attention calls; None (per-layer path) when the layers
+        do not share a page table, Q codec, RoPE cache and attention scale.
+
+        Only per-layer constants are cached. Queries are gathered and scales read
+        on every call: compiled graphs reuse the same capture list and buffers
+        each step, so their contents are never cached."""
+        from .action_scoring import page_attention_layers
+        modules = [module for _, module in scoring_layers]
+        key = (tuple(module.attn.layer_name for module in modules), prefill)
+        cache = self.__dict__.setdefault('_portable_layer_static', {})
+        static = cache.get(key, False)
+        if static is False:
+            names = key[0]
+            q_dtypes = self.prefill_q_dtypes if prefill else self.q_dtypes
+            static = None
+            if (len({self.groups[name] for name in names}) == 1 and
+                    len({q_dtypes[name] for name in names}) == 1 and
+                    len({module.rotary_emb.cos_sin_cache.data_ptr() for module in modules}) == 1 and
+                    len({module.attn.impl.scale for module in modules}) == 1):
+                static = dict(
+                    keys=[native_vllm_fp8_views(m.attn.kv_cache, m.num_kv_heads, m.head_dim)[0] for m in modules],
+                    group=self.groups[names[0]], q_dtype=q_dtypes[names[0]], module=modules[0])
+            cache[key] = static
+        scales = [module.attn._k_scale for module in modules] + [module.attn._q_scale for module in modules]
+        if static is None or any(not isinstance(x, torch.Tensor) or x.numel() != 1 or x.dtype != torch.float32
+                                 for x in scales):
+            return None
+        module = static['module']
+        layers = len(modules)
+        mass = page_attention_layers(
+            torch.stack([captured[index].query.index_select(0, row_ids) for index, _ in scoring_layers]),
+            positions, static['keys'], kernel_table(self.runner, static['group'], native_index),
+            module.rotary_emb.cos_sin_cache, torch.stack([x.reshape(()) for x in scales[:layers]]),
+            torch.stack([x.reshape(()) for x in scales[layers:]]), starts, counts, length,
+            scale=module.attn.impl.scale, q_dtype=static['q_dtype'],
+            block_tokens=self.runtime.config.block_tokens)
+        if mass is not None:
+            counts_by_backend = self.__dict__.setdefault('scoring_backend_counts', {})
+            counts_by_backend['fused_layers'] = counts_by_backend.get('fused_layers', 0) + 1
+        return mass
+
     def _window_segments(self, authority, history_begin, local_begin, count):
         store = authority.memory._store
         block_tokens = self.runtime.config.block_tokens
@@ -1761,7 +1806,20 @@ class ActionRuntime:
                 native_index=self.runner.req_states.req_id_to_index[request_id]
                 total=None
                 separate = []
-                for (index,module),mass in zip(scoring_layers if stacked is None else (),native_masses):
+                batched = None
+                if (stacked is None and layerwise is not None and native_masses and
+                        all(mass is None for mass in native_masses) and
+                        (native is None or native.mode != 'verify') and
+                        plan.get('logical_group') is None and not rope_kwargs and
+                        getattr(self.options,'action_fused_scoring',False)):
+                    from .action_scoring import portable_layers_enabled
+                    if portable_layers_enabled():
+                        # Opt-in: every layer's reference masses in one fused pass (same values).
+                        with owner.stage('score.layers_fused', gpu=True) if owner else nullcontext():
+                            batched = self._portable_layer_scores(captured, scoring_layers, row_ids, positions,
+                                native_index, starts_gpu, counts_gpu, local_begin+count, prefill)
+                for (index,module),mass in zip(scoring_layers if stacked is None and batched is None else (),
+                                               native_masses):
                     layer = owner.child(layer=module.attn.layer_name) if owner else None
                     with layer.stage('score.layer_total', gpu=True) if layer else nullcontext():
                         if mass is None or native.mode == 'verify':
@@ -1802,6 +1860,8 @@ class ActionRuntime:
                 with owner.stage('score.layer_mean', gpu=True) if owner else nullcontext():
                     if stacked is not None:
                         total = stacked.contiguous()
+                    elif batched is not None:
+                        total = batched
                     else:
                         total = torch.stack(separate) if layerwise is not None else total/len(self.layers)
                 pool=getattr(self,'download_pool',None)
