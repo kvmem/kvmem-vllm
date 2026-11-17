@@ -398,6 +398,11 @@ class RuntimeOptions:
     # attention kernel (adapters/qsa_scores.py; same per-layer picks, +5% prefill
     # with 5,952-token chunks), 'recompute' rebuilds them in torch.
     qsa_pressure_scores: str = 'kernel'
+    # Flash Next decode: write every GDN cache group's per-step metadata with one
+    # launch instead of vLLM's per-group update_block_table sequence
+    # (adapters/gdn_metadata_fusion.py; pure speculative-decode batches only).
+    # Byte-identical to vLLM's path (in-server cross-check, KVMEM_GDN_FUSION_CHECK).
+    fused_gdn_metadata: bool = True
     prefill_physical_coalescing: bool = False
     # Opt-in: physical coalescing with graph_mode=off (historical GC requires
     # graphs off). Logical publication then commits each child's accepted
@@ -1214,6 +1219,7 @@ class RuntimeOptions:
             ('archive_layout', 'record'),
             ('qsa_layerwise_mtp', 'global'),
             ('qsa_pressure_scores', 'kernel'),
+            ('fused_gdn_metadata', True),
             ('prefill_physical_coalescing', False),
             ('prefill_physical_graphless', False),
             ('prefill_physical_multi_owner', False),

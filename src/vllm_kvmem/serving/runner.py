@@ -146,6 +146,10 @@ def make_probe_runner(base):
                     install_split(self).append(self._kvmem_qsa_pressure.hook)
                 from ..adapters.qsa_trace import install_qsa_trace
                 install_qsa_trace(self)
+                if getattr(options, 'fused_gdn_metadata', False):
+                    # Flash Next: one launch for all GDN cache groups' decode metadata.
+                    from ..adapters.gdn_metadata_fusion import install as install_gdn_fusion
+                    install_gdn_fusion()
             self._kvmem_capture_opaque = (install_opaque_capture(self, opaque_fingerprint)
                 if options.capture_opaque_projection else None)
             self._kvmem_serving = _settings.get('KVMEM_SERVING') == '1'
@@ -175,6 +179,9 @@ def make_probe_runner(base):
                 kernel()
             self._kvmem_step_timing = None
             self._kvmem_public_work = None
+            if _settings.get('KVMEM_STACK_PROFILE_DIR'):
+                from .stack_sampler import install as install_stack_sampler
+                install_stack_sampler(_settings.get('KVMEM_STACK_PROFILE_DIR'))
             if options.step_latency_interval:
                 from .step_timing import StepTiming
                 from .work_counters import PublicWorkCounters
