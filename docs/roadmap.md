@@ -174,6 +174,7 @@ GPU time: both streams share the PRO 6000. Quality arms must use the same weight
 - **MoE (mixture-of-experts) models: essential.** They are the next model class after the dense and hybrid models above, and the main reason to need several cards.
 - One engine per card with shared CPU history.
 - Online-serving robustness beyond what agents need.
+- **Best configuration per hardware, found directly** (2026-11-17). A registry of measured presets, one per hardware × model × workload class, each holding the complete serving profile (draft method, selection strategy, budgets, concurrency, graph sizes, winning optimization flags) and its evidence (commit, harness command, tok/s, exactness checks). `vllm-kvmem serve --preset auto` detects the GPUs (the planner's hardware probe) and loads the matching preset. `vllm-kvmem tune` builds one for hardware without a preset: candidates come from each optimization's declared hardware scope, budgets from the planner, short harness runs decide, and the planner's noise rule keeps the simplest configuration within noise of the best. Seed presets: 2×A800 TP=2 (16 × 32K, 718 tok/s, `benchmarks/tp2/run_16x32k.sh`) and 2×RTX 4090 TP=2 once tuned.
 
 ## Improvement loop
 
