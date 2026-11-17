@@ -291,3 +291,64 @@ def test_canonical_fallback_agrees_with_accepted_assistant_eos(boundary_tokenize
     assistant = incoming[1]
     assert third[0][assistant[1] - 1] == planner.end
     assert third[0][assistant[1]:incoming[2][0]] == planner.encode('\n')
+
+
+def _two_turns(planner, header='<|im_start|>assistant\n'):
+    state = bridge.Trajectory()
+    payload = dict(messages=[dict(role='user', content='hello helping')], generation_header=header)
+    first = planner.prepare(payload, state)
+    # Accepted IDs deliberately unlike any re-encoding of the displayed text.
+    planner.commit(state, first, payload, dict(content='displayed answer'), [17, 18, 19, planner.end])
+    second_payload = dict(payload, messages=payload['messages'] + [
+        dict(role='assistant', content='displayed answer'), dict(role='tool', content='tested')])
+    second = planner.prepare(second_payload, state)
+    assert second[5]
+    planner.commit(state, second, second_payload, dict(content='café answer'), [21, 22, planner.end])
+    return state, second_payload, second
+
+
+def test_changed_last_assistant_keeps_the_previous_prompt_ids(boundary_tokenizer):
+    planner = bridge.Planner(renderer, boundary_tokenizer)
+    state, payload, second = _two_turns(planner)
+    before = copy.deepcopy(state)
+    # The client returns the newest assistant message changed (as Claude Code
+    # does when it decodes escapes in a tool input).
+    changed = dict(payload, messages=payload['messages'] + [
+        dict(role='assistant', content='café answer\u0000'), dict(role='user', content='testing')])
+    third = planner.prepare(changed, state)
+    assert state == before
+    assert not third[5] and third.prompt_prefix_reused
+    assert third[0][:len(second[0])] == second[0]
+    # A canonical render would re-encode the first accepted answer and lose it.
+    assert planner.encode(third[2]['prompt'])[:len(second[0])] != second[0]
+    raw = third[2]['prompt'].encode()
+    boundary = len(state.rendered_prefix) + len(state.generation_header)
+    assert raw[:boundary] == state.rendered_prefix + state.generation_header
+    assert third[0][len(second[0]):] == planner.encode(raw[boundary:].decode())
+    provenance = third[1]['kvmem_locality_provenance']
+    assert provenance['history'] == 'actual_prompt_ids' and provenance['encoding_scope'] == 'append_suffix'
+    spans = third[1]['kvmem_locality_spans']
+    old = [s for s in spans if s['end'] <= len(second[0])]
+    assert old == [s for s in second[1]['kvmem_locality_spans']]
+    new = [s for s in spans if s['end'] > len(second[0])]
+    assert [s['role'] for s in new] == ['assistant', 'user'] and new[0]['begin'] >= len(second[0])
+    from vllm_kvmem.serving.request_plan import RequestPlan
+    RequestPlan.parse(third[1], len(third[0]), 32, 16384)
+
+
+@pytest.mark.parametrize('edit', ['earlier_message', 'control', 'header'])
+def test_prompt_prefix_reuse_requires_an_unchanged_prefix(boundary_tokenizer, edit):
+    planner = bridge.Planner(renderer, boundary_tokenizer)
+    state, payload, second = _two_turns(planner)
+    messages = payload['messages'] + [dict(role='assistant', content='edited'), dict(role='user', content='x')]
+    changed = dict(payload, messages=messages)
+    if edit == 'earlier_message':
+        changed['messages'] = [dict(role='user', content='hello helping!')] + messages[1:]
+    elif edit == 'control':
+        changed['tools'] = ['new declaration']
+    else:
+        state.generation_header = b'<|im_start|>assistant\n<think>\n'
+    third = planner.prepare(changed, state)
+    assert not third[5] and not third.prompt_prefix_reused
+    assert third[0] == planner.encode(third[2]['prompt'])
+    assert third[1]['kvmem_locality_provenance']['history'] == 'canonical_full_render'

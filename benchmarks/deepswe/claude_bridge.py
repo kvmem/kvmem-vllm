@@ -154,6 +154,9 @@ class Trajectory:
     identity_keys: tuple = ()
     output_truncated: bool = False
     pending_assistant_begin: int | None = None
+    # Rendered bytes after the last message of the previous prompt: the
+    # generation header the previous prompt ended with.
+    generation_header: bytes | None = None
 
 
 class Prepared(tuple):
@@ -260,14 +263,44 @@ class Planner:
             historical_end = max((s['end'] for s in rendered['spans'] if s['index'] < n),
                                  default=rendered['control_end'])
             reused = text[:historical_end] == state.rendered_prefix
+        # The client returned the last assistant message changed (for example
+        # tool input escapes decoded), so its accepted IDs cannot be reused.
+        # Everything before it is unchanged: keep the previous prompt's exact
+        # IDs and render only from that message on. A canonical full render
+        # would re-encode all earlier accepted outputs, lose the exact prefix
+        # and turn the turn into a cold prefill of the whole conversation.
+        prompt_reused = False
+        if (not reused and state.tokens and state.rendered_prefix is not None and
+                state.generation_header and control == state.control and len(messages) > n
+                and messages[:n] == state.messages and assistant_span is not None
+                and assistant_span['role'] == 'assistant'):
+            anchor = state.rendered_prefix + state.generation_header
+            historical_end = max((s['end'] for s in rendered['spans'] if s['index'] < n),
+                                 default=rendered['control_end'])
+            prompt_reused = (historical_end == len(state.rendered_prefix) ==
+                             assistant_span['begin'] and len(text) > len(anchor) and
+                             text.startswith(anchor))
         def location(point):
             if point <= rendered['control_end']:return (-1,point)
             for span in rendered['spans']:
                 if span['begin'] <= point <= span['end']:
                     return (span['index'],point-span['begin'])
             raise ValueError('Semantic boundary is outside rendered messages')
-        locations = dict(state.locations) if reused else {}
-        if reused:
+        locations = dict(state.locations) if reused or prompt_reused else {}
+        if prompt_reused:
+            boundary = len(anchor)
+            prefix = list(state.tokens)
+            separator_bytes = 0
+            suffix = text[boundary:].decode()
+            encoded = PrefixTokens(self.tokenizer, suffix)
+            tokens = prefix + encoded.ids
+            def coordinate(point):
+                if point < boundary:
+                    return locations[location(point)]
+                value=len(prefix) + encoded.count(point-boundary)
+                locations[location(point)]=value
+                return value
+        elif reused:
             first = next(s for s in rendered['spans'] if s['index'] == n+1)
             boundary = first['begin']
             prefix = state.tokens + state.output
@@ -294,7 +327,7 @@ class Planner:
                 return value
         plan = {'kvmem_mandatory_spans': [], 'kvmem_reselect':'auto'}
         for span in rendered['spans']:
-            if span['role'] != 'assistant' and (not reused or span['begin']>=boundary):
+            if span['role'] != 'assistant' and (not (reused or prompt_reused) or span['begin']>=boundary):
                 for point in (span['begin'],span['end'],span['content_begin'],span['content_end']):
                     coordinate(point)
         query_index = rendered['query_index']
@@ -314,12 +347,16 @@ class Planner:
         from vllm_kvmem.serving.prompt_spans import map_prompt_spans, span_payload, normalize_provenance
         # Renderer byte ranges cover each real message/tool result. The new
         # suffix uses its actual encoding and exactly one history offset.
-        shift = separator_bytes - boundary if reused else 0
-        local_text = suffix if reused else text.decode()
+        appended = reused or prompt_reused
+        shift = separator_bytes - boundary if appended else 0
+        local_text = suffix if appended else text.decode()
         local_spans = []
         for span in rendered['spans']:
             if reused and span['begin'] < boundary:
                 continue
+            if prompt_reused and span['end'] <= boundary:
+                continue
+            begin = max(span['begin'], boundary) if prompt_reused else span['begin']
             end = span['end']
             # commit() closes an accepted assistant at EOS. The renderer also
             # includes the following separator newline in its byte range;
@@ -330,21 +367,23 @@ class Planner:
             if (span['role'] == 'assistant' and
                     text[span['begin']:end].endswith(b'<|im_end|>\n')):
                 end -= 1
-            local_spans.append(dict(begin=span['begin'] + shift, end=end + shift,
+            local_spans.append(dict(begin=begin + shift, end=end + shift,
                                     role=span['role']))
         mapped = map_prompt_spans(local_text, local_spans, encoded.ids,
             offset_mapping=encoded.offset_mapping, encoded_ids=encoded.offset_ids,
             tokenizer=self.tokenizer, source='deepswe_protocol',
             template=getattr(self.protocol, 'template', 'qw3_claude_code'),
-            token_offset=len(prefix) if reused else 0)
-        inherited = state.locality_spans if reused else ()
+            token_offset=len(prefix) if appended else 0)
+        inherited = (state.locality_spans if reused else
+                     tuple(s for s in state.locality_spans if s[1] <= len(prefix)) if prompt_reused else ())
         if reused and close_truncated:
             inherited += ((state.pending_assistant_begin,
                            len(prefix) + encoded.count(len('<|im_end|>')), 'assistant'),)
         spans = inherited + mapped.spans
         provenance = dict(mapped.provenance)
-        provenance.update(exact_spans=len(spans), encoding_scope='append_suffix' if reused else 'prompt',
-                          history='actual_accepted_ids' if reused else 'canonical_full_render')
+        provenance.update(exact_spans=len(spans), encoding_scope='append_suffix' if appended else 'prompt',
+                          history='actual_accepted_ids' if reused else
+                          'actual_prompt_ids' if prompt_reused else 'canonical_full_render')
         if reused:
             previous_provenance = dict(state.locality_provenance)
             if close_truncated:
@@ -368,13 +407,14 @@ class Planner:
             pending = map_prompt_spans(local_text,
                 [dict(begin=header + shift, end=len(local_text.encode()), role='assistant')],
                 encoded.ids, offset_mapping=encoded.offset_mapping, encoded_ids=encoded.offset_ids,
-                tokenizer=self.tokenizer, token_offset=len(prefix) if reused else 0)
+                tokenizer=self.tokenizer, token_offset=len(prefix) if appended else 0)
             if pending.spans:
                 assistant_begin = pending.spans[0][0]
         result = Prepared((tokens, plan, rendered, messages, control, reused, locations),
                           assistant_begin=assistant_begin)
         result.coordinate = coordinate
         result.identity_keys = keys
+        result.prompt_prefix_reused = prompt_reused
         result.input_closure_tokens = encoded.count(len('<|im_end|>')) if reused and close_truncated else 0
         # An internal adapter may resolve an authoritative Question source
         # after exact token coordinates exist. The final plan always passes the
@@ -418,6 +458,7 @@ class Planner:
         state.locations = locations
         historical_end = max((s['end'] for s in rendered['spans']), default=rendered['control_end'])
         state.rendered_prefix = rendered['prompt'].encode()[:historical_end]
+        state.generation_header = rendered['prompt'].encode()[historical_end:]
         from vllm_kvmem.serving.prompt_spans import normalize_spans, normalize_provenance
         state.locality_spans = normalize_spans(plan.get('kvmem_locality_spans', []), len(tokens))
         state.locality_provenance = normalize_provenance(plan.get('kvmem_locality_provenance'))
@@ -518,7 +559,15 @@ def create_app(args, tokenizer):
         raise ValueError('Output cap must be positive and below the logical context limit')
     planner_options = {'optimized_handoff': True} if getattr(args, 'optimized_handoff', False) else {}
     planner = Planner(Protocol(args.protocol), tokenizer, gen_budget, **planner_options)
-    allowed = set(args.tasks.read_text().splitlines()) | {'preflight'}
+    # --cases: several runs of one task (e.g. one per seed), each a case with its own
+    # trajectory, session, output directory and sampling seed: {case: {"task", "seed"}}.
+    tasks = set(args.tasks.read_text().splitlines())
+    cases = json.loads(args.cases.read_text()) if getattr(args, 'cases', None) is not None else {}
+    for case, entry in cases.items():
+        if (entry.get('task') not in tasks or type(entry.get('seed')) is not int or
+                not 0 <= entry['seed'] < 2**32 or '/' in case or case == 'preflight'):
+            raise ValueError('Invalid case entry: ' + case)
+    allowed = (set(cases) if cases else tasks) | {'preflight'}
     locks = {task:asyncio.Lock() for task in allowed}
     states = {task:Trajectory() for task in allowed}
     # Each turn's request.json holds only what changed since the previous turn
@@ -627,7 +676,8 @@ def create_app(args, tokenizer):
                 query_root = getattr(args, 'task_instructions_root', None)
                 options = {}
                 if query_root is not None and task != 'preflight':
-                    instruction = (Path(query_root)/task/'instruction.md').read_text()
+                    source = cases[task]['task'] if task in cases else task
+                    instruction = (Path(query_root)/source/'instruction.md').read_text()
                     options['finalize_plan'] = bounded_task_query(payload, instruction, args.query_replay_budget)
                 prepared=await asyncio.to_thread(planner.prepare,payload,state,**options)
                 tokens, plan, rendered, _, _, reused, _=prepared
@@ -648,19 +698,22 @@ def create_app(args, tokenizer):
                 session=args.run_id+'-'+task
                 data=backend_request(model=args.model, tokens=tokens, session=session,
                     max_tokens=max_tokens, plan=plan, backend_kind=backend_kind,
-                    seed=getattr(args, 'seed', 1000))
-                previous_tokens = len(state.tokens) + len(state.output) if reused else 0
+                    seed=cases[task]['seed'] if task in cases else getattr(args, 'seed', 1000))
+                prompt_reused = getattr(prepared, 'prompt_prefix_reused', False)
+                previous_tokens = (len(state.tokens) + len(state.output) if reused else
+                                   len(state.tokens) if prompt_reused else 0)
                 amount=((len(tokens)+data['max_tokens']+31)//32)*32*17*4*256*3
                 cpu_queue_seconds=await reserve(task,amount)
                 (directory/'plan.json').write_text(json.dumps({k:v for k,v in data.items() if k!='prompt'}|
                     {'prompt_tokens':len(tokens),'exact_output_prefix_reused':reused,
+                     'prompt_prefix_reused':prompt_reused,
                      'token_sha256':hashlib.sha256(canonical(tokens).encode()).hexdigest(),
                      'task_query_source':getattr(prepared, 'query_source_audit', None)}))
                 inflight+=1
                 admitted=time.time()
                 log({'event':'start','task':task,'turn':state.turns+1,'at':admitted,
                      'request_started_at':started,'cpu_queue_seconds':cpu_queue_seconds,'prompt_tokens':len(tokens),
-                     'inflight':inflight,'exact_output_prefix_reused':reused,
+                     'inflight':inflight,'exact_output_prefix_reused':reused,'prompt_prefix_reused':prompt_reused,
                      'new_input_tokens':len(tokens)-previous_tokens,
                      'prepare_seconds':admitted-started-cpu_queue_seconds, 'backend_kind':backend_kind})
                 try:
@@ -724,6 +777,8 @@ if __name__=='__main__':
     p.add_argument('--max-output-tokens',type=int,
                    help='Independent reply cap; defaults to G. Values above G require rolling_active_window on the backend and stay in one native request')
     p.add_argument('--seed',type=int,default=1000)
+    p.add_argument('--cases',type=Path,
+                   help='JSON {case: {"task": TASK, "seed": SEED}}: serve these cases (several seeds per task) instead of --tasks')
     p.add_argument('--backend-kind',choices=('native','kvmem'),default='kvmem')
     p.add_argument('--cpu-admission-gib',type=int,default=72)
     p.add_argument('--cpu-admission-bytes',type=int)
