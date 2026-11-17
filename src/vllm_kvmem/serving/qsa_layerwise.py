@@ -140,5 +140,13 @@ def pressure_layer_records(authority, plan, picked, fallback, *, draft_layers, d
            for entry in out]
     report = dict(qsa_pressure_scorer=scorer, qsa_pressure_global_layers=sorted(set(kept_global)),
                   qsa_pressure_overlap=[round(len({r.handle.slot for r in entry} & {r.handle.slot for r in ordered_global})
-                                              / max(1, len(ordered_global)), 4) for entry in out])
+                                              / max(1, len(ordered_global)), 4) for entry in out],
+                  qsa_pressure_digest=[_records_digest(entry) for entry in out])
     return out, report
+
+
+def _records_digest(records):
+    """Short digest of a layer's picked history ranges (compares selections across runs)."""
+    import hashlib
+    text = ','.join(f'{r.history_begin}:{r.count}' for r in records)
+    return hashlib.blake2b(text.encode(), digest_size=6).hexdigest()

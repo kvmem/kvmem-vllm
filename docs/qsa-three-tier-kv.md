@@ -37,9 +37,14 @@ A profile's `kvmem` block (K128K/G32K example):
   (a `settings.strategy` entry). `strategy_pressure_scorer: "attention"` or
   `"lift"` (with `prefill_attention_half_life`) keeps K blocks per layer while
   the prompt is read; the attention mass comes from QSA's own sparse softmax
-  over its selected tokens, recomputed for the sampled rows
-  (serving/qsa_pressure.py). `qsa_layerwise_mtp` chooses whether the draft
-  layer follows the global selection or layer 0's.
+  over its selected tokens (serving/qsa_pressure.py). With
+  `qsa_pressure_scores: "kernel"` (default) the sampled rows' logits come from
+  the B12X attention kernel itself: a variant generated from the installed
+  vendor source stores the masked QK logits of marked rows
+  (adapters/qsa_scores.py) and is launched on the sampled rows alone, the
+  layer's own attention running unchanged; `"recompute"` rebuilds them in
+  torch. `qsa_layerwise_mtp` chooses whether the draft layer follows the global
+  selection or layer 0's.
 
 Implementation: adapters/qsa_streaming.py, adapters/qsa_stream_runtime.py and
 csrc/qsa_residency.cu (GPU tier); core/storage.py, core/layer_major.py,
@@ -88,8 +93,18 @@ Per-layer 16 KB slices of the record layout read at only 0.96 GB/s (about
 | --- | --- | --- |
 | 2,048-token chunks, 1 ring page | 3,883 tok/s | 3,693 tok/s |
 | per-layer Query selection, 4 shared layers | 3,787 tok/s | 3,490 tok/s |
-| combined method (lift pressure + 4 shared layers) | 3,283 tok/s | 3,197 tok/s |
+| combined method (lift pressure + 4 shared layers), recomputed attention | 3,420 tok/s | 3,278 tok/s |
+| combined method, attention logits from the kernel | 3,445 tok/s | 3,283 tok/s |
 | 5,952-token chunks, 2 ring pages | 8,108 tok/s | 7,329 tok/s |
+| 5,952-token chunks, combined method, recomputed attention | 6,283 tok/s | 5,759 tok/s |
+| 5,952-token chunks, combined method, attention logits from the kernel | 6,650 tok/s | 6,028 tok/s |
+
+The combined-method rows ran on the current code; the global and per-layer
+Query rows on the previous commit (the combined method measured 3,283 and
+3,197 tok/s there). With one request the kernel and recomputed logits give the
+same per-layer selections and identical tokens (5,952-token chunks; all 13
+layer digests match at every pressure refresh). The kernel variant computes the
+attention bitwise like the vendor launch (GPU test, server page layout).
 
 PCIe is not the prefill limit: staging a 160K-token frame for every layer
 (about 2 GB per step) adds 16 ms to a ~390 ms step, because the next layer's
@@ -148,9 +163,16 @@ ran out of memory during prefill.
 4. **Synchronous reselection.** A K128K reselection stalls the engine for
    0.6–0.9 s (1.0–1.7 s per layer); all requests wait. Target: start the SSD
    reads when the selection is known and assemble over several steps.
-5. **Per-layer pressure cost.** Recomputing QSA's attention mass for 64 sampled
-   rows per layer costs about 72 ms of GPU and 30 ms of host time per prefill
-   step (−15% prefill). Targets: a fused FP8 kernel, an asynchronous commit.
+5. **Per-layer pressure cost.** The combined method still prefills 11% (2,048-
+   token chunks) and 18% (5,952) below global selection. Taking the logits
+   from the kernel removed the GPU recomputation (5.3 → 2.7 ms per layer with
+   the vendor attention; +5% at 5,952-token chunks, neutral at 2,048, where
+   prefill steps are host-bound and the recomputation was hidden). What
+   remains is host work: each layer's packet walks its ~5K-block frame in
+   Python (window segments, extended maps; about 2–4 ms per layer and step),
+   plus the per-layer reselections (1.0–1.7 s vs 0.7 s). Targets: incremental
+   per-layer segments, the packet setup in native code, an asynchronous
+   commit.
 6. **Per-layer selection semantics.** QSA scores every layer with the Query of
    the refresh probe, so all reads can start at once; the full-attention path
    re-scores each layer in a second, layer-by-layer forward. Decode-time

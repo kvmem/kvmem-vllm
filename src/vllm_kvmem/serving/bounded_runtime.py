@@ -369,6 +369,7 @@ def install_bounded_target(runner):
                     authority, plan, picked, fallback, draft_layers=qsa_pressure.draft_indices,
                     draft_selection=runtime.options.qsa_layerwise_mtp,
                     scorer=getattr(runtime.options, 'strategy_pressure_scorer', 'attention'))
+                layer_report['qsa_pressure_stats'] = qsa_pressure.report()
             if per_layer_records is not None:
                 assembly = assembler.assemble(authority, plan, layer_records=per_layer_records)
             else:

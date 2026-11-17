@@ -11,10 +11,13 @@ from FlashAttention statistics on the full-attention path.
 
 QSA attends only to the positions its indexer selected, with a plain softmax
 over them (b12x qsa reference.sparse_paged_gqa_reference: scale head_dim**-0.5,
-K = FP8 cache x k_descale, no sinks). This module recomputes that softmax for the
-sampled rows from the same selected positions, query and K cache, right before
-the vendor attention, and sums it per window block: the attention mass each
-block received. Blocks QSA did not select received none. The packets feed the
+K = FP8 cache x k_descale, no sinks). With qsa_pressure_scores=kernel the B12X
+attention kernel itself stores the sampled rows' masked logits
+(adapters/qsa_scores.py) and this module only normalizes them; with
+'recompute' (or when the kernel variant is unavailable for a call) it rebuilds
+the same logits from the selected positions, query and K cache. Either way the
+softmax is summed per window block: the attention mass each block received.
+Blocks QSA did not select received none. The packets feed the
 same per-layer histories (BufferedPrefillHistory; a lift State for lift) and the
 same native picker (MemoryOracle.preview_selection with pressure_scores) as the
 full-attention path. The MTP draft layer takes layer 0's selection.
@@ -48,7 +51,9 @@ class QSALayerPressure:
         self.histories = {}    # rid -> [history per target layer]
         self.maps = {}         # rid -> [frame records per target layer] after a per-layer selection
         self.pending = {}      # rid -> {layer: packet}
-        self.stats = dict(packets=0, rows=0, seconds=0.0)
+        self.stats = dict(packets=0, rows=0, seconds=0.0, kernel_packets=0, recomputed_packets=0)
+        self.kernel = getattr(options, 'qsa_pressure_scores', 'kernel') == 'kernel'
+        self.kernel_error = None
 
     # ---------------------------------------------------------------- histories
     def _new_history(self):
@@ -80,6 +85,13 @@ class QSALayerPressure:
             raise RuntimeError('QSA layer frame length differs from the native frame')
         return result
 
+    def report(self):
+        """Cumulative packet counters (kernel vs recomputed logits) for refresh reports."""
+        out = dict(self.stats, seconds=round(self.stats['seconds'], 3), source='kernel' if self.kernel else 'recompute')
+        if self.kernel_error:
+            out['kernel_error'] = self.kernel_error
+        return out
+
     def retire(self, rid):
         self.histories.pop(rid, None)
         self.maps.pop(rid, None)
@@ -102,6 +114,7 @@ class QSALayerPressure:
             return None
         starts_np = batch.query_start_loc_np
         adapter = getattr(self.runner, '_kvmem_window_adapter', None)
+        packets = []
         for i, rid in enumerate(batch.req_ids):
             first, last = int(starts_np[i]), int(starts_np[i + 1])
             count = last - first
@@ -117,12 +130,66 @@ class QSALayerPressure:
             started = time.perf_counter()
             starts, counts, keys = window_segments(self.frame(rid, authority, layer, begin, local),
                                                    begin, local, count, 32)
-            masses = self._masses(binding, inputs, [first + r for r in rows], starts)
-            self.pending.setdefault(rid, {})[layer] = (begin + count, count, rows, starts, keys, local, masses)
+            packets.append((rid, layer, [first + r for r in rows], (begin + count, count, rows, starts, keys, local)))
             self.stats['packets'] += 1
             self.stats['rows'] += len(rows)
             self.stats['seconds'] += time.perf_counter() - started
+        if not packets:
+            return None
+        started = time.perf_counter()
+        logits = self._kernel_logits(binding, inputs, packets) if self.kernel else None
+        self._finish(binding, inputs, packets, logits)
+        self.stats['seconds'] += time.perf_counter() - started
         return None
+
+    def _kernel_logits(self, binding, inputs, packets):
+        """The sampled rows' logits from the B12X kernel variant (adapters/qsa_scores.py),
+        launched on those rows alone before the layer's own attention; None to recompute."""
+        if self.kernel_error is not None or torch.cuda.is_current_stream_capturing():
+            return None
+        from types import SimpleNamespace
+        from ..adapters import qsa_scores
+        rows = sorted({row for _, _, global_rows, _ in packets for row in global_rows})
+        try:
+            scores = qsa_scores.sampled_logits(binding, inputs, rows)
+        except Exception as error:   # noqa: BLE001 - reported; this and later packets recompute
+            self.kernel_error = f'{type(error).__name__}: {error}'
+            return None
+        return SimpleNamespace(scores=scores, rows=rows)
+
+    def _finish(self, binding, inputs, packets, capture):
+        for rid, layer, global_rows, packet in packets:
+            if capture is not None:
+                masses = self._kernel_masses(binding, inputs, capture, global_rows, packet[3])
+                self.stats['kernel_packets'] += 1
+            else:
+                masses = self._masses(binding, inputs, global_rows, packet[3])
+                self.stats['recomputed_packets'] += 1
+            self.pending.setdefault(rid, {})[layer] = packet + (masses,)
+
+    def _kernel_masses(self, binding, inputs, capture, rows, starts):
+        """[rows, window blocks] attention mass from the kernel's logits (GPU, float32);
+        capture.scores[i] holds the logits of query row capture.rows[i]."""
+        import bisect
+        device = capture.scores.device
+        slots = [bisect.bisect_left(capture.rows, row) for row in rows]
+        index = torch.tensor(rows, dtype=torch.int64, device=device)
+        logits = capture.scores.index_select(0, torch.tensor(slots, dtype=torch.int64, device=device))
+        scale = int(inputs['query'].shape[2]) ** -0.5
+        if binding.k_descale is not None:
+            logits = logits * (binding.k_descale.float() * scale)
+        else:
+            logits = logits * scale
+        probability = torch.softmax(logits, dim=-1).nan_to_num_(0.0).mean(dim=1)   # [r, W]
+        pos = binding.selected_positions.index_select(0, index).long()
+        limit = inputs['query_positions'].index_select(0, index).long()
+        valid = (pos >= 0) & (pos <= limit[:, None])
+        safe = pos.clamp(min=0)
+        start_t = torch.tensor(starts, dtype=torch.int64, device=device)
+        block = torch.searchsorted(start_t, safe, right=True) - 1
+        out = torch.zeros(len(rows), len(starts), dtype=torch.float32, device=device)
+        out.scatter_add_(1, block.clamp(min=0), probability * valid)
+        return out
 
     def _masses(self, binding, inputs, rows, starts):
         """[rows, window blocks] attention mass of QSA's sparse softmax (GPU, float32)."""

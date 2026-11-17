@@ -393,6 +393,11 @@ class RuntimeOptions:
     # Flash Next QSA with strategy_path=layer (serving/qsa_layerwise.py): the MTP
     # draft layer takes the global selection or layer 0's.
     qsa_layerwise_mtp: str = 'global'
+    # Source of the QSA per-layer pressure attention (serving/qsa_pressure.py):
+    # 'kernel' takes the sampled rows' logits from a variant of the B12X sparse
+    # attention kernel (adapters/qsa_scores.py; same per-layer picks, +5% prefill
+    # with 5,952-token chunks), 'recompute' rebuilds them in torch.
+    qsa_pressure_scores: str = 'kernel'
     prefill_physical_coalescing: bool = False
     # Opt-in: physical coalescing with graph_mode=off (historical GC requires
     # graphs off). Logical publication then commits each child's accepted
@@ -740,6 +745,8 @@ class RuntimeOptions:
             raise ValueError('archive_direct_reads requires archive_backend=nvme')
         if self.qsa_layerwise_mtp not in ('global', 'layer0'):
             raise ValueError('qsa_layerwise_mtp must be global or layer0')
+        if self.qsa_pressure_scores not in ('kernel', 'recompute'):
+            raise ValueError('qsa_pressure_scores must be kernel or recompute')
         if self.archive_layout not in ('record', 'layer'):
             raise ValueError('archive_layout must be record or layer')
         if self.archive_layout == 'layer' and (self.archive_backend != 'nvme' or not self.archive_direct_reads
@@ -1206,6 +1213,7 @@ class RuntimeOptions:
             ('archive_direct_threads', 8),
             ('archive_layout', 'record'),
             ('qsa_layerwise_mtp', 'global'),
+            ('qsa_pressure_scores', 'kernel'),
             ('prefill_physical_coalescing', False),
             ('prefill_physical_graphless', False),
             ('prefill_physical_multi_owner', False),
