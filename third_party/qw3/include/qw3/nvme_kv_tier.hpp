@@ -230,6 +230,9 @@ public:
     bool read_only() const { return cfg_.read_only && overlay_fd_ < 0; }
     bool has_overlay() const { return overlay_fd_ >= 0; }
     bool direct_reads() const { return direct_fd_ >= 0; }
+    // The buffered descriptor of the base arena (also for unlinked arenas), so a
+    // separate O_DIRECT reader can reopen the same inode through /proc/self/fd.
+    int file_descriptor() const { return fd_; }
 
     // Declare block ids [begin,end) resident at their identity slots. Only
     // meaningful for a direct-mapped arena, where an attached archive knows

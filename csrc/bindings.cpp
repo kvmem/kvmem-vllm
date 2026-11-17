@@ -23,6 +23,7 @@
 #include "query_key_fps_cpu.hpp"
 #include "parallel_rows.hpp"
 #include "session_spill.hpp"
+#include "direct_record_reader.hpp"
 #include <filesystem>
 #include <thread>
 #include <mutex>
@@ -3375,5 +3376,33 @@ PYBIND11_MODULE(_native, m) {
             result["bytes"] = stats.bytes; result["syscalls"] = stats.syscalls;
             result["duration_ns"] = stats.duration_ns;
             return result;
+        });
+    // SSD tier: O_DIRECT batched record reads into caller-owned pinned memory.
+    using vllm_kvmem::direct_reads::DirectRecordReader;
+    py::class_<DirectRecordReader>(m, "DirectRecordReader")
+        .def(py::init([](NvmeKvTier &tier, int threads, uint64_t max_request_bytes) {
+            if (tier.has_overlay() || tier.file_descriptor() < 0)
+                throw std::invalid_argument("Direct reads need a plain NVMe arena");
+            return std::make_unique<DirectRecordReader>(tier.file_descriptor(), tier.slot_bytes(),
+                                                        tier.slot_count(), threads, max_request_bytes);
+        }), py::arg("tier"), py::arg("threads") = 16, py::arg("max_request_bytes") = 4ull << 20,
+            py::keep_alive<1, 2>())
+        .def("submit", &DirectRecordReader::submit, py::arg("slots"), py::arg("destination"),
+             py::arg("destination_bytes"))
+        .def("wait", [](DirectRecordReader &reader, uint64_t ticket) {
+            vllm_kvmem::direct_reads::BatchResult result;
+            {
+                py::gil_scoped_release release;
+                result = reader.wait(ticket);
+            }
+            py::dict out;
+            out["bytes"] = result.bytes; out["requests"] = result.requests; out["wall_ns"] = result.wall_ns;
+            return out;
+        }, py::arg("ticket"))
+        .def("done", &DirectRecordReader::done, py::arg("ticket"))
+        .def_property_readonly("threads", &DirectRecordReader::threads)
+        .def("close", [](DirectRecordReader &reader) {
+            py::gil_scoped_release release;
+            reader.close();
         });
 }

@@ -102,14 +102,20 @@ class QSAWindowAssembler:
                             torch.full_like(layer._raw_rope_positions[:1], -1)))
         owners, uploaded, chunks = [self, authority, plan], 0, 0
         started = time.perf_counter()
+        groups = [remaps[at:at+self.chunk_blocks] for at in range(0, len(remaps), self.chunk_blocks)]
+        handles = [[records[r.block_id].handle for r in chunk] for chunk in groups]
+        io = dict(archive_direct_bytes=0, archive_direct_requests=0, archive_direct_wait_s=0.0)
+        direct = getattr(authority.archive, 'direct_reads', False)
+        if direct:
+            # SSD tier: O_DIRECT reads into a pinned ring, several chunks ahead.
+            from .direct_assembly_reads import direct_chunks
+            source = direct_chunks(authority, handles, device, io)
+        else:
+            source = self._buffered_chunks(authority, handles, device)
         try:
-            for at in range(0, len(remaps), self.chunk_blocks):
-                chunk = remaps[at:at+self.chunk_blocks]
-                payloads = authority.read_records([records[r.block_id].handle for r in chunk])
-                raw = torch.cat([p[0] for p in payloads], dim=1).contiguous().to(device)
-                values = torch.cat([p[1] for p in payloads], dim=1).contiguous().to(device)
-                uploaded += raw.numel() + values.numel()
-                start, n = chunk[0].to_base, raw.shape[1]
+            for chunk, (raw_of, values_of, n, size) in zip(groups, source):
+                uploaded += size
+                start = chunk[0].to_base
                 positions = torch.arange(start, start+n, device=device, dtype=torch.int64)
                 requests = torch.zeros(n, device=device, dtype=torch.int32)
                 query_start = torch.tensor([0, n], device=device, dtype=torch.int32)
@@ -119,9 +125,9 @@ class QSAWindowAssembler:
                     page = key.shape[1]
                     slots = (positions if table is None else
                              table[positions // page].long() * page + positions % page)
-                    assemble_fp8(raw[i], values[i].view(torch.float8_e4m3fn),
+                    assemble_fp8(raw_of(i), values_of(i).view(torch.float8_e4m3fn),
                         positions, slots, layer.rotary_emb.cos_sin_cache, key, value, layer._k_scale)
-                    selector = values[count_layers+i].reshape(n, -1)[:, :layer.index_head_dim*2]
+                    selector = values_of(count_layers+i).reshape(n, -1)[:, :layer.index_head_dim*2]
                     selector = selector.contiguous().view(torch.bfloat16)
                     rope = positions[:, None].expand(-1, layer.position_axes).contiguous()
                     cos, sin = layer.rotary_emb.cos_sin_cache.chunk(2, dim=-1)
@@ -160,9 +166,11 @@ class QSAWindowAssembler:
             event.record()
             self._completion = event
             self.runner._kvmem_qsa_pending_rings.extend(pending)
+            extra = {'qsa_rebuilt_selector_tokens': cursor, 'qsa_auxiliary_codec': 'bf16_bytes_v1'}
+            if direct:
+                extra.update(io)
             return AssemblyResult(event, tuple(owners), cursor, 0, chunks,
-                time.perf_counter()-started, uploaded,
-                {'qsa_rebuilt_selector_tokens': cursor, 'qsa_auxiliary_codec': 'bf16_bytes_v1'})
+                time.perf_counter()-started, uploaded, extra)
         except BaseException:
             try:
                 event = torch.cuda.Event()
@@ -173,6 +181,15 @@ class QSAWindowAssembler:
             authority.memory.fail_transaction(AssemblyResult(event, tuple(owners), 0, 0, 0))
             raise
         finally:
+            source.close()
             release = getattr(plan, 'release_cpu_sources', None)
             if release is not None:
                 release()
+
+    @staticmethod
+    def _buffered_chunks(authority, handles, device):
+        for chunk in handles:
+            payloads = authority.read_records(chunk)
+            raw = torch.cat([p[0] for p in payloads], dim=1).contiguous().to(device)
+            values = torch.cat([p[1] for p in payloads], dim=1).contiguous().to(device)
+            yield raw.__getitem__, values.__getitem__, raw.shape[1], raw.numel() + values.numel()

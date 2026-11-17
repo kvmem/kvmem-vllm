@@ -177,10 +177,31 @@ def make_shared_archive(options, directory, record_bytes, max_requests, *, max_q
                           // options.memory.block_tokens * record_bytes))
     archive = cls(str(directory), record_bytes, capacity, preallocate=options.nvme_preallocate,
                max_bytes=options.nvme_max_bytes, io_max_bytes=options.archive_io_max_bytes, **kwargs)
+    if getattr(options, 'archive_direct_reads', False):
+        archive.enable_direct_reads(options.archive_direct_threads)
     archive.async_seal = options.async_seal
     archive._query_window_cache_reserved_bytes = query_cache_bytes
     archive._query_window_cache_bytes = 0
     return archive
+
+
+class DirectRead:
+    """One O_DIRECT batch in flight; wait() returns its stats and releases its leases."""
+    def __init__(self, archive, ticket, owned):
+        self.archive, self.ticket, self._owned = archive, ticket, owned
+        self.stats, self._finished = None, False
+
+    def wait(self):
+        if not self._finished:
+            self._finished = True
+            try:
+                self.stats = self.archive._direct.wait(self.ticket)
+            finally:
+                self._owned.clear()
+                self.archive._direct_done()
+        if self.stats is None:
+            raise RuntimeError('Direct archive read failed')
+        return self.stats
 
 
 class AsyncArchive:
@@ -229,6 +250,8 @@ class AsyncArchive:
         self._namespace_counts = {}
         self._closed = False
         self._seal_totals = None
+        self._direct = None          # SSD tier: O_DIRECT reader (enable_direct_reads)
+        self._direct_pending = 0
 
     @staticmethod
     def key(namespace: str, lease):
@@ -510,6 +533,51 @@ class AsyncArchive:
                 self._complete(size)
                 raise
 
+    def enable_direct_reads(self, threads=8):
+        """SSD tier: O_DIRECT reads of whole records into caller-owned pinned memory."""
+        if self.memory_only:
+            raise ValueError('Direct reads need the NVMe archive')
+        with self._lock:
+            if self._closed:
+                raise RuntimeError('Archive is closed')
+            if self._direct is None:
+                self._direct = _native.DirectRecordReader(self.tier, threads=threads)
+            return self._direct
+
+    @property
+    def direct_reads(self):
+        return self._direct is not None
+
+    def read_direct(self, namespace, leases, destination):
+        """Start reading records into a 4 KiB aligned contiguous uint8 CPU tensor (pinned).
+
+        leases[i] lands at destination[i * record_bytes:]; a None lease leaves
+        that record to the caller. Generation leases are held until wait().
+        """
+        if len(leases) * self.record_bytes > destination.numel():
+            raise ValueError('Direct read destination is smaller than the batch')
+        keys = [None if lease is None else self.key(namespace, lease) for lease in leases]
+        with self._lock:
+            if self._direct is None or self._closed:
+                raise RuntimeError('Direct reads are not enabled on this archive')
+            entries = [None if key is None else self._entries.get(key) for key in keys]
+            if any(key is not None and (e is None or not e.ready) for key, e in zip(keys, entries)):
+                raise KeyError('Archive record missing, stale, or not yet published')
+            owned = [lease.clone() for lease in leases if lease is not None]
+            try:
+                ticket = self._direct.submit([-1 if e is None else e.allocation.slot for e in entries],
+                                             destination.data_ptr(), destination.numel())
+            except BaseException:
+                owned.clear()
+                raise
+            self._direct_pending += 1
+        return DirectRead(self, ticket, owned)
+
+    def _direct_done(self):
+        with self._lock:
+            self._direct_pending -= 1
+            self._capacity_changed.notify_all()
+
     def borrow_read_sources(self, namespace, leases):
         """Retain immutable payload read rights for a bounded deferred reader.
 
@@ -706,11 +774,14 @@ class AsyncArchive:
 
     def close(self) -> bool:
         with self._lock:
-            if self._pending or getattr(self, '_prepared_region_readers', 0):
+            if self._pending or self._direct_pending or getattr(self, '_prepared_region_readers', 0):
                 return False
             if self._closed:
                 return True
             self._closed = True
+            if self._direct is not None:
+                self._direct.close()
+                self._direct = None
             self._capacity_changed.notify_all()
             self.executor.shutdown(wait=False)
             self._entries.clear()

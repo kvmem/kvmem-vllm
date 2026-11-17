@@ -377,6 +377,11 @@ class RuntimeOptions:
     # lives in a pinned host pool and misses stream in per step (adapters/qsa_stream_serving.py).
     qsa_streaming: bool = False
     qsa_hot_pages: int = 3
+    # SSD tier (archive_backend=nvme): window assembly reads selected records with
+    # O_DIRECT into a pinned ring (archive_direct_threads parallel reads, several
+    # chunks in flight) and copies each chunk to the GPU by DMA (csrc/direct_record_reader.hpp).
+    archive_direct_reads: bool = False
+    archive_direct_threads: int = 8
     prefill_physical_coalescing: bool = False
     # Opt-in: physical coalescing with graph_mode=off (historical GC requires
     # graphs off). Logical publication then commits each child's accepted
@@ -714,6 +719,12 @@ class RuntimeOptions:
             raise ValueError('qsa_hot_pages must be an integer in [1, 8]')
         if self.qsa_streaming and not self.qsa_split_selector:
             raise ValueError('qsa_streaming requires qsa_split_selector')
+        if type(self.archive_direct_reads) is not bool:
+            raise ValueError('archive_direct_reads must be boolean')
+        if type(self.archive_direct_threads) is not int or not 1 <= self.archive_direct_threads <= 64:
+            raise ValueError('archive_direct_threads must be an integer in [1, 64]')
+        if self.archive_direct_reads and self.archive_backend != 'nvme':
+            raise ValueError('archive_direct_reads requires archive_backend=nvme')
         for name in ('action_profile_interval', 'action_profile_max_events'):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f'{name} must be a positive integer')
@@ -1169,6 +1180,8 @@ class RuntimeOptions:
             ('qsa_split_selector', False),
             ('qsa_streaming', False),
             ('qsa_hot_pages', 3),
+            ('archive_direct_reads', False),
+            ('archive_direct_threads', 8),
             ('prefill_physical_coalescing', False),
             ('prefill_physical_graphless', False),
             ('prefill_physical_multi_owner', False),

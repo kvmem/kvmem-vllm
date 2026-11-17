@@ -1152,6 +1152,42 @@ class RequestAuthority:
             for lease in leases:
                 lease.reset()
 
+    def start_direct_read(self, handles, destination):
+        """SSD tier: start reading records' archive bytes into a pinned, 4 KiB aligned uint8 tensor.
+
+        Record i lands at destination[i * record_bytes:] in the archive layout
+        (raw plane, then values). Records still held in memory are copied from
+        RAM; the rest are read with O_DIRECT. Returns (pending, counts):
+        pending.wait() blocks on the drive and releases the leases.
+        """
+        self._require_open()
+        self.poll()
+        records = [self.records[record_key(handle)] for handle in handles]
+        admitted = [self.memory.admitted_read(handle) for handle in handles]
+        leases = [entry[0] for entry in admitted]
+        pending = None
+        try:
+            if not all(leases):
+                raise ValueError("Stale authority handle")
+            if any(record.raw is None and not record.archived for record in records):
+                raise BlockingIOError("Immutable record write is still in flight")
+            for i, record in enumerate(records):
+                if record.raw is None:
+                    continue
+                base, count = i * self.record_bytes, record.count
+                raw = destination[base:base + self.raw_record_bytes].view(self.raw_dtype).view(self.shape)
+                raw[:, :count].copy_(record.raw[:, :count])
+                values = destination[base + self.raw_record_bytes:base + self.record_bytes].view(self.shape)
+                values[:, :count].copy_(record.values[:, :count])
+            pending = self.archive.read_direct(
+                self.memory.request_id, [lease if record.raw is None else None
+                                         for lease, record in zip(leases, records)], destination)
+            return _HeldDirectRead(pending, leases), [record.count for record in records]
+        finally:
+            if pending is None:
+                for lease in leases:
+                    lease.reset()
+
     def select_for_queries(self, queries, mandatory_handles=(), *, observe_only=False, max_tokens=None,
                            guided_pressure=False):
         """Reference MeanK-to-native-selection bridge over accepted history only.
@@ -1506,3 +1542,17 @@ def append_authority_batch(entries):
     _trace('append_batch', records=len(jobs), prepare=_t1-_t0, scatter=_t2-_t1,
            commit=_time.perf_counter()-_t2)
     return len(plans)
+
+
+class _HeldDirectRead:
+    """Authority leases stay held until the drive has written the destination."""
+    def __init__(self, pending, leases):
+        self._pending, self._leases = pending, leases
+
+    def wait(self):
+        try:
+            return self._pending.wait()
+        finally:
+            leases, self._leases = self._leases, ()
+            for lease in leases:
+                lease.reset()
