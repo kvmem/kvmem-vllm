@@ -17,6 +17,7 @@ from .prefill_attention import PrefillHistory
 from ..adapters.original_rope import enabled as original_rope
 from ..core import settings as _settings
 from ..core.block_runs import encode_starts
+from .tensor_parallel import active as _tp_active
 
 
 def _decode_labels():
@@ -828,6 +829,11 @@ class LayerwisePrefillPressure:
             if layer == 0:
                 job.layerwise_zero_slots = ordered_slots   # slots of chosen[0], same order
             chosen.append(picked)
+            if _tp_active():
+                # Reduced per-layer histories make the pick rank-identical; check
+                # it before any rank assembles this layer (producer: private group).
+                from .tensor_parallel import agree_layer_selection
+                agree_layer_selection(rid, layer, picked, 'decode pressure' if decode else 'pressure')
             evidence.append(dict(layer=layer, layer_name=self.names[layer],
                 candidate_block_count=len(candidates), candidate_runs=encode_starts([r.history_begin for r in candidates]),
                 selected_starts=[r.history_begin for r in picked], selected_tokens=sum(r.count for r in picked),

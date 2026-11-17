@@ -71,10 +71,54 @@ def _cpu_group():
     return _private_cpu_group if _private.get() else _group.cpu_group
 
 
+# Layerwise selection under TP (sequential Query + prefill/rolling pressure).
+# Selections are made on every rank from rank-identical (head-reduced) scores
+# and checked to agree before any rank writes KV. These exact optimizations
+# start work, collectives or graph-mode decisions on rank-local timing
+# (post-forward priming, promises, early leases, deferred work resolved on
+# first use, extra lanes, restore-first queues, layer-0 fast path), so TP
+# launches turn them off; selections are unchanged by them.
+LAYERWISE_TP_SETTINGS = {
+    'KVMEM_LAYERWISE_PRESSURE_PIPELINE': '0',
+    'KVMEM_LAYERWISE_PRESSURE_PIPELINE_HANDOFF': '0',
+    'KVMEM_LAYERWISE_PRESSURE_PIPELINE_PROGRESS': '0',
+    'KVMEM_LAYERWISE_PRESSURE_PIPELINE_PREFORWARD': '0',
+    'KVMEM_LAYERWISE_PRESSURE_PROMISE': '0',
+    'KVMEM_LAYERWISE_PRESSURE_SCHEDULE_ACK': '0',
+    'KVMEM_LAYERWISE_PRESSURE_EARLY_LEASE': '0',
+    'KVMEM_LAYERWISE_PRESSURE_LAYER0_FIRST': '0',
+    'KVMEM_LAYERWISE_PRESSURE_LANES': '1',
+    'KVMEM_LAYERWISE_PRESSURE_POST_FORWARD_REAP': '0',
+    'KVMEM_LAYERWISE_PRESSURE_DEFERRED_MAPS': '0',
+    'KVMEM_LAYERWISE_PRESSURE_DEFERRED_FOLD': '0',
+    'KVMEM_LAYERWISE_PRESSURE_DEFERRED_EVIDENCE': '0',
+    'KVMEM_LAYERWISE_PIPELINE_SWAPS': '0',
+    'KVMEM_PIPELINE_DISPATCH_BATCH_MEMBERS': '0',
+    'KVMEM_PROMISE_PM_SESSIONS': '0',
+    'KVMEM_PROMISE_ASYNC_PAGE_CHECK': '0',
+    'KVMEM_RESTORE_FIRST': '0',
+    'KVMEM_LAYER0_FAST': '0',
+}
+
+
+def layerwise_tp_violations(get=None):
+    """Settings that a TP layerwise worker may not run with (name, value, required)."""
+    get = get or _settings.get
+    return [(name, get(name), value) for name, value in LAYERWISE_TP_SETTINGS.items()
+            if get(name) is not None and get(name) != value]
+
+
 def validate_worker_options(options):
-    if (options.query_replay_cobatch or _settings.get('KVMEM_LAYERWISE_QUERY_MODE')
-            or _settings.get('KVMEM_SYSTEMONE_FORK') == '1'):
-        raise ValueError('KVMem TP uses global selection and private Query replay on all ranks')
+    mode = _settings.get('KVMEM_LAYERWISE_QUERY_MODE')
+    if options.query_replay_cobatch or _settings.get('KVMEM_SYSTEMONE_FORK') == '1':
+        raise ValueError('KVMem TP uses global or layerwise selection with private Query replay on all ranks')
+    if mode:
+        if mode != 'sequential' or _settings.get('KVMEM_LAYERWISE_QUERY_NO_PROBE') == '1':
+            raise ValueError('Tensor-parallel layerwise selection requires sequential Query with the private probe')
+        bad = layerwise_tp_violations()
+        if bad:
+            raise ValueError('Tensor-parallel layerwise selection requires rank-synchronous settings: '
+                             + ', '.join('%s=%s (needs %s)' % row for row in bad))
     if options.guided_query_tokens or _settings.get('KVMEM_EXPERIMENTAL_QUERY_TOKEN_SCORES') == 'sum':
         raise ValueError('Tensor-parallel Query scoring requires the public Query')
     if options.historical_gc is not None or options.repository_gc:
@@ -270,15 +314,18 @@ def publish_action_scores(packets, pool):
         if packet.masses is None or not packet.masses.numel():
             continue
         rows, cols = packet.masses.shape
+        # Layerwise packets reduce every layer's masses (layer 0 is its first slice).
+        stack = getattr(packet, 'layerwise_stack', None)
+        layers = stack.shape[0] if stack is not None else 0
         digest.update(rid.encode() + b'\0')
-        digest.update(struct.pack('<QQQ', packet.history_begin, rows, cols))
+        digest.update(struct.pack('<QQQQ', packet.history_begin, rows, cols, layers))
         digest.update(struct.pack(f'<{rows}Q', *packet.rows))
-        scored.append((rid, packet))
+        scored.append((rid, packet, stack))
     _agree(digest, 'Tensor-parallel workers sampled different public rows')
     if not scored:
         return packets
     # One collective and one pinned transfer per public batch, also at C32.
-    values = [p.masses.reshape(-1) for _, p in scored]
+    values = [(stack if stack is not None else p.masses).reshape(-1) for _, p, stack in scored]
     merged = mean_head_scores(values[0] if len(values) == 1 else torch.cat(values))
     if pool is not None:
         host, event = pool.copy(merged)
@@ -288,17 +335,56 @@ def publish_action_scores(packets, pool):
         event = torch.cuda.Event()
         event.record()
     offset = 0
-    for rid, packet in scored:
-        source = packet.masses
-        packet.masses = host.narrow(0, offset, source.numel()).view_as(source)
-        packet.event = event
+    for rid, packet, stack in scored:
+        source = stack if stack is not None else packet.masses
+        reduced = host.narrow(0, offset, source.numel()).view(source.shape)
         offset += source.numel()
+        packet.event = event
+        layerwise = None
+        if stack is None:
+            packet.masses = reduced
+        else:
+            packet.masses = reduced[0]
+            del packet.layerwise_stack
+            for name in ('layerwise_pressure', 'layerwise_decode'):
+                marker = getattr(packet, name, None)
+                if marker is not None:
+                    if marker[-1] is not stack:
+                        raise RuntimeError('Layerwise TP marker does not hold this packet\'s score stack')
+                    setattr(packet, name, marker[:-1] + (reduced,))
+            layerwise = getattr(packet, 'layerwise_pressure', None)
         if packet.logical_group is not None:
             packets.logical_slices[rid] = project_logical_scores(
                 packet.logical_group, packet.tp_logical_plans, packet.masses,
-                physical_rows=tuple(packet.rows), event=event)
+                physical_rows=tuple(packet.rows), event=event, layerwise_pressure=layerwise)
             del packet.tp_logical_plans
     return packets
+
+
+def agree_flag(value, what):
+    """A rank-local decision that gates later collectives must be the same on every rank."""
+    if _group is None:
+        return value
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(f'{what}:{bool(value)}'.encode())
+    _agree(digest, f'Tensor-parallel workers disagree: {what}')
+    return value
+
+
+def agree_layer_selection(request_id, layer, records, kind):
+    """Layerwise TP: every rank picked the same logical blocks for this layer.
+
+    Picks are made from rank-identical (reduced) scores with position tie
+    breaks, so they agree by construction; this fails loudly before any rank
+    writes a diverged window instead of letting the ranks drift apart.
+    """
+    if _group is None:
+        return
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(f'{kind}:{request_id}:{layer}'.encode())
+    for record in sorted(records, key=lambda r: r.history_begin):
+        digest.update(struct.pack('<QQ', record.history_begin, record.count))
+    _agree(digest, f'Tensor-parallel workers chose different {kind} blocks for {request_id} layer {layer}')
 
 
 def verify_window(authority, remaps, by_slot):

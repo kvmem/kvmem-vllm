@@ -96,7 +96,16 @@ def commit_layer_zero(controller, state):
     memory = state['authority'].memory
     chosen = state['layer_zero_records']
     memory._require(Phase.READY)
-    plan = memory._store.select([r.handle for r in chosen])
+    def admit():
+        return memory._store.select([r.handle for r in chosen])
+    if getattr(memory, 'tp_records', None) is not None:
+        # TP: the same logical frame on every rank, admitted jointly (a retry
+        # or failure on one rank is seen by all before any KV is advertised).
+        from .tensor_parallel import agree_layer_selection
+        agree_layer_selection(state.get('request_id', memory.request_id), 0, chosen, 'layer-zero frame')
+        plan = memory.tp_admit_window(admit)
+    else:
+        plan = admit()
     memory._plan = plan
     memory.phase = Phase.ASSEMBLING
     memory._submitted = False

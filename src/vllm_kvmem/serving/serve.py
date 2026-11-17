@@ -642,8 +642,11 @@ def main(argv=None):
                              % (profile['kvmem']['strategy_path'], path))
         profile['kvmem']['strategy_path'] = path
     plan = build_launch(profile, base, run_dir)
-    if plan['profile'].get('tensor_parallel_size', 1) > 1 and (args.layerwise_query_diagnostic or args.systemone_fork):
-        raise ValueError('Tensor-parallel serving uses global selection and native speculation')
+    tensor_parallel = plan['profile'].get('tensor_parallel_size', 1) > 1
+    if tensor_parallel and (args.systemone_fork or args.layerwise_query_no_probe or
+                            args.layerwise_query_diagnostic not in (None, 'sequential')):
+        raise ValueError('Tensor-parallel serving uses global or sequential layerwise selection '
+                         'with the private Query probe')
     if args.layerwise_query_diagnostic and not profile.get('kvmem', {}).get('async_refresh', False):
         raise ValueError('Layerwise Query requires async_refresh; synchronous refresh does not invoke layerwise selection')
     if plan['profile'].get('kvmem', {}).get('request_swap_layerwise', False):
@@ -794,6 +797,15 @@ def main(argv=None):
         plan['environment']['KVMEM_VERIFY_GUIDED_PRESSURE'] = '1'
     if 'multi_user' in plan['profile'] and os.environ.get('VLLM_RUST_FRONTEND_PATH'):
         raise ValueError('Multi-user admission requires the Python API frontend')
+    if tensor_parallel and args.layerwise_query_diagnostic:
+        # Layerwise TP: rank-synchronous settings only (tensor_parallel.LAYERWISE_TP_SETTINGS).
+        from .tensor_parallel import LAYERWISE_TP_SETTINGS
+        changed = sorted(name for name, value in LAYERWISE_TP_SETTINGS.items()
+                         if plan['environment'].get(name, value) != value)
+        plan['environment'].update(LAYERWISE_TP_SETTINGS)
+        if changed:
+            print('KVMem: tensor-parallel layerwise selection turns off rank-asynchronous options: '
+                  + ', '.join(changed), file=sys.stderr)
     if isinstance(plan['profile'].get('kvmem'), dict):
         # Strategy layer: one check of every chosen strategy against the launched path.
         from .capabilities import check as check_capabilities

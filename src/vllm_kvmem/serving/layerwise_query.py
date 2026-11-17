@@ -444,6 +444,10 @@ class LayerwiseQuery:
             raise RuntimeError('Fresh and frozen layer Queries have different rows')
         from ..core.cuda_scoring import mean_key_scores
         from .query_stage_profile import QueryStageProfile, no_stage
+        from .tensor_parallel import active as _tp_active, mean_head_scores as _tp_mean
+        # TP: each rank scores its own heads (per-head softmax, local-head mean);
+        # the rank mean is the all-head score, identical on every rank.
+        tp = _tp_active()
         profile = state.get('query_stage_profile')
         if getattr(self, 'stage_profile', False) and profile is None:
             profile = state['query_stage_profile'] = QueryStageProfile(
@@ -463,21 +467,27 @@ class LayerwiseQuery:
             compare, old_scores = False, None
             scores = strategy_scores(scorer, state, layer_index, q,
                                      dict(score_backend=getattr(self, 'score_backend', 'legacy')))
+            if tp:
+                scores = _tp_mean(torch.tensor(scores, dtype=torch.float32)).tolist()
         elif self.prepared_index:
             from ..core.cuda_scoring import prepared_layer_scores
             score_backend = getattr(self, 'score_backend', 'legacy')
             score_kwargs = {} if score_backend == 'legacy' else {'backend': score_backend}
-            scores = (profile.score(lambda: prepared_layer_scores(q,state['mean_index'],layer_index,**score_kwargs))
-                      if profile is not None else
-                      prepared_layer_scores(q,state['mean_index'],layer_index,**score_kwargs).cpu().tolist())
-            old_scores = (prepared_layer_scores(old_q,state['mean_index'],layer_index,**score_kwargs).cpu().tolist()
-                          if compare else None)
+            def layer_scores(query):
+                result = prepared_layer_scores(query, state['mean_index'], layer_index, **score_kwargs)
+                return _tp_mean(result) if tp else result
+            scores = (profile.score(lambda: layer_scores(q)) if profile is not None
+                      else layer_scores(q).cpu().tolist())
+            old_scores = layer_scores(old_q).cpu().tolist() if compare else None
         else:
             means = state['means'][layer_index:layer_index+1].to(q.device)
             mask = state['gpu_mask'] if self.optimized else torch.tensor(state['score_mask'], device=q.device, dtype=torch.bool)
-            scores = (profile.score(lambda: mean_key_scores(q, means, mask)) if profile is not None
-                      else mean_key_scores(q, means, mask).cpu().tolist())
-            old_scores = mean_key_scores(old_q, means, mask).cpu().tolist() if compare else None
+            def layer_scores(query):
+                result = mean_key_scores(query, means, mask)
+                return _tp_mean(result) if tp else result
+            scores = (profile.score(lambda: layer_scores(q)) if profile is not None
+                      else layer_scores(q).cpu().tolist())
+            old_scores = layer_scores(old_q).cpu().tolist() if compare else None
         record_index = None
         with stage('selection_cpu', candidates=len(records)):
             if use_global:
@@ -509,6 +519,9 @@ class LayerwiseQuery:
                       else record_index.chosen(selected))
             if sum(r.count for r in chosen) != state['selected_tokens']:
                 raise RuntimeError('Layer-specific selection changed the native causal length')
+            if tp:
+                from .tensor_parallel import agree_layer_selection
+                agree_layer_selection(state['request_id'], layer_index, chosen, 'query')
         scoring_seconds = time.perf_counter() - started
         actual = selected if self.mode == 'sequential' else state['global_slots']
         if layer_index == 0 and self.mtp_selection == 'layer0':

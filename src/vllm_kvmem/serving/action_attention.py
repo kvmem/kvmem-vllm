@@ -1795,6 +1795,11 @@ class ActionRuntime:
                 if plan.get('prefill_thinking') is not None:
                     pending.prefill_thinking = plan['prefill_thinking']
                 if layerwise is not None:
+                    if active():
+                        # TP: publish_action_scores reduces this whole per-layer
+                        # stack across ranks and rebinds both layer 0 and the
+                        # layerwise markers to the reduced host copy.
+                        pending.layerwise_stack = host
                     layerwise.attach_packet(pending, request_id, authority, starts, counts, host)
                 packets=self._logical_packet_views(packets,request_id,plan,pending)
                 self.candidate_samples+=len(rows)

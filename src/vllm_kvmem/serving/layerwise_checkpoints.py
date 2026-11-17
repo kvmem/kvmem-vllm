@@ -887,7 +887,9 @@ def realign_after_restore(worker, request_id, checkpoint):
     if frame is None or isinstance(frame, PendingMapsType()) or worker.bindings[request_id].pressure_restore:
         return False
     authority = checkpoint.authority
-    if not layer0_diverged(tuple(authority.memory._store.working_records()), frame[1][0]):
+    from .tensor_parallel import agree_flag
+    if not agree_flag(layer0_diverged(tuple(authority.memory._store.working_records()), frame[1][0]),
+                      f'layer-zero realign for {request_id}'):
         return False
     from .layerwise_no_probe import commit_layer_zero
     records = [authority.records[(row[0], row[1])] for row in frame[1][0]]

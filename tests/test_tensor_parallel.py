@@ -257,3 +257,67 @@ def _four_head_shards(rank, rendezvous):
 def test_four_head_shards_on_gloo(tmp_path):
     import torch.multiprocessing as mp
     mp.spawn(_four_head_shards, args=((tmp_path/'rendezvous').as_uri(),), nprocs=4)
+
+
+def _layerwise_two_ranks(rank, rendezvous):
+    """Layerwise TP: per-layer agreement, flags, and the full-stack score reduction."""
+    from datetime import timedelta
+    import torch
+    import torch.distributed as dist
+    from vllm_kvmem.serving import tensor_parallel as tp
+    dist.init_process_group('gloo', init_method=rendezvous, rank=rank, world_size=2,
+                            timeout=timedelta(seconds=30))
+    tp._group = NS(cpu_group=dist.group.WORLD, rank_in_group=rank, world_size=2, ranks=[0, 1])
+    try:
+        # Rank-local slots differ; the logical (history_begin, count) picks agree.
+        picked = [NS(handle=NS(slot=50*rank+i), history_begin=32*i, count=32) for i in (3, 0, 7)]
+        tp.agree_layer_selection('r', 4, picked if rank else picked[::-1], 'pressure')
+        with pytest.raises(RuntimeError, match='different pressure blocks for r layer 5'):
+            tp.agree_layer_selection('r', 5, picked if rank else picked[:2], 'pressure')
+        assert tp.agree_flag(True, 'realign r') is True
+        with pytest.raises(RuntimeError, match='disagree: realign q'):
+            tp.agree_flag(bool(rank), 'realign q')
+        # A layerwise packet: rank-local [layers, rows, cols] stack; layer 0 is the shared view.
+        stack = torch.full((3, 2, 4), float(rank)) + torch.arange(3.).view(3, 1, 1)
+        packet = NS(masses=stack[0], history_begin=64, rows=[0, 5], logical_group=None, event=None,
+                    layerwise_stack=stack)
+        packet.layerwise_pressure = ('controller', 'r', ('h',) * 3, stack)
+        packet.layerwise_decode = ('controller', 'r', ('l',) * 3, stack)
+        plain = NS(masses=torch.full((1, 2), 2.*rank), history_begin=0, rows=[1], logical_group=None, event=None)
+
+        class Packets(dict):
+            pass
+        result = tp.publish_action_scores(Packets(a=packet, b=plain), None)
+        expected = torch.full((3, 2, 4), .5) + torch.arange(3.).view(3, 1, 1)
+        reduced = result['a'].layerwise_pressure[-1]
+        torch.testing.assert_close(reduced, expected)
+        assert result['a'].layerwise_decode[-1] is reduced and not hasattr(result['a'], 'layerwise_stack')
+        assert result['a'].masses.data_ptr() == reduced[0].data_ptr() and not result['a'].masses.is_cuda
+        torch.testing.assert_close(result['b'].masses, torch.ones(1, 2))
+    finally:
+        tp.close_worker()
+        dist.destroy_process_group()
+
+
+def test_layerwise_agreement_and_full_stack_reduction_on_gloo(tmp_path):
+    import torch.multiprocessing as mp
+    mp.spawn(_layerwise_two_ranks, args=((tmp_path/'rendezvous').as_uri(),), nprocs=2)
+
+
+def test_layerwise_tp_settings_are_enforced(monkeypatch):
+    from vllm_kvmem.serving import tensor_parallel as tp
+    options = NS(query_replay_cobatch=False, guided_query_tokens=0, historical_gc=None,
+                 repository_gc=False, gpu_memory_admission='static')
+    for name, value in tp.LAYERWISE_TP_SETTINGS.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv('KVMEM_LAYERWISE_QUERY_MODE', 'sequential')
+    tp.validate_worker_options(options)
+    monkeypatch.setenv('KVMEM_LAYERWISE_PRESSURE_PROMISE', '1')
+    with pytest.raises(ValueError, match='KVMEM_LAYERWISE_PRESSURE_PROMISE=1'):
+        tp.validate_worker_options(options)
+    monkeypatch.setenv('KVMEM_LAYERWISE_PRESSURE_PROMISE', '0')
+    for mode, no_probe in (('parallel', '0'), ('sequential', '1')):
+        monkeypatch.setenv('KVMEM_LAYERWISE_QUERY_MODE', mode)
+        monkeypatch.setenv('KVMEM_LAYERWISE_QUERY_NO_PROBE', no_probe)
+        with pytest.raises(ValueError, match='sequential Query with the private probe'):
+            tp.validate_worker_options(options)
