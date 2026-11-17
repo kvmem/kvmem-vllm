@@ -382,6 +382,16 @@ class RuntimeOptions:
     # chunks in flight) and copies each chunk to the GPU by DMA (csrc/direct_record_reader.hpp).
     archive_direct_reads: bool = False
     archive_direct_threads: int = 8
+    # SSD tier: 'layer' stores each archive record as unpadded per-layer groups
+    # (core/layer_major.py), so per-layer selections read contiguous runs.
+    archive_layout: str = 'record'
+    # Flash Next only: at the final Query every QSA layer takes its own MeanK
+    # selection (its probe Query; serving/qsa_layerwise.py); the first
+    # qsa_layerwise_global_layers layers keep the global one, and the MTP draft
+    # layer takes the global selection or layer 0's (qsa_layerwise_mtp).
+    qsa_layerwise_query: bool = False
+    qsa_layerwise_global_layers: int = 0
+    qsa_layerwise_mtp: str = 'global'
     prefill_physical_coalescing: bool = False
     # Opt-in: physical coalescing with graph_mode=off (historical GC requires
     # graphs off). Logical publication then commits each child's accepted
@@ -725,6 +735,18 @@ class RuntimeOptions:
             raise ValueError('archive_direct_threads must be an integer in [1, 64]')
         if self.archive_direct_reads and self.archive_backend != 'nvme':
             raise ValueError('archive_direct_reads requires archive_backend=nvme')
+        if type(self.qsa_layerwise_query) is not bool:
+            raise ValueError('qsa_layerwise_query must be boolean')
+        if type(self.qsa_layerwise_global_layers) is not int or self.qsa_layerwise_global_layers < 0:
+            raise ValueError('qsa_layerwise_global_layers must be a non-negative integer')
+        if self.qsa_layerwise_mtp not in ('global', 'layer0'):
+            raise ValueError('qsa_layerwise_mtp must be global or layer0')
+        if self.archive_layout not in ('record', 'layer'):
+            raise ValueError('archive_layout must be record or layer')
+        if self.archive_layout == 'layer' and (self.archive_backend != 'nvme' or not self.archive_direct_reads
+                                               or self.nvme_preallocate):
+            raise ValueError('archive_layout=layer requires archive_backend=nvme, archive_direct_reads '
+                             'and no preallocation')
         for name in ('action_profile_interval', 'action_profile_max_events'):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f'{name} must be a positive integer')
@@ -1182,6 +1204,10 @@ class RuntimeOptions:
             ('qsa_hot_pages', 3),
             ('archive_direct_reads', False),
             ('archive_direct_threads', 8),
+            ('archive_layout', 'record'),
+            ('qsa_layerwise_query', False),
+            ('qsa_layerwise_global_layers', 0),
+            ('qsa_layerwise_mtp', 'global'),
             ('prefill_physical_coalescing', False),
             ('prefill_physical_graphless', False),
             ('prefill_physical_multi_owner', False),

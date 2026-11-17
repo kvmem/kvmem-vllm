@@ -61,6 +61,13 @@ class StreamingRuntime:
         self.carve = None
         self.ext = None
         self.hosts = {}        # slot -> per-layer [H0..H{h-1}, R] (host mirror)
+        # KVMEM_QSA_STREAM_NO_PREFETCH_CHECK=1 (diagnostic): eager steps use the full
+        # device staging fill instead of copy-stream prefetch; outputs must not change.
+        from ..core import settings as _settings
+        no_prefetch = _settings.get('KVMEM_QSA_STREAM_NO_PREFETCH_CHECK', '0')
+        if no_prefetch not in ('0', '1'):
+            raise ValueError('KVMEM_QSA_STREAM_NO_PREFETCH_CHECK must be 0 or 1')
+        self.prefetch_enabled = no_prefetch == '0'
         self._pool_host = None
         self._installed_reuse = False
         self.eager_staging_steps = 0
@@ -321,7 +328,7 @@ class StreamingRuntime:
                 self.plane_bytes, main, self.page_stride, self.plane_stride, state['hot_page_ids'],
                 self.hot_pages, self.page_tokens, self.token_bytes, RING_MARGIN, self.stats, STAGE_BLOCKS,
                 False)
-        elif self.hosts:
+        elif self.hosts and self.prefetch_enabled:
             slot = self._step_slot()
             if slot is not None:
                 # The pool part arrives on the copy stream (prefetched during the
@@ -352,6 +359,14 @@ class StreamingRuntime:
                     self.plane_bytes, main, self.page_stride, self.plane_stride, state['hot_page_ids'],
                     self.hot_pages, self.page_tokens, self.token_bytes, RING_MARGIN, self.stats, STAGE_BLOCKS,
                     False)
+        elif self.hosts:
+            # Prefetch disabled (diagnostic): the device copies the whole frame itself.
+            self.ext.stage_fill(
+                inputs['query_start_loc'], requests, positions, slots, self.streaming, self.verify_rows,
+                self.staging_runs[index % self.carve.staging_buffers], self.pool_base, layer_offset,
+                self.plane_bytes, main, self.page_stride, self.plane_stride, state['hot_page_ids'],
+                self.hot_pages, self.page_tokens, self.token_bytes, RING_MARGIN, self.stats, STAGE_BLOCKS,
+                False)
         return self._spoofed(request_ids, positions, slots, mask, rows)
 
     def _step_slot(self):

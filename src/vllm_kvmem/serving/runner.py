@@ -191,10 +191,22 @@ def make_probe_runner(base):
                     raise ValueError('NVMe startup reservation requires uniform target KV geometry')
                 heads, dim = geometry.pop()
                 record_bytes = len(layers) * heads * dim * options.memory.block_tokens * 2
+                layer_groups = None
+                if getattr(options, 'archive_layout', 'record') == 'layer':
+                    # SSD tier: Flash Next QSA records as unpadded per-layer groups.
+                    qsa = getattr(self, '_kvmem_qsa_layers', None)
+                    names = list(getattr(self, '_kvmem_archive_layers', self._kvmem_layers))
+                    if not qsa or names != [*qsa, *('__qsa_index__.' + name for name in qsa)]:
+                        raise ValueError('archive_layout=layer is qualified for Flash Next QSA archives only')
+                    from ..core.layer_major import qsa_record_groups
+                    first = next(iter(qsa.values()))
+                    layer_groups = qsa_record_groups(len(qsa), options.memory.block_tokens, heads, dim, 1,
+                                                     first.index_head_dim * 2)
                 self._kvmem_prepared_archive = make_shared_archive(options,
                     self._kvmem_probe_output / 'continuous_archive', record_bytes,
                     self.vllm_config.scheduler_config.max_num_seqs if self._kvmem_bounded_target else 1,
-                    max_query_tokens=self.vllm_config.scheduler_config.max_num_batched_tokens)
+                    max_query_tokens=self.vllm_config.scheduler_config.max_num_batched_tokens,
+                    layer_groups=layer_groups)
                 # TP: rank 0 proposes historical-GC retirements, the others follow.
                 from .tensor_parallel import configure_history_gc
                 configure_history_gc(self._kvmem_prepared_archive)

@@ -59,7 +59,9 @@ class QSAWindowAssembler:
         self.closed = True
         return True
 
-    def assemble(self, authority, plan):
+    def assemble(self, authority, plan, layer_records=None):
+        """layer_records (qsa_layerwise_query): one record list per QSA layer, in
+        frame order, each with the plan's token count; None assembles the plan."""
         from b12x.attention.qsa._kernels import launch_compress_completed_groups
         if self.closed or authority.memory.phase is not Phase.ASSEMBLING or authority.memory._plan is not plan:
             raise ValueError('QSA assembly requires an active owned selection')
@@ -77,6 +79,14 @@ class QSAWindowAssembler:
             cursor += remap.n_tokens
         if cursor != plan.total_window_tokens or cursor <= 0:
             raise ValueError('QSA selected frame extent mismatch')
+        if layer_records is not None:
+            if len(layer_records) != count_layers:
+                raise ValueError('Layerwise QSA assembly needs one record list per QSA layer')
+            for chosen in layer_records:
+                if (sum(r.count for r in chosen) != cursor or
+                        any(records.get(r.handle.slot) is not r for r in chosen) or
+                        any(a.history_begin >= b.history_begin for a, b in zip(chosen, chosen[1:]))):
+                    raise ValueError('A layer selection is not a history-ordered frame of the planned length')
         if self.selector is not None and cursor > self.selector.carve.pages_per_slot * self.selector.carve.page_tokens:
             raise ValueError('QSA selection exceeds the slot selector pages')
         for layer, table, (key, _) in zip(self.layers, self.tables, self.views):
@@ -102,26 +112,49 @@ class QSAWindowAssembler:
                             torch.full_like(layer._raw_rope_positions[:1], -1)))
         owners, uploaded, chunks = [self, authority, plan], 0, 0
         started = time.perf_counter()
-        groups = [remaps[at:at+self.chunk_blocks] for at in range(0, len(remaps), self.chunk_blocks)]
-        handles = [[records[r.block_id].handle for r in chunk] for chunk in groups]
+        # Work items: (layer or None for every layer, first frame position, record handles).
+        items = []
+        if layer_records is None:
+            for at in range(0, len(remaps), self.chunk_blocks):
+                chunk = remaps[at:at+self.chunk_blocks]
+                items.append((None, chunk[0].to_base, [records[r.block_id].handle for r in chunk]))
+        else:
+            for layer_index, chosen in enumerate(layer_records):
+                base = 0
+                for at in range(0, len(chosen), self.chunk_blocks):
+                    chunk = chosen[at:at+self.chunk_blocks]
+                    items.append((layer_index, base, [r.handle for r in chunk]))
+                    base += sum(r.count for r in chunk)
+        handles = [item[2] for item in items]
+        item_groups = [None if item[0] is None else [item[0]] for item in items]
         io = dict(archive_direct_bytes=0, archive_direct_requests=0, archive_direct_wait_s=0.0)
         direct = getattr(authority.archive, 'direct_reads', False)
-        if direct:
+        if direct and getattr(authority.archive, 'layer_major', False):
+            # SSD tier, archive_layout=layer: packed per-layer groups, no padding read.
+            from .direct_assembly_reads import direct_layer_chunks
+            first = self.layers[0]
+            source = direct_layer_chunks(authority, handles, device, io, layers=count_layers,
+                                         block_tokens=self.block_tokens,
+                                         width=first.num_kv_heads * first.head_dim,
+                                         selector_bytes=first.index_head_dim * 2, chunk_groups=item_groups)
+        elif direct:
             # SSD tier: O_DIRECT reads into a pinned ring, several chunks ahead.
             from .direct_assembly_reads import direct_chunks
-            source = direct_chunks(authority, handles, device, io)
+            # Selector (auxiliary) layers keep zeros in their raw plane: never read it.
+            source = direct_chunks(authority, handles, device, io, unused_raw_layers=(count_layers, count_layers))
         else:
             source = self._buffered_chunks(authority, handles, device)
         try:
-            for chunk, (raw_of, values_of, n, size) in zip(groups, source):
+            for (only, start, _), (raw_of, values_of, n, size) in zip(items, source):
                 uploaded += size
-                start = chunk[0].to_base
                 positions = torch.arange(start, start+n, device=device, dtype=torch.int64)
                 requests = torch.zeros(n, device=device, dtype=torch.int32)
                 query_start = torch.tensor([0, n], device=device, dtype=torch.int32)
                 slot = torch.zeros(1, device=device, dtype=torch.int32)
                 for i, (layer, table, (key, value), ring_state) in enumerate(
                         zip(self.layers, self.tables, self.views, scratch)):
+                    if only is not None and i != only:
+                        continue
                     page = key.shape[1]
                     slots = (positions if table is None else
                              table[positions // page].long() * page + positions % page)
@@ -166,7 +199,8 @@ class QSAWindowAssembler:
             event.record()
             self._completion = event
             self.runner._kvmem_qsa_pending_rings.extend(pending)
-            extra = {'qsa_rebuilt_selector_tokens': cursor, 'qsa_auxiliary_codec': 'bf16_bytes_v1'}
+            extra = {'qsa_rebuilt_selector_tokens': cursor, 'qsa_auxiliary_codec': 'bf16_bytes_v1',
+                     'qsa_layerwise': layer_records is not None}
             if direct:
                 extra.update(io)
             return AssemblyResult(event, tuple(owners), cursor, 0, chunks,

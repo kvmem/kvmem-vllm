@@ -1152,12 +1152,22 @@ class RequestAuthority:
             for lease in leases:
                 lease.reset()
 
-    def start_direct_read(self, handles, destination):
+    def raw_layer_hole(self, first, count):
+        """(offset, bytes) of raw-plane archive layers [first, first + count) in a record,
+        or (0, 0) when that range is not 4 KiB aligned (then it is read)."""
+        per_layer = self.shape[1] * self.shape[2] * self.shape[3] * self.raw_element_bytes
+        offset, size = first * per_layer, count * per_layer
+        if count <= 0 or first + count > self.shape[0] or offset % 4096 or size % 4096:
+            return 0, 0
+        return offset, size
+
+    def start_direct_read(self, handles, destination, hole=(0, 0)):
         """SSD tier: start reading records' archive bytes into a pinned, 4 KiB aligned uint8 tensor.
 
         Record i lands at destination[i * record_bytes:] in the archive layout
         (raw plane, then values). Records still held in memory are copied from
-        RAM; the rest are read with O_DIRECT. Returns (pending, counts):
+        RAM; the rest are read with O_DIRECT, except hole = (offset, bytes) of
+        every record (bytes the caller does not use). Returns (pending, counts):
         pending.wait() blocks on the drive and releases the leases.
         """
         self._require_open()
@@ -1181,8 +1191,59 @@ class RequestAuthority:
                 values[:, :count].copy_(record.values[:, :count])
             pending = self.archive.read_direct(
                 self.memory.request_id, [lease if record.raw is None else None
-                                         for lease, record in zip(leases, records)], destination)
+                                         for lease, record in zip(leases, records)], destination, hole)
             return _HeldDirectRead(pending, leases), [record.count for record in records]
+        finally:
+            if pending is None:
+                for lease in leases:
+                    lease.reset()
+
+    def start_group_read(self, handles, groups, destination):
+        """SSD tier, archive_layout=layer: start reading packed layer groups of records.
+
+        Group groups[k] of record i lands at destination[offset_k + i * group_bytes]
+        where the groups are laid out one after another (plane-major), each over
+        all records. Records still held in memory are packed from RAM. Returns
+        (pending, counts, offsets); pending.wait() blocks on the drive and
+        releases the leases.
+        """
+        self._require_open()
+        self.poll()
+        group_bytes = self.archive.layer_group_bytes
+        offsets, cursor = [], 0
+        for group in groups:
+            offsets.append(cursor)
+            cursor += len(handles) * group_bytes[group]
+        if cursor > destination.numel():
+            raise ValueError('Layer group destination is smaller than the batch')
+        records = [self.records[record_key(handle)] for handle in handles]
+        admitted = [self.memory.admitted_read(handle) for handle in handles]
+        leases = [entry[0] for entry in admitted]
+        pending = None
+        try:
+            if not all(leases):
+                raise ValueError("Stale authority handle")
+            if any(record.raw is None and not record.archived for record in records):
+                raise BlockingIOError("Immutable record write is still in flight")
+            in_memory = [i for i, record in enumerate(records) if record.raw is not None]
+            if in_memory:
+                from ..core.layer_major import pack_record_groups
+                for i in in_memory:
+                    record = records[i]
+                    whole = torch.zeros(self.record_bytes, dtype=torch.uint8)
+                    whole[:self.raw_record_bytes].view(self.raw_dtype).view(self.shape)[:, :record.count].copy_(
+                        record.raw[:, :record.count])
+                    whole[self.raw_record_bytes:].view(self.shape)[:, :record.count].copy_(
+                        record.values[:, :record.count])
+                    for group, offset in zip(groups, offsets):
+                        size = group_bytes[group]
+                        pack_record_groups(whole, self.archive.tier.groups[group],
+                                           destination[offset + i * size:offset + (i + 1) * size])
+            pending = self.archive.read_groups(
+                self.memory.request_id, [lease if record.raw is None else None
+                                         for lease, record in zip(leases, records)],
+                groups, offsets, destination)
+            return _HeldDirectRead(pending, leases), [record.count for record in records], offsets
         finally:
             if pending is None:
                 for lease in leases:

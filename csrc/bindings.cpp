@@ -24,6 +24,7 @@
 #include "parallel_rows.hpp"
 #include "session_spill.hpp"
 #include "direct_record_reader.hpp"
+#include "layer_major_arena.hpp"
 #include <filesystem>
 #include <thread>
 #include <mutex>
@@ -3388,7 +3389,9 @@ PYBIND11_MODULE(_native, m) {
         }), py::arg("tier"), py::arg("threads") = 16, py::arg("max_request_bytes") = 4ull << 20,
             py::keep_alive<1, 2>())
         .def("submit", &DirectRecordReader::submit, py::arg("slots"), py::arg("destination"),
-             py::arg("destination_bytes"))
+             py::arg("destination_bytes"), py::arg("hole_offset") = 0, py::arg("hole_bytes") = 0)
+        .def("submit_planes", &DirectRecordReader::submit_planes, py::arg("slots"), py::arg("planes"),
+             py::arg("destination"), py::arg("destination_bytes"))
         .def("wait", [](DirectRecordReader &reader, uint64_t ticket) {
             vllm_kvmem::direct_reads::BatchResult result;
             {
@@ -3404,5 +3407,62 @@ PYBIND11_MODULE(_native, m) {
         .def("close", [](DirectRecordReader &reader) {
             py::gil_scoped_release release;
             reader.close();
+        });
+    // SSD tier: layer-major unpadded arena (per-layer selections read contiguous runs).
+    using vllm_kvmem::direct_reads::LayerMajorArena;
+    using vllm_kvmem::direct_reads::Segment;
+    py::class_<LayerMajorArena>(m, "LayerMajorArena")
+        .def(py::init([](const std::string &directory, uint32_t slots, uint64_t record_bytes,
+                         const std::vector<std::vector<std::array<uint64_t, 4>>> &groups, int threads,
+                         uint64_t max_request_bytes) {
+            std::vector<std::vector<Segment>> parsed;
+            for (const auto &group : groups) {
+                std::vector<Segment> segments;
+                for (const auto &v : group) {
+                    if (v[1] > UINT32_MAX || v[2] > UINT32_MAX || v[3] > UINT32_MAX)
+                        throw std::invalid_argument("Layer-major segment field overflows");
+                    segments.push_back(Segment{v[0], uint32_t(v[1]), uint32_t(v[2]), uint32_t(v[3])});
+                }
+                parsed.push_back(std::move(segments));
+            }
+            py::gil_scoped_release release;
+            return std::make_unique<LayerMajorArena>(directory, slots, record_bytes, std::move(parsed),
+                                                     threads, max_request_bytes);
+        }), py::arg("directory"), py::arg("slots"), py::arg("record_bytes"), py::arg("groups"),
+            py::arg("threads") = 8, py::arg("max_request_bytes") = 4ull << 20)
+        .def("write", [](LayerMajorArena &arena, const std::vector<int32_t> &slots, py::buffer buffer) {
+            auto info = buffer.request();
+            if (info.ndim != 1 || info.itemsize != 1 || info.strides[0] != 1)
+                throw std::invalid_argument("Layer-major I/O requires contiguous one-dimensional bytes");
+            py::gil_scoped_release release;
+            arena.write(slots, static_cast<const uint8_t *>(info.ptr), uint64_t(info.size));
+        }, py::arg("slots"), py::arg("buffer"))
+        .def("read", [](LayerMajorArena &arena, const std::vector<int32_t> &slots, py::buffer buffer) {
+            auto info = buffer.request(true);
+            if (info.ndim != 1 || info.itemsize != 1 || info.strides[0] != 1)
+                throw std::invalid_argument("Layer-major I/O requires contiguous one-dimensional bytes");
+            py::gil_scoped_release release;
+            arena.read(slots, static_cast<uint8_t *>(info.ptr), uint64_t(info.size));
+        }, py::arg("slots"), py::arg("buffer"))
+        .def("submit_groups", &LayerMajorArena::submit_groups, py::arg("slots"), py::arg("groups"),
+             py::arg("offsets"), py::arg("destination"), py::arg("destination_bytes"))
+        .def("wait", [](LayerMajorArena &arena, uint64_t ticket) {
+            vllm_kvmem::direct_reads::BatchResult result;
+            {
+                py::gil_scoped_release release;
+                result = arena.wait(ticket);
+            }
+            py::dict out;
+            out["bytes"] = result.bytes; out["requests"] = result.requests; out["wall_ns"] = result.wall_ns;
+            return out;
+        }, py::arg("ticket"))
+        .def("done", &LayerMajorArena::done, py::arg("ticket"))
+        .def("group_bytes", &LayerMajorArena::group_bytes, py::arg("group"))
+        .def_property_readonly("group_count", &LayerMajorArena::group_count)
+        .def_property_readonly("stored_bytes_per_record", &LayerMajorArena::stored_bytes_per_record)
+        .def_property_readonly("file_bytes", &LayerMajorArena::file_bytes)
+        .def("close", [](LayerMajorArena &arena) {
+            py::gil_scoped_release release;
+            arena.close();
         });
 }

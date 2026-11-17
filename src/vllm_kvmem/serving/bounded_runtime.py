@@ -259,6 +259,7 @@ def install_bounded_target(runner):
                     history,int(batch.prefill_len_np[i]),query)
             # Private forwards overwrite the persistent capture buffers.
             public_queries[request_id] = torch.stack([c.query[begin:end] for c in captured]).clone()
+        layerwise = {}
         for request_id, job in jobs.items():
             i, history, query = extents[request_id]
             local_tokens_before = history - runner._kvmem_window_adapter.offsets.get(request_id, 0)
@@ -325,6 +326,17 @@ def install_bounded_target(runner):
                             queries = guided.queries
                         guided_seconds = time.perf_counter() - guided_started
                 score_query = queries.shape[1]
+                qsa_layers = getattr(runner, '_kvmem_qsa_layers', None)
+                if (getattr(runtime.options, 'qsa_layerwise_query', False) and qsa_layers and
+                        job.command.selection == 'query'):
+                    # Per-layer MeanK selections from the same probe Queries (serving/qsa_layerwise.py).
+                    from .qsa_layerwise import layer_selections
+                    drafts = set(getattr(runner, '_kvmem_mtp_modules', {}))
+                    layerwise[request_id] = layer_selections(
+                        authority, queries, mandatory, selected_cfg.select_budget, layers=len(qsa_layers),
+                        global_layers=runtime.options.qsa_layerwise_global_layers,
+                        draft_layers={i for i, name in enumerate(qsa_layers) if name in drafts},
+                        draft_selection=runtime.options.qsa_layerwise_mtp)
                 plan = authority.select_for_queries(queries,mandatory,max_tokens=selected_cfg.select_budget)
             selected = plan.total_window_tokens
             if not 0 < selected <= cfg.select_budget:
@@ -333,7 +345,14 @@ def install_bounded_target(runner):
             assembler = NativeWindowAssembler.from_runner(runner, request_id, runtime.names, cfg.block_tokens,
                                                           packed=runtime.options.packed_assembly,
                                                           direct_pinned_reads=runtime.options.direct_pinned_reads)
-            assembly = assembler.assemble(authority, plan)
+            layer_report = {}
+            if request_id in layerwise:
+                from .qsa_layerwise import layer_records
+                global_slots, per_layer, layer_report = layerwise.pop(request_id)
+                assembly = assembler.assemble(authority, plan,
+                                              layer_records=layer_records(authority, plan, global_slots, per_layer))
+            else:
+                assembly = assembler.assemble(authority, plan)
             assembly.event.synchronize()
             authority.memory.attach_completion(assembly)
             assert authority.memory.commit_selection()
@@ -386,7 +405,7 @@ def install_bounded_target(runner):
                 "raw_cache_capacity_bytes": assembly.raw_cache_capacity_bytes,
                 "assembly_device_temp_bytes": assembly.device_temp_bytes,
                 "packed_assembly": runtime.options.packed_assembly,
-                "direct_pinned_reads": runtime.options.direct_pinned_reads})
+                "direct_pinned_reads": runtime.options.direct_pinned_reads, **layer_report})
 
         if needs_state:
             state_adapter.validate(bundle)

@@ -31,7 +31,7 @@ setup(
                  "csrc/historical_policy_factory.hpp", "csrc/historical_manager.hpp",
                  "csrc/historical_redundancy.hpp", "csrc/historical_thinking.hpp",
                  "csrc/thinking_bindings.hpp", "csrc/parallel_rows.hpp", "csrc/session_spill.hpp",
-                 "csrc/direct_record_reader.hpp"],
+                 "csrc/direct_record_reader.hpp", "csrc/layer_major_arena.hpp"],
         cxx_std=17,
         extra_compile_args=["-pthread"],
         extra_link_args=["-pthread"],

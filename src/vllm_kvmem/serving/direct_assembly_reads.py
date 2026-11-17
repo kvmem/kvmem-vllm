@@ -59,9 +59,16 @@ def _chunk_views(authority, device_bytes, counts):
     return (lambda i: layer(raw, i)), (lambda i: layer(values, i)), sum(counts)
 
 
-def direct_chunks(authority, chunks, device, stats):
-    """Yield (raw_of, values_of, tokens, bytes) for each chunk (a list of record handles)."""
+def direct_chunks(authority, chunks, device, stats, unused_raw_layers=None):
+    """Yield (raw_of, values_of, tokens, bytes) for each chunk (a list of record handles).
+
+    unused_raw_layers = (first, count): archive layers whose raw plane the
+    caller never reads (QSA selector layers store zeros there); they are not
+    read from the drive and raw_of() must not be called for them.
+    """
     record_bytes = authority.record_bytes
+    hole = authority.raw_layer_hole(*unused_raw_layers) if unused_raw_layers else (0, 0)
+    stats['archive_direct_skipped_bytes_per_record'] = hole[1]
     ring = _ring(max(len(chunk) for chunk in chunks) * record_bytes)
     with ring.lock:
         events = [None] * RING
@@ -72,7 +79,7 @@ def direct_chunks(authority, chunks, device, stats):
             if events[slot] is not None:
                 events[slot].synchronize()       # its previous DMA has left the slot
                 events[slot] = None
-            pending[index] = authority.start_direct_read(chunks[index], ring.slots[slot])
+            pending[index] = authority.start_direct_read(chunks[index], ring.slots[slot], hole)
 
         try:
             for index in range(min(RING - 1, len(chunks))):
@@ -97,6 +104,91 @@ def direct_chunks(authority, chunks, device, stats):
         finally:
             # Never return the ring while the drive or a DMA may still touch it.
             for held, _ in pending.values():
+                try:
+                    held.wait()
+                except BaseException:
+                    pass
+            for event in events:
+                if event is not None:
+                    event.synchronize()
+
+
+def direct_layer_chunks(authority, chunks, device, stats, *, layers, block_tokens, width, selector_bytes,
+                        chunk_groups=None):
+    """archive_layout=layer: like direct_chunks, from packed per-layer groups.
+
+    Group l holds [raw K of layer l][values of layer l][selector bytes of layer l]
+    for each record (core/layer_major.qsa_record_groups). values_of(layers + l)
+    returns layer l's selector bytes, (tokens, selector_bytes). chunk_groups[c]
+    lists the layers chunk c needs (None: every layer); only those are read.
+    """
+    group_bytes = authority.archive.layer_group_bytes
+    every = list(range(layers))
+    wanted = [every if not chunk_groups or chunk_groups[c] is None else list(chunk_groups[c])
+              for c in range(len(chunks))]
+    ring = _ring(max(len(chunk) * sum(group_bytes[g] for g in groups)
+                     for chunk, groups in zip(chunks, wanted)))
+    slice_bytes = block_tokens * width
+    with ring.lock:
+        events = [None] * RING
+        pending = {}
+
+        def issue(index):
+            slot = index % RING
+            if events[slot] is not None:
+                events[slot].synchronize()
+                events[slot] = None
+            pending[index] = authority.start_group_read(chunks[index], wanted[index], ring.slots[slot])
+
+        try:
+            for index in range(min(RING - 1, len(chunks))):
+                issue(index)
+            for index, chunk in enumerate(chunks):
+                held, counts, offsets = pending.pop(index)
+                waited = time.perf_counter()
+                result = held.wait()
+                stats['archive_direct_wait_s'] += time.perf_counter() - waited
+                stats['archive_direct_bytes'] += result['bytes']
+                stats['archive_direct_requests'] += result['requests']
+                groups = wanted[index]
+                position = {g: k for k, g in enumerate(groups)}
+                size = len(chunk) * sum(group_bytes[g] for g in groups)
+                device_bytes = torch.empty(size, dtype=torch.uint8, device=device)
+                device_bytes.copy_(ring.slots[index % RING][:size], non_blocking=True)
+                event = torch.cuda.Event()
+                event.record()
+                events[index % RING] = event
+                if index + RING - 1 < len(chunks):
+                    issue(index + RING - 1)
+                records = len(chunk)
+                valid = None
+                if any(count != block_tokens for count in counts):
+                    valid = torch.cat([torch.arange(count, dtype=torch.int64) + j * block_tokens
+                                       for j, count in enumerate(counts)]).to(device)
+
+                def take(part, rows):
+                    out = part.reshape(records * block_tokens, *rows)
+                    return out if valid is None else out.index_select(0, valid)
+
+                def view(layer, which, offsets=offsets, position=position, device_bytes=device_bytes,
+                         records=records, valid=valid):
+                    g = layer % layers
+                    if g not in position:
+                        raise ValueError('Layer %d was not read for this chunk' % g)
+                    at = offsets[position[g]]
+                    rows = device_bytes[at:at + records * group_bytes[g]].view(records, -1)
+                    if which == 'raw':
+                        return take(rows[:, :slice_bytes].view(authority.raw_dtype), authority.shape[2:])
+                    if which == 'values':
+                        return take(rows[:, slice_bytes:2 * slice_bytes], authority.shape[2:])
+                    return take(rows[:, 2 * slice_bytes:2 * slice_bytes + block_tokens * selector_bytes],
+                                (selector_bytes,))
+
+                raw_of = lambda i: view(i, 'raw')
+                values_of = lambda i: view(i, 'values' if i < layers else 'selector')
+                yield raw_of, values_of, sum(counts), size
+        finally:
+            for held, _, _ in pending.values():
                 try:
                     held.wait()
                 except BaseException:

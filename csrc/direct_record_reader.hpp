@@ -15,6 +15,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -79,19 +80,35 @@ public:
     }
 
     // Queue a batch: slots[i] lands at destination + i * slot_bytes. A negative
-    // slot leaves its destination record untouched (the caller fills it).
-    uint64_t submit(const std::vector<int32_t> &slots, uint64_t destination, uint64_t destination_bytes) {
+    // slot leaves its destination record untouched (the caller fills it). A hole
+    // [hole_offset, hole_offset + hole_bytes) inside every record is not read
+    // (bytes no reader of this batch uses); the rest of a run of consecutive
+    // slots is read as few large requests.
+    uint64_t submit(const std::vector<int32_t> &slots, uint64_t destination, uint64_t destination_bytes,
+                    uint64_t hole_offset = 0, uint64_t hole_bytes = 0) {
         if (slots.empty()) throw std::invalid_argument("Empty direct read batch");
         if (destination == 0 || destination % kAlignment)
             throw std::invalid_argument("Direct read destination must be 4 KiB aligned");
         if (destination_bytes < slots.size() * slot_bytes_)
             throw std::invalid_argument("Direct read destination is smaller than the batch");
+        if (hole_offset % kAlignment || hole_bytes % kAlignment || hole_offset + hole_bytes > slot_bytes_ ||
+                hole_bytes == slot_bytes_)
+            throw std::invalid_argument("Direct read hole must be a 4 KiB aligned part of a record");
         for (int32_t slot : slots)
             if (slot >= 0 && static_cast<uint32_t>(slot) >= slot_count_)
                 throw std::out_of_range("Direct read slot outside the archive");
         auto batch = std::make_shared<Batch>();
         batch->started = std::chrono::steady_clock::now();
         std::vector<Job> jobs;
+        auto emit = [&](uint64_t offset, uint8_t *target, uint64_t remaining) {
+            while (remaining) {
+                const uint64_t bytes = std::min(remaining, max_request_);
+                jobs.push_back(Job{batch, offset, target, bytes});
+                offset += bytes;
+                target += bytes;
+                remaining -= bytes;
+            }
+        };
         size_t i = 0;
         while (i < slots.size()) {
             if (slots[i] < 0) {
@@ -100,31 +117,89 @@ public:
             }
             size_t j = i + 1;
             while (j < slots.size() && slots[j] == slots[j - 1] + 1) ++j;
-            uint64_t offset = static_cast<uint64_t>(slots[i]) * slot_bytes_;
-            uint64_t remaining = (j - i) * slot_bytes_;
+            // File and destination are both record-strided over the run.
+            const uint64_t file = static_cast<uint64_t>(slots[i]) * slot_bytes_;
             auto *target = reinterpret_cast<uint8_t *>(destination + i * slot_bytes_);
+            const uint64_t length = (j - i) * slot_bytes_;
+            uint64_t cursor = 0;
+            if (hole_bytes) {
+                for (size_t k = 0; k < j - i; ++k) {
+                    const uint64_t hole = k * slot_bytes_ + hole_offset;
+                    if (hole > cursor) emit(file + cursor, target + cursor, hole - cursor);
+                    cursor = hole + hole_bytes;
+                }
+            }
+            if (length > cursor) emit(file + cursor, target + cursor, length - cursor);
+            i = j;
+        }
+        return enqueue(batch, jobs);
+    }
+
+    // Queue per-record plane slices: for plane p = (record_offset, bytes, destination_offset)
+    // and record i, bytes at slots[i] * slot_bytes + record_offset land at
+    // destination + destination_offset + i * bytes (plane-major destination).
+    // Used by per-layer selections, which need one layer's slices of each record.
+    uint64_t submit_planes(const std::vector<int32_t> &slots,
+                           const std::vector<std::array<uint64_t, 3>> &planes,
+                           uint64_t destination, uint64_t destination_bytes) {
+        if (slots.empty() || planes.empty()) throw std::invalid_argument("Empty direct plane batch");
+        if (destination == 0 || destination % kAlignment)
+            throw std::invalid_argument("Direct read destination must be 4 KiB aligned");
+        for (const auto &plane : planes) {
+            const uint64_t offset = plane[0], bytes = plane[1], target = plane[2];
+            if (bytes == 0 || offset % kAlignment || bytes % kAlignment || target % kAlignment ||
+                    offset + bytes > slot_bytes_)
+                throw std::invalid_argument("Direct read planes must be 4 KiB aligned parts of a record");
+            if (target + slots.size() * bytes > destination_bytes)
+                throw std::invalid_argument("Direct read plane exceeds the destination");
+        }
+        for (int32_t slot : slots)
+            if (slot >= 0 && static_cast<uint32_t>(slot) >= slot_count_)
+                throw std::out_of_range("Direct read slot outside the archive");
+        auto batch = std::make_shared<Batch>();
+        batch->started = std::chrono::steady_clock::now();
+        std::vector<Job> jobs;
+        jobs.reserve(slots.size() * planes.size());
+        for (const auto &plane : planes) {
+            for (size_t i = 0; i < slots.size(); ++i) {
+                if (slots[i] < 0) continue;
+                auto *target = reinterpret_cast<uint8_t *>(destination + plane[2] + i * plane[1]);
+                const uint64_t file = static_cast<uint64_t>(slots[i]) * slot_bytes_ + plane[0];
+                // Consecutive slots of a whole-record plane are contiguous in both file and destination.
+                if (!jobs.empty() && plane[1] == slot_bytes_ && jobs.back().offset + jobs.back().bytes == file &&
+                        jobs.back().target + jobs.back().bytes == target && jobs.back().bytes < max_request_) {
+                    jobs.back().bytes += plane[1];
+                    continue;
+                }
+                jobs.push_back(Job{batch, file, target, plane[1]});
+            }
+        }
+        return enqueue(batch, jobs);
+    }
+
+    // Queue raw extents {file_offset, bytes, destination_offset}, all 4 KiB aligned.
+    uint64_t submit_extents(const std::vector<std::array<uint64_t, 3>> &extents, uint64_t destination,
+                            uint64_t destination_bytes) {
+        if (destination == 0 || destination % kAlignment)
+            throw std::invalid_argument("Direct read destination must be 4 KiB aligned");
+        const uint64_t file_bytes = static_cast<uint64_t>(slot_count_) * slot_bytes_;
+        auto batch = std::make_shared<Batch>();
+        batch->started = std::chrono::steady_clock::now();
+        std::vector<Job> jobs;
+        for (const auto &extent : extents) {
+            uint64_t file = extent[0], remaining = extent[1], target = extent[2];
+            if (file % kAlignment || remaining % kAlignment || target % kAlignment ||
+                    file + remaining > file_bytes || target + remaining > destination_bytes)
+                throw std::invalid_argument("Direct read extent is unaligned or out of range");
             while (remaining) {
                 const uint64_t bytes = std::min(remaining, max_request_);
-                jobs.push_back(Job{batch, offset, target, bytes});
-                offset += bytes;
+                jobs.push_back(Job{batch, file, reinterpret_cast<uint8_t *>(destination + target), bytes});
+                file += bytes;
                 target += bytes;
                 remaining -= bytes;
             }
-            i = j;
         }
-        batch->pending = jobs.size();
-        batch->requests = static_cast<uint32_t>(jobs.size());
-        if (jobs.empty()) batch->finished = batch->started;
-        uint64_t ticket;
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            if (stopping_) throw std::runtime_error("Direct record reader is closed");
-            ticket = ++next_ticket_;
-            batches_[ticket] = batch;
-            for (auto &job : jobs) queue_.push_back(std::move(job));
-        }
-        work_cv_.notify_all();
-        return ticket;
+        return enqueue(batch, jobs);
     }
 
     // Block until the batch is complete; rethrows the first I/O error.
@@ -168,6 +243,22 @@ private:
         uint8_t *target;
         uint64_t bytes;
     };
+
+    uint64_t enqueue(const std::shared_ptr<Batch> &batch, std::vector<Job> &jobs) {
+        batch->pending = jobs.size();
+        batch->requests = static_cast<uint32_t>(jobs.size());
+        if (jobs.empty()) batch->finished = batch->started;
+        uint64_t ticket;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (stopping_) throw std::runtime_error("Direct record reader is closed");
+            ticket = ++next_ticket_;
+            batches_[ticket] = batch;
+            for (auto &job : jobs) queue_.push_back(std::move(job));
+        }
+        work_cv_.notify_all();
+        return ticket;
+    }
 
     void run() {
         for (;;) {
