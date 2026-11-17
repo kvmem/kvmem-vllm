@@ -34,6 +34,9 @@ def register_plugin() -> None:
     if _settings.get("KVMEM_Q8_TENSORCORE") == "1":
         from ..adapters.q8_adapter import enable_q8_tensorcore
         enable_q8_tensorcore()
+    from ..adapters import fa2_verify_graph
+    if fa2_verify_graph.enabled():
+        fa2_verify_graph.enable()
     # Discovery alone changes nothing and initializes no CUDA. Explicit options
     # above install capability-checked import adapters in this worker process.
     _registered = True
