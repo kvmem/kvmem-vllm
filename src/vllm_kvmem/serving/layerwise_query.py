@@ -939,7 +939,8 @@ def install_layerwise_query(runner):
         def report_with_probe(self, job, assembly, fit, seconds):
             result = report(self, job, assembly, fit, seconds)
             diagnostic = getattr(self.runner, '_kvmem_layerwise_query', None)
-            if diagnostic is not None and not getattr(job, 'layerwise_pipeline_published', False):
+            if (diagnostic is not None and not getattr(job, 'layerwise_pipeline_published', False) and
+                    not getattr(job, 'layerwise_maps_committed', False)):
                 diagnostic.committed(job)
             return result
         AsyncRefresh._assemble, AsyncRefresh.report = assemble_with_probe, report_with_probe
