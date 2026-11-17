@@ -304,8 +304,8 @@ def main():
     p.add_argument('--keep-reasoning-end', action='store_true',
         help="keep the agent fixture's reasoning_end_str (needed for request thinking budgets)")
     p.add_argument('--query-replay-budget', type=int,
-        help='largest atomic Query (tokens) one request may replay; default --prefill-chunk. Agent '
-             'task instructions need more (the agent profiles use 4096)')
+        help='largest atomic Query (tokens) one request may replay; default --prefill-chunk. Agent task '
+             'instructions need more; the scheduler batch grows to hold it beside the decode peers')
     p.add_argument('--serve-only', action='store_true',
         help='start the server, wait until healthy, then keep serving until terminated (no workload)')
     p.add_argument('--lifecycle-trace', action='store_true', help='KVMEM_LIFECYCLE_TRACE=1 (GC eviction trace per rank)')
@@ -350,8 +350,9 @@ def main():
         execution_mode='eager' if args.eager else 'compiled_graph',
         gpu_memory_utilization=args.util,query_replay_budget=args.query_replay_budget or args.prefill_chunk,
         prefill_chunk_tokens=args.prefill_chunk,
-        max_num_batched_tokens=args.prefill_chunk*args.physical_chunks+args.seqs*(args.mtp+1),
-        request_planning_batch_tokens=args.prefill_chunk*args.physical_chunks+args.seqs*(args.mtp+1),
+        # A batch must also hold one atomic Query replay beside the decode peers.
+        max_num_batched_tokens=max(args.prefill_chunk*args.physical_chunks,args.query_replay_budget or 0)+args.seqs*(args.mtp+1),
+        request_planning_batch_tokens=max(args.prefill_chunk*args.physical_chunks,args.query_replay_budget or 0)+args.seqs*(args.mtp+1),
         kv_cache_memory_bytes=None if args.kv_gib is None else int(args.kv_gib*2**30),
         reasoning_end_str=profile.get('reasoning_end_str') if args.keep_reasoning_end else None)
     kv=profile['kvmem']
