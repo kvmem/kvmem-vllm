@@ -17,6 +17,7 @@ def stats(masses, selected, selected_slots, slots):
                         frame_success=Counter(), mode='native', _gathered={}, _validation_ticket=None)
     s._check_detached_validation = lambda: None
     s.validate = lambda: True
+    s._reduce = lambda name: na.NativeAttentionStats._reduce(s, name)
     return s
 
 

@@ -1221,6 +1221,29 @@ class ActionRuntime:
         return dict(authority=authority, state=state, history_begin=history_begin,
                     local_begin=local_begin, rows=rows, sources=sources, **extra)
 
+    def _frame_window(self, request_id, plan, count):
+        """Opt-in KVMEM_NATIVE_WINDOW_FRAME=1: a decode owner's canonical segments
+        taken from its frozen candidate frame, after native code confirmed that the
+        live window equals that frame's prefix (the rows resolve() then compares).
+        None (the original path) without a candidate frame or on any difference."""
+        from .native_attention import window_frame_enabled
+        if not window_frame_enabled() or not getattr(self.options, 'native_action_metadata', False):
+            return None
+        candidate = getattr(self.native, 'plans', {}).get(request_id)
+        if candidate is None or '_layout' not in candidate:
+            return None
+        matcher = getattr(plan['authority'].memory._store, 'action_window_matches_frame', None)
+        if matcher is None:
+            return None
+        starts, counts, history = candidate['starts'], candidate['counts'], candidate['history']
+        if not matcher(plan['history_begin'], plan['local_begin'], count, self.runtime.config.block_tokens,
+                       starts, counts, history):
+            return None
+        import numpy as np
+        extent = plan['local_begin'] + count
+        end = int(np.searchsorted(starts, extent-1, side='right'))
+        return starts[:end], np.minimum(counts[:end], extent-starts[:end]), history[:end].tolist()
+
     def _window_segments(self, authority, history_begin, local_begin, count):
         store = authority.memory._store
         block_tokens = self.runtime.config.block_tokens
@@ -1602,12 +1625,17 @@ class ActionRuntime:
                 cursor+=count
                 plan.update(index=i,begin=begin,count=count)
                 if plan['rows']:
-                    starts,counts,history=self._window_segments(plan['authority'],plan['history_begin'],
-                        plan['local_begin'],count)
-                    from .native_attention_planning import canonical_segments
-                    canonical=canonical_segments(starts,counts,history,plan['local_begin']+count,
-                        self.runtime.config.block_tokens)
-                    plan.update(starts=canonical[:,0],counts=canonical[:,1],history=canonical[:,2].tolist())
+                    framed=self._frame_window(request_id,plan,count)
+                    if framed is not None:
+                        plan.update(starts=framed[0],counts=framed[1],history=framed[2],
+                                    _framed=self.native.plans[request_id])
+                    else:
+                        starts,counts,history=self._window_segments(plan['authority'],plan['history_begin'],
+                            plan['local_begin'],count)
+                        from .native_attention_planning import canonical_segments
+                        canonical=canonical_segments(starts,counts,history,plan['local_begin']+count,
+                            self.runtime.config.block_tokens)
+                        plan.update(starts=canonical[:,0],counts=canonical[:,1],history=canonical[:,2].tolist())
                 plans[request_id]=plan
             self.native.resolve(plans)
             self.native_plans=(batch,plans)
@@ -1692,9 +1720,18 @@ class ActionRuntime:
             if not prefill and not getattr(layerwise, 'rolling_decode', False):
                 layerwise = None
             scoring_layers = layerwise.scoring_layers(self) if layerwise is not None else self.layers
-            native_masses = [native.score(module.attn.layer_name,request_id,prefill,defer_validation=True)
-                             if native else None for _,module in scoring_layers]
-            needs_reference = native is None or native.mode == 'verify' or any(mass is None for mass in native_masses)
+            stacked = None
+            if layerwise is not None and native and native.mode == 'reuse':
+                from .native_attention import score_stack_enabled
+                if score_stack_enabled():
+                    # Opt-in: every layer's native masses from one gather (same values).
+                    stacked = native.score_stack([module.attn.layer_name for _,module in scoring_layers],
+                                                 request_id, prefill)
+            native_masses = ([None]*len(scoring_layers) if stacked is not None else
+                             [native.score(module.attn.layer_name,request_id,prefill,defer_validation=True)
+                              if native else None for _,module in scoring_layers])
+            needs_reference = stacked is None and (native is None or native.mode == 'verify' or
+                                                   any(mass is None for mass in native_masses))
             upload = getattr(self, 'metadata_upload', None)
             staging = (upload.lease(starts,counts,rows,begin,local_begin,device,profile=owner)
                        if upload is not None and needs_reference else nullcontext(None))
@@ -1724,7 +1761,7 @@ class ActionRuntime:
                 native_index=self.runner.req_states.req_id_to_index[request_id]
                 total=None
                 separate = []
-                for (index,module),mass in zip(scoring_layers,native_masses):
+                for (index,module),mass in zip(scoring_layers if stacked is None else (),native_masses):
                     layer = owner.child(layer=module.attn.layer_name) if owner else None
                     with layer.stage('score.layer_total', gpu=True) if layer else nullcontext():
                         if mass is None or native.mode == 'verify':
@@ -1763,7 +1800,10 @@ class ActionRuntime:
                         else:
                             total=mass if total is None else total+mass
                 with owner.stage('score.layer_mean', gpu=True) if owner else nullcontext():
-                    total = torch.stack(separate) if layerwise is not None else total/len(self.layers)
+                    if stacked is not None:
+                        total = stacked.contiguous()
+                    else:
+                        total = torch.stack(separate) if layerwise is not None else total/len(self.layers)
                 pool=getattr(self,'download_pool',None)
                 from .tensor_parallel import active
                 if active():

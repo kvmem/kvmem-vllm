@@ -3066,6 +3066,21 @@ PYBIND11_MODULE(_native, m) {
             // snapshot JSON must never silently become NumPy scalar objects.
             return py::make_tuple(std::move(starts), std::move(counts), py::cast(segments.history));
         }, py::arg("history_begin"), py::arg("local_begin"), py::arg("count"), py::arg("block_tokens"))
+        // Opt-in KVMEM_NATIVE_WINDOW_FRAME: compare the canonical action window
+        // with a frozen decode frame's prefix without building Python rows.
+        .def("action_window_matches_frame", [](const KvMemStore &store, int64_t history_begin,
+                int64_t local_begin, int64_t count, int64_t block_tokens,
+                py::array_t<int64_t, py::array::c_style> starts,
+                py::array_t<int64_t, py::array::c_style> counts,
+                py::array_t<int64_t, py::array::c_style> history) {
+            if (starts.ndim() != 1 || counts.ndim() != 1 || history.ndim() != 1 ||
+                    counts.shape(0) != starts.shape(0) || history.shape(0) != starts.shape(0))
+                return false;
+            return kvmem_action::window_matches_frame(store, history_begin, local_begin, count,
+                block_tokens, starts.data(), counts.data(), history.data(),
+                static_cast<size_t>(starts.shape(0)));
+        }, py::arg("history_begin"), py::arg("local_begin"), py::arg("count"), py::arg("block_tokens"),
+           py::arg("starts"), py::arg("counts"), py::arg("history"))
         .def("prepare_rewind", &KvMemStore::prepare_repository_rewind, py::keep_alive<0, 1>())
         .def("read", [](const KvMemStore &s, uint64_t b, uint32_t n) {
             return OwnedRead(s.repository_storage_read(b, n));

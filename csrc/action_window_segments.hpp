@@ -81,4 +81,56 @@ inline WindowSegments window_segments(const qw3::KvMemStore &store,
     return result;
 }
 
+// True iff canonical_segments(window_segments(...), local_begin+count, block_tokens)
+// (serving/native_attention_planning.py) equals the frozen decode frame's rows
+// truncated at that extent, exactly as NativeAttentionStats.resolve builds its
+// expected prefix (rows starting before the extent, the last count clipped).
+// Any invalid window or frame answers false: the caller then runs the original
+// Python path, which raises or records the same reason as before.
+inline bool window_matches_frame(const qw3::KvMemStore &store, int64_t history_begin,
+        int64_t local_begin, int64_t count, int64_t block_tokens,
+        const int64_t *frame_starts, const int64_t *frame_counts, const int64_t *frame_history,
+        size_t frame_rows) {
+    WindowSegments segments;
+    try {
+        segments = window_segments(store, history_begin, local_begin, count, block_tokens);
+    } catch (const std::invalid_argument &) {
+        return false;
+    }
+    const int64_t length = local_begin+count;
+    // _canonical: rows that start before the extent, last count clipped,
+    // contiguous from zero to the extent, adjacent equal keys merged.
+    std::vector<int64_t> run_begin, run_key;
+    int64_t cursor = 0;
+    for (size_t i = 0; i < segments.starts.size(); ++i) {
+        const int64_t start = segments.starts[i];
+        if (start >= length) continue;
+        const int64_t n = std::min<int64_t>(segments.counts[i], length-start);
+        if (n <= 0 || start != cursor) return false;
+        const int64_t key = static_cast<int64_t>(segments.history[i]);
+        if (run_key.empty() || run_key.back() != key) {
+            run_begin.push_back(start);
+            run_key.push_back(key);
+        }
+        cursor = start+n;
+    }
+    if (run_begin.empty() || cursor != length) return false;
+    // canonical_segments: split runs longer than block_tokens into block-sized
+    // chunks (shorter runs are one chunk), then compare row by row.
+    size_t row = 0;
+    for (size_t r = 0; r < run_begin.size(); ++r) {
+        const int64_t begin = run_begin[r];
+        const int64_t total = (r+1 < run_begin.size() ? run_begin[r+1] : length)-begin;
+        for (int64_t offset = 0; offset < total; offset += block_tokens, ++row) {
+            const int64_t start = begin+offset, n = std::min(block_tokens, total-offset);
+            if (row >= frame_rows || frame_starts[row] != start ||
+                    std::min<int64_t>(frame_counts[row], length-frame_starts[row]) != n ||
+                    frame_history[row] != run_key[r])
+                return false;
+        }
+    }
+    // The frame must have no further row starting before the extent.
+    return row == frame_rows || frame_starts[row] >= length;
+}
+
 } // namespace kvmem_action
