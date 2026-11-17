@@ -390,13 +390,17 @@ _BATCHED_SELECT = None
 
 def fa2_overlay_capability(capability):
     """True where the score overlay runs on FlashInfer's FA2 kernels alone
-    (fa2_only: no XQA decode producer): SM80 (A800/A100), and SM89 (RTX 4090)
-    behind the qualification opt-in KVMEM_NATIVE_FA2_SM89=1. FlashInfer runs
-    the same FA2 prefill/decode kernels there; sm12x uses XQA instead."""
+    (fa2_only: no XQA decode producer): SM80 (A800/A100) and SM89 (RTX 4090),
+    which run the same FlashInfer FA2 prefill/decode kernels; sm12x uses XQA.
+
+    SM89 qualified 2026-11-17 on 2xRTX 4090 TP=2: 124 overlay GPU tests; live
+    verify mode 18,128 comparisons per rank, max |difference| 8.0e-7; MTP4
+    layerwise 8 x 32K 219.8 -> 383.1 decode tok/s. KVMEM_NATIVE_FA2_SM89=0
+    falls back to recomputing scores there."""
     if tuple(capability) == (8, 0):
         return True
     if tuple(capability) == (8, 9):
-        value = _settings.get('KVMEM_NATIVE_FA2_SM89', '0')
+        value = _settings.get('KVMEM_NATIVE_FA2_SM89', '1')
         if value not in ('0', '1'):
             raise ValueError('KVMEM_NATIVE_FA2_SM89 must be 0 or 1')
         return value == '1'

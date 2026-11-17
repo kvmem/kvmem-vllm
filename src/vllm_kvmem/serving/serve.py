@@ -120,6 +120,22 @@ def _validate_safetensors_config(model):
         raise ValueError('Safetensors config.json must contain an object')
 
 
+def native_max_rows(cfg, kvmem):
+    """action_native_max_rows "auto": the sampled rows one step can hold.
+
+    A prefill chunk samples one row every prefill_attention_stride tokens plus
+    its last token; a decoding request samples at most its 1 + k verified
+    tokens. Physical prefill coalescing also needs every coalesced chunk. The
+    score buffer grows with this count (layers x rows x heads x window width),
+    so the profile's fixed 448 rows cost 1.8 GB per RTX 4090 at K36K/G16K."""
+    stride = kvmem.get('prefill_attention_stride', 32) or 1
+    rows = -(-cfg['max_num_batched_tokens'] // stride) + cfg['max_num_seqs'] * (2 + cfg['draft_tokens'])
+    if kvmem.get('prefill_physical_coalescing', False):
+        rows = max(rows, kvmem.get('prefill_physical_logical_tokens', 2048) // 32 *
+                   kvmem.get('prefill_physical_max_chunks', 2))
+    return rows
+
+
 def build_launch(profile, base, run_dir, *, check_paths=True):
     if not isinstance(profile, dict) or set(profile) - set(DEFAULTS) - set(PATHS) - {
             'kvmem', 'multi_user', 'linear_backend_per_quant', 'settings'}:
@@ -238,6 +254,8 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
     payload = profile.get('kvmem', {})
     if not isinstance(payload, dict):
         raise ValueError('kvmem must contain public connector options')
+    if payload.get('action_native_max_rows') == 'auto':
+        payload = dict(payload, action_native_max_rows=native_max_rows(cfg, payload))
     transfer = {'kv_connector': 'KVMemConnector', 'kv_role': 'kv_both',
                 'kv_connector_module_path': 'vllm_kvmem.serving.connector',
                 'kv_connector_extra_config': {'kvmem': payload}}

@@ -231,3 +231,15 @@ def test_compiled_dflash_multi_token_opt_in_is_validated_and_dflash_only(tmp_pat
     cfg=configured(k1)
     cfg.update(draft_tokens=1,execution_mode='compiled_graph')
     assert 'KVMEM_DFLASH_COMPILED_MULTI' not in build_launch(cfg,k1,k1/'plan')['environment']
+
+
+def test_native_max_rows_auto_resolves_to_the_rows_one_step_can_hold(tmp_path):
+    cfg=configured(tmp_path)
+    cfg.update(draft_tokens=1,execution_mode='compiled_graph',max_num_batched_tokens=1056,max_num_seqs=16)
+    cfg['kvmem']['action_native_max_rows']='auto'
+    plan=build_launch(cfg,tmp_path,tmp_path/'auto')
+    argv=plan['vllm_argv']
+    kv=json.loads(argv[argv.index('--kv-transfer-config')+1])['kv_connector_extra_config']['kvmem']
+    stride=cfg['kvmem'].get('prefill_attention_stride',32)
+    assert kv['action_native_max_rows']==-(-1056//stride)+16*3
+    assert build_launch(plan['profile'],tmp_path,tmp_path/'again')['vllm_argv']==argv

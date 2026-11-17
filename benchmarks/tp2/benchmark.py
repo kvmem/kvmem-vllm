@@ -302,7 +302,8 @@ def main():
     p.add_argument('--env', action='append', default=[], metavar='KEY=VALUE',
         help='extra server environment (e.g. KVMEM_* A/B flags); repeatable')
     p.add_argument('--dry-run-only', action='store_true', help='validate and save the launch plan, start no server')
-    p.add_argument('--native-max-rows', type=int, help='action_native_max_rows: sampled rows per step the score buffer holds')
+    p.add_argument('--native-max-rows', help='action_native_max_rows: sampled rows per step the score buffer holds '
+                   '(default auto: the rows one step can need, from batch tokens, sequences and draft tokens)')
     p.add_argument('--native-verify', action='store_true',
                    help='action_native_scores=verify: native overlay scores compared with the reference every step')
     p.add_argument('--dflash-multi', action='store_true',
@@ -362,8 +363,7 @@ def main():
         kv['step_latency_interval']=1
     if args.native_max_mib:
         kv['action_native_max_bytes']=args.native_max_mib*2**20
-    if args.native_max_rows:
-        kv['action_native_max_rows']=args.native_max_rows
+    kv['action_native_max_rows']=('auto' if args.native_max_rows in (None,'auto') else int(args.native_max_rows))
     if args.native_verify:
         # Verify mode also runs the reference scorer; features that consume native
         # scores in place of it (prefill action before MTP, physical prefill
