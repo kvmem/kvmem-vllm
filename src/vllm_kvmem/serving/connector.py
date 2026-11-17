@@ -425,6 +425,11 @@ class KVMemConnector(KVConnectorBase_V1, SupportsHMA):
             # scheduler publishes a request-local error through native finish
             # handling, including when this step has zero model tokens.
             self.capacity_rejections[request.request_id] = str(error)
+            # The client sees only a generic internal error; keep the reason.
+            from vllm.logger import init_logger
+            init_logger('vllm.kvmem.connector').warning(
+                'KVMem rejected request %s (%d prompt tokens): %s', request.request_id,
+                getattr(request, 'num_prompt_tokens', -1), error)
             return None, False
 
     def _get_matched_tokens(self, request, num_computed_tokens):
