@@ -12,16 +12,19 @@ from qualify_block_graph import (build_fixture, expected_output_samples, native_
 
 def run(args):
     profile=json.loads(args.config.read_text());kv=profile['kvmem']
-    require(profile['draft_method']=='dflash' and profile['draft_tokens']==7 and
+    require(profile['draft_method']=='dflash' and profile['draft_tokens'] in (1,3,7) and
         profile['execution_mode']=='full_graph' and profile['verify_session_restore'] and
-        kv['rolling_active_window'],'Require verified rolling DFlash7 FULL graphs')
+        kv['rolling_active_window'],'Require verified rolling DFlash k=1/3/7 with FULL graph configuration')
     args.output.mkdir(parents=True,exist_ok=False)
     from transformers import AutoTokenizer
     tokenizer=AutoTokenizer.from_pretrained(profile['tokenizer'],local_files_only=True)
     encode=lambda s:tokenizer.encode(s,add_special_tokens=False)
-    fixture=build_fixture(tokenizer,prompt_tokens=12288,concurrency=2)
+    padding=encode(' ')
+    require(len(padding)==1 and 0<=args.tool_padding_tokens<=31,'Tool padding must be 0..31 single-space tokens')
+    require(2<=args.concurrency<=profile['max_num_seqs'],'Qualification concurrency must fit the native request limit')
+    fixture=build_fixture(tokenizer,prompt_tokens=12288,concurrency=args.concurrency)
     save(args.output/'fixture.json',fixture)
-    sessions=['dflash-rolling-'+uuid.uuid4().hex for _ in range(2)]
+    sessions=['dflash-rolling-'+uuid.uuid4().hex for _ in range(args.concurrency)]
     rows=[];errors=[];report={};started=time.monotonic()
 
     def client(index):
@@ -37,7 +40,9 @@ def run(args):
             if turn<2:
                 prefix=encode('<|im_end|>\n<|im_start|>tool\n')
                 begin=len(tokens)+len(encode('<|im_end|>\n'))
-                tokens+=prefix+encode('Actual immutable file evidence: '+('field=value; '*160))+encode('<|im_end|>\n')
+                tokens+=prefix+encode('Actual immutable file evidence: '+('field=value; '*160))
+                if turn==1:tokens+=padding*args.tool_padding_tokens
+                tokens+=encode('<|im_end|>\n')
                 spans.append(dict(begin=begin,end=len(tokens),role='tool'))
                 tokens+=encode('<|im_start|>assistant\n<think>\n\n</think>\n\n')
             elif turn==2:
@@ -47,8 +52,8 @@ def run(args):
                 spans.append(dict(begin=begin,end=qe+agent['message_close_tokens'],role='user'))
 
     try:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures=[pool.submit(client,i) for i in range(2)]
+        with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+            futures=[pool.submit(client,i) for i in range(args.concurrency)]
             for future in futures:future.result()
         archive=wait_terminal_publication(args.capture,rows)
         refresh=records(args.capture/'bounded_refresh.jsonl')
@@ -82,9 +87,11 @@ def run(args):
         require(archive['session_checkpoint_deferrals']==0,'Checkpoint quota fallback')
         require(any(q['previous_accepted_step']['accepted']>1 for q in rollback),
                 'No multi-token DFlash acceptance before capacity selection')
-        report=dict(status='passed',proofs=proofs,rolling_byte_proofs=rollback,
+        report=dict(status='passed',draft_tokens=profile['draft_tokens'],concurrency=args.concurrency,
+            tool_padding_tokens=args.tool_padding_tokens,
+            proofs=proofs,rolling_byte_proofs=rollback,
             restored=len(restores),output_tokens=sum(len(r['output_ids']) for r in rows),
-            scope='C2 fixed quotas; exact Query identity, warm continuation, actual decode capacity, byte and accepted-row gates; not a task-quality benchmark')
+            scope='Fixed quotas; exact Query identity, warm continuation, actual decode capacity, byte and accepted-row gates; not a task-quality benchmark')
     except BaseException as error:
         errors.append(repr(error));raise
     finally:
@@ -103,5 +110,8 @@ def run(args):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--concurrency',type=int,default=2)
+    parser.add_argument('--tool-padding-tokens',type=int,default=0,
+        help='Append space tokens inside the second tool result to exercise a different speculative boundary alignment')
     for name in ('config','capture','output'):parser.add_argument('--'+name,type=Path,required=True)
     run(parser.parse_args())

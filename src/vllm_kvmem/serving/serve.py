@@ -288,10 +288,10 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
             if not cfg['experimental_dflash_query_planning']:
                 raise ValueError('Explicit Query planning currently requires native Qwen MTP; '
                                  'DFlash2 needs explicit experimental opt-in')
-            if (cfg['draft_method'] != 'dflash' or cfg['draft_tokens'] != 7 or cfg['execution_mode'] != 'full_graph' or
+            if (cfg['draft_method'] != 'dflash' or cfg['draft_tokens'] not in (1, 3, 7) or cfg['execution_mode'] != 'full_graph' or
                     options.async_refresh or options.async_restore or
                     options.memory.recent_blocks * options.memory.block_tokens < 2047):
-                raise ValueError('Experimental DFlash2 planning requires k=7, FULL graphs, synchronous '
+                raise ValueError('Experimental DFlash2 planning requires k=1, 3 or 7, FULL graphs, synchronous '
                                  'refresh/restore and a 2048-token recent band')
         if (options.session_capacity and not options.session_freeze_prompt and options.session_checkpoint_policy!='pm'
                 and (options.session_capture_terminal or not options.session_capture_decode)):

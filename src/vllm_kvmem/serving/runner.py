@@ -75,7 +75,9 @@ def make_probe_runner(base):
                 # Register the ABI before native AOT unpickling resolves ops.
                 from ..adapters.capture_opaque import install_opaque_capture
             from ..adapters.qsa_contract import release_target_loader_staging
-            with release_target_loader_staging(self) if qsa else nullcontext():
+            from ..adapters.draft_quantization import prepare_quantized_context
+            with (release_target_loader_staging(self) if qsa else nullcontext(),
+                  prepare_quantized_context(self)):
                 super().load_model(*args, **kwargs)
             from ..adapters.draft_quantization import install_quantized_context
             install_quantized_context(self)

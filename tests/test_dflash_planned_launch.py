@@ -80,10 +80,12 @@ def configured(tmp_path):
     return cfg
 
 
-def test_experimental_query_plan_retains_native_draft_cache_and_full_graphs(tmp_path):
-    cfg=configured(tmp_path);plan=build_launch(cfg,tmp_path,tmp_path/'run')
+@pytest.mark.parametrize('draft_tokens', [1, 3, 7])
+def test_experimental_query_plan_retains_native_draft_cache_and_full_graphs(tmp_path,draft_tokens):
+    cfg=configured(tmp_path);cfg['draft_tokens']=draft_tokens
+    plan=build_launch(cfg,tmp_path,tmp_path/'run')
     argv=plan['vllm_argv'];spec=json.loads(argv[argv.index('--speculative-config')+1])
-    assert spec['method']=='dflash' and spec['num_speculative_tokens']==7
+    assert spec['method']=='dflash' and spec['num_speculative_tokens']==draft_tokens
     assert spec['kv_cache_dtype']=='bfloat16'
     assert json.loads(argv[argv.index('--compilation-config')+1])=={'mode':0,'cudagraph_mode':'FULL'}
     assert plan['profile']['kvmem']['pressure_policy']=='graph'
@@ -96,7 +98,7 @@ def test_experimental_query_plan_retains_native_draft_cache_and_full_graphs(tmp_
     ({'experimental_dflash_query_planning':1},'must be boolean'),
     ({'execution_mode':'compiled_graph'},'native safetensors Qwen MTP'),
     ({'execution_mode':'eager'},'FULL graphs'),
-    ({'draft_tokens':3},'k=7'),
+    ({'draft_tokens':2},'draft_tokens must be'),
     ({'async_refresh':True},'synchronous'),
     ({'recent_blocks':63},'recent band'),
 ])
@@ -122,15 +124,17 @@ def test_guided_dflash_reserves_private_scratch_without_increasing_k_or_g(tmp_pa
     assert build_launch(plan['profile'],tmp_path,tmp_path/'again')['vllm_argv']==plan['vllm_argv']
 
 
-def test_rolling_sync_dflash_keeps_full_output_quota_and_native_graphs(tmp_path):
+@pytest.mark.parametrize('draft_tokens', [1, 3, 7])
+def test_rolling_sync_dflash_keeps_full_output_quota_and_native_graphs(tmp_path,draft_tokens):
     cfg=configured(tmp_path)
+    cfg['draft_tokens']=draft_tokens
     cfg['kvmem'].update(rolling_active_window=True,cpu_history_coordination=True,
         async_archive_retirement=True,session_capacity=4,archive_backend='cpu',repository_gc=False,
         cpu_read_cache_bytes=8*1024**3,nvme_preallocate=False,nvme_max_bytes=0)
     plan=build_launch(cfg,tmp_path,tmp_path/'rolling')
     assert json.loads(plan['environment']['KVMEM_REQUEST_PLAN_CONFIG'])['rolling_active_window']
     assert plan['profile']['kvmem']['gen_budget']==4096
-    assert plan['profile']['draft_method']=='dflash' and plan['profile']['draft_tokens']==7
+    assert plan['profile']['draft_method']=='dflash' and plan['profile']['draft_tokens']==draft_tokens
     assert not plan['profile']['kvmem'].get('async_refresh',False)
     assert not plan['profile']['kvmem'].get('async_restore',False)
     assert build_launch(plan['profile'],tmp_path,tmp_path/'again')['vllm_argv']==plan['vllm_argv']
