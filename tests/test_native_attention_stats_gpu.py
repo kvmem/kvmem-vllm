@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_kvmem.serving.native_attention import NativeAttentionStats
+from vllm_kvmem.serving.native_attention import NativeAttentionStats, fa2_overlay_capability
 
 pytestmark = pytest.mark.skipif(os.getenv('KVMEM_RUN_GPU_TESTS') != '1' or not torch.cuda.is_available(),
                                 reason='opt-in native attention CUDA qualification')
@@ -120,8 +120,8 @@ def test_unquantized_prefill_q_scale_domain_mismatch_is_explicit_fallback(tmp_pa
 
 
 def test_sm80_mtp_can_consume_fa2_scores_only_for_a_covered_batch(tmp_path):
-    if torch.cuda.get_device_capability() != (8, 0):
-        pytest.skip('SM80 FA2 MTP verification')
+    if not fa2_overlay_capability(torch.cuda.get_device_capability()):
+        pytest.skip('SM80 FA2 MTP verification (SM80, or SM89 with KVMEM_NATIVE_FA2_SM89=1)')
     bank, plan, execute, oracle, _, meta, _, *_ = geometry(tmp_path, 'prefill', 5)
     name = 'model.layers.3.attn'
     bank.arm({'r': plan})
@@ -138,8 +138,8 @@ def test_sm80_mtp_can_consume_fa2_scores_only_for_a_covered_batch(tmp_path):
 
 @pytest.mark.parametrize('qlen', [1, 5])
 def test_sm80_tensor_core_decode_and_prefill_use_correct_packed_rows(tmp_path, qlen):
-    if torch.cuda.get_device_capability() != (8, 0):
-        pytest.skip('SM80 FA2 mixed-batch statistics')
+    if not fa2_overlay_capability(torch.cuda.get_device_capability()):
+        pytest.skip('SM80 FA2 mixed-batch statistics (SM80, or SM89 with KVMEM_NATIVE_FA2_SM89=1)')
     _, dec_plan, _, dec_oracle, dec_q, dec_meta, *_ = geometry(tmp_path, 'fa2-decode', qlen)
     bank, pre_plan, _, pre_oracle, pre_q, pre_meta, *_ = geometry(tmp_path, 'prefill', 7)
     name = 'model.layers.3.attn'

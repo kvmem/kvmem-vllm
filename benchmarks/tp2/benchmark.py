@@ -302,6 +302,8 @@ def main():
     p.add_argument('--env', action='append', default=[], metavar='KEY=VALUE',
         help='extra server environment (e.g. KVMEM_* A/B flags); repeatable')
     p.add_argument('--dry-run-only', action='store_true', help='validate and save the launch plan, start no server')
+    p.add_argument('--native-verify', action='store_true',
+                   help='action_native_scores=verify: native overlay scores compared with the reference every step')
     p.add_argument('--dflash-multi', action='store_true',
                    help='experimental_dflash_compiled_multi: compiled/TP DFlash2 with --draft-tokens 3 or 7')
     p.add_argument('--copy-check', metavar='CONCURRENCIES', help='greedy verbatim-copy check, e.g. 1,3,5,8 (copy_check_workload.py)')
@@ -359,6 +361,8 @@ def main():
         kv['step_latency_interval']=1
     if args.native_max_mib:
         kv['action_native_max_bytes']=args.native_max_mib*2**20
+    if args.native_verify:
+        kv['action_native_scores']='verify'
     if args.eager:
         kv.update(capture_opaque_projection=False,query_replay_backend='eager',query_replay_cobatch=False)
     profile.update(draft_method=args.draft_method,
