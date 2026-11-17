@@ -73,7 +73,7 @@ class RemoteModel:
     def __init__(self, root, spec, owned, runtime):
         self.root, self.spec, self.owned, self.runtime = root, spec, owned, runtime
         self.run_dir = f"{spec['base']}/runs/{spec['label']}"
-        self.pid = None
+        self.pid = self.forward = None
         self.processes = []
 
     def argv(self, command=None, *options):
@@ -104,20 +104,29 @@ class RemoteModel:
         self.pid = int(self.ssh(f"cat {spec['base']}/logs/{spec['label']}.pid", timeout=60, check=True).stdout)
         model = self.root/'model'
         model.mkdir(exist_ok=False)
-        local = q.read(self.root/'profile.json')['port']
-        env = dict(os.environ)
+        self.local = q.read(self.root/'profile.json')['port']
+        # Through the shared SSH master a -N client hands the forward to the
+        # master and exits, so the forward is owned by the master itself.
+        self.forward = f"{self.local}:127.0.0.1:{spec['remote_port']}"
+        subprocess.run(self.argv(None, '-O', 'cancel', '-L', self.forward), capture_output=True, timeout=60)
+        subprocess.run(self.argv(None, '-O', 'forward', '-L', self.forward), capture_output=True, timeout=60, check=True)
         # -tt: the remote loop gets SIGHUP when its local ssh client stops.
-        self.processes = [
-            self.owned.start(self.argv(None, '-N', '-o', 'ExitOnForwardFailure=yes', '-L',
-                f"{local}:127.0.0.1:{spec['remote_port']}"), self.root, env, model/'tunnel.log', model/'tunnel.json'),
-            self.owned.start(self.argv(f'while kill -0 {self.pid} 2>/dev/null; do sleep 10; done', '-tt'),
-                self.root, env, model/'watch.log', model/'watch.json')]
+        self.processes = [self.owned.start(self.argv(f'while kill -0 {self.pid} 2>/dev/null; do sleep 10; done', '-tt'),
+            self.root, dict(os.environ), model/'watch.log', model/'watch.json')]
         return self
 
     def poll(self):
-        """None while the remote harness and the tunnel are alive."""
+        """None while the remote harness is alive and the local forward accepts connections."""
+        import socket
         codes = [p.poll() for p in self.processes]
-        return next((c for c in codes if c is not None), None)
+        code = next((c for c in codes if c is not None), None)
+        if code is not None:
+            return code
+        try:
+            with socket.create_connection(('127.0.0.1', self.local), timeout=5):
+                return None
+        except OSError:
+            return 255
 
     def monitor(self):
         """The dedicated 1-second GPU telemetry, sampled on the serving host."""
@@ -160,6 +169,8 @@ class RemoteModel:
         self.copy(['server/capture/*.json', 'server/launch.json', 'profile.json', 'launch.json', 'status.json',
                    'dry-run.stdout', 'server.log.gz'], self.root/'model')
         self.copy(['gpu-utilization.jsonl'], self.root)
+        if self.forward:
+            subprocess.run(self.argv(None, '-O', 'cancel', '-L', self.forward), capture_output=True, timeout=60)
         return dict(remote='stopped', harness_pid=self.pid,
                     alive=self.ssh(f'kill -0 {self.pid}', timeout=60).returncode == 0)
 
