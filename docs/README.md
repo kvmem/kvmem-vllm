@@ -22,6 +22,7 @@ their own experiments; they are not default installation instructions.
 | --- | --- |
 | [vLLM compatibility](vllm-compatibility.md) | Interface checks, supported adapters and actual-model validation of native SystemOne. |
 | [Qwen3.8 Flash Next](qwen38-flash-next.md) | Explicit B12X QSA adapter, FP4-Local profile, FP8 KV and MTP boundaries. |
+| [Three-tier KV for Flash Next](qsa-three-tier-kv.md) | GPU hot pages, the KVMem window in a pinned CPU pool and the full history on SSD (v1): configuration, results and future targets. |
 | [Rolling long output](rolling-long-output.md) | Generation across bounded working-window refreshes; requires token-ID requests. |
 | [Graph scoring configuration](graph-scoring-v2-configuration.md) | Explicit graph-policy choices and validation rules. |
 | [Age-adjusted pressure](age-adjusted-pressure.md) | Per-layer selection that keeps old content later text refers back to, plus the shared shallow selection. |
