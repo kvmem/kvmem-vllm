@@ -811,7 +811,9 @@ class NativeAttentionStats:
                 getattr(wrapper, '_jit_module', None) is not None or
                 q_dtype not in (torch.float16, torch.bfloat16, torch.float8_e4m3fn)):
             return None, unsupported
-        if phase == 'decode':
+        # KVMEM_FA2_VERIFY_GRAPH serves uniform MTP verification as decodes
+        # through a causal FA2 prefill wrapper: it takes the prefill checks.
+        if phase == 'decode' and not getattr(wrapper, '_kvmem_verify', False):
             if (not getattr(wrapper, 'use_tensor_cores', False) or
                     wrapper._q_len_per_req < 1 or wrapper._window_right != 0):
                 return None, unsupported
