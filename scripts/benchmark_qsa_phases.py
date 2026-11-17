@@ -51,7 +51,7 @@ async def benchmark(args):
     tok = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
     marker = 'QSA_BENCHMARK_BODY_6b7c'
     template = tok.apply_chat_template([dict(role='user',content=marker)],
-        tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        tokenize=False, add_generation_prompt=True, enable_thinking=args.enable_thinking)
     assert template.count(marker)==1
     prefix, suffix = [tok.encode(p, add_special_tokens=False) for p in template.split(marker)]
     body = tok.encode('Repository review notes. The service accepts independent requests, '
@@ -65,7 +65,25 @@ async def benchmark(args):
     ending = tok.encode('\nWrite a long numbered engineering checklist explaining the design '
         'choices and examples in detail. Continue for at least 1000 words.\n', add_special_tokens=False)
     payloads=[]
+    # Real text for calibration traces: one JSON object per line with "context" and
+    # "question". The context keeps its newest tokens within --input-tokens; the
+    # question is the KVMem query span.
+    documents=[json.loads(line) for line in Path(args.prompt_file).read_text().splitlines()
+               if line.strip()] if args.prompt_file else None
     for owner in range(args.concurrency):
+        if documents:
+            row=documents[(args.prompt_offset+owner)%len(documents)]
+            question=tok.encode('\n\n'+row['question'].strip()+'\n',add_special_tokens=False)
+            room=args.input_tokens-len(prefix)-len(question)-len(suffix)
+            assert room>0
+            context=tok.encode(row['context'],add_special_tokens=False)[-room:]
+            ids=prefix+context+question+suffix
+            query=[len(prefix)+len(context),len(ids)]
+            payloads.append((ids,json.dumps(dict(model=args.served_model,prompt=ids,
+                temperature=0,max_tokens=args.output_tokens,ignore_eos=True,stream=True,
+                stream_options={'include_usage':True},return_token_ids=True,
+                kvmem_query_span=query,kvmem_reselect='force')).encode()))
+            continue
         rng=random.Random(args.seed+owner)
         unique=[rng.choice(words) for _ in range(128)]
         remaining=args.input_tokens-len(prefix)-len(unique)-len(ending)-len(suffix)
@@ -109,10 +127,10 @@ async def benchmark(args):
                                 tokens.extend(new)
                             parts.append(choice.get('text') or '')
                             if choice.get('finish_reason'):finish=choice['finish_reason']
-                assert usage and chunks and usage['prompt_tokens']==args.input_tokens
+                assert usage and chunks and usage['prompt_tokens']==len(ids)
                 assert usage['completion_tokens']==args.output_tokens==len(tokens)
                 row=dict(owner=owner,trial=trial,started=started,first=chunks[0]['at'],last=chunks[-1]['at'],
-                    input_tokens=args.input_tokens,output_tokens=len(tokens),token_ids_verified=True,
+                    input_tokens=len(ids),output_tokens=len(tokens),token_ids_verified=True,
                     chunks=chunks,usage=usage,metrics=metrics,finish_reason=finish,
                     prompt_sha256=hashlib.sha256(json.dumps(ids).encode()).hexdigest(),
                     output_sha256=hashlib.sha256(json.dumps(tokens).encode()).hexdigest(),
@@ -149,6 +167,9 @@ if __name__=='__main__':
     p.add_argument('--seed',type=int,default=11317)
     p.add_argument('--wait-ready-seconds',type=int,default=1800)
     p.add_argument('--between-trials-seconds',type=float,default=0)
+    p.add_argument('--prompt-file',help='JSONL rows with "context" and "question" (real text)')
+    p.add_argument('--prompt-offset',type=int,default=0)
+    p.add_argument('--enable-thinking',action='store_true')
     args=p.parse_args()
     assert args.input_tokens>0 and args.output_tokens>0 and args.concurrency>0 and args.trials>0
     assert args.between_trials_seconds>=0

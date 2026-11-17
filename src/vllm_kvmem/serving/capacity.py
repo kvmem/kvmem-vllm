@@ -12,7 +12,8 @@ from ..core import settings as _settings
 
 
 class ReservedKVCacheManager:
-    def __init__(self, native, vllm_config, *, draft_contract=None, max_authorities=None):
+    def __init__(self, native, vllm_config, *, draft_contract=None, max_authorities=None, selector_carve=None,
+                 streaming_carve=None):
         from vllm.v1.core.single_type_kv_cache_manager import MambaManager, SlidingWindowManager
         from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 
@@ -28,6 +29,26 @@ class ReservedKVCacheManager:
             raise ValueError('Authority admission requires a positive request count')
         self.max_authorities = max_authorities
         self.authority_rejections = 0
+        # QSA carves (core/compressed_pages.py): the last blocks of the fresh pool,
+        # exactly the range the worker bound views over. Taken once, never freed.
+        self.selector_carve, self.streaming_carve = selector_carve, streaming_carve
+        self.selector_blocks = ()
+        if selector_carve is not None:
+            from ..core.compressed_pages import carve_range
+            if streaming_carve is not None and streaming_carve.selector != selector_carve:
+                raise ValueError('QSA streaming pages require the matching selector carve')
+            first, end = carve_range(selector_carve, streaming_carve)
+            pool = native.block_pool
+            if end != getattr(pool, 'num_gpu_blocks', end):
+                raise ValueError('QSA carves must end at the native pool end')
+            taken = pool.get_new_blocks(pool.get_num_free_blocks())
+            carved = [block for block in taken if first <= block.block_id < end]
+            rest = [block for block in taken if not first <= block.block_id < end]
+            pool.free_blocks(rest)             # original free order, carves removed
+            if sorted(block.block_id for block in carved) != list(range(first, end)):
+                pool.free_blocks(carved)
+                raise ValueError('QSA carves require the last blocks of a fresh pool')
+            self.selector_blocks = tuple(sorted(carved, key=lambda block: block.block_id))
         self.lookahead = draft_contract.query_tokens if draft_contract is not None else 0
         self.guided_reserve = 0
         self.groups = tuple(native.coordinator.single_type_managers)
@@ -74,7 +95,10 @@ class ReservedKVCacheManager:
 
     def _demand(self, tokens):
         return sum(self.static_blocks[index] if index in self.static_blocks else
-                   (min(tokens, manager.capacity) + manager.block_size - 1) // manager.block_size
+                   ((min(tokens, manager.capacity) if manager.physical_tokens is None else
+                     # qsa_streaming: the full page set is allocated with the first token.
+                     (manager.physical_tokens if tokens > 0 else 0))
+                    + manager.block_size - 1) // manager.block_size
                    for index, manager in enumerate(self.groups))
 
     def _owned(self, request_id):
@@ -133,7 +157,9 @@ class ReservedKVCacheManager:
             reserved_request_owned_pages=len(reserved_owned),
             idle_resident_pages=len(idle_only), idle_request_overlap_pages=len(idle & all_owned),
             staged_import_pages=len(staged_only),
-            deferred_or_other_pages=allocated-len(all_owned)-len(idle_only)-len(staged_only),
+            selector_carve_pages=len(self.selector_blocks),
+            deferred_or_other_pages=(allocated-len(all_owned)-len(idle_only)-len(staged_only)
+                                     -len(self.selector_blocks)),
             lifetime_quota_pages=sum(row['lifetime_quota_pages'] for row in requests.values()),
             future_reserved_pages=future, free_after_growth_reserve_pages=free-future,
             requests=requests, groups=group_rows,

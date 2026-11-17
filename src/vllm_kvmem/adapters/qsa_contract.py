@@ -45,6 +45,44 @@ def check_qsa_sources(root):
             raise UnsupportedEngine(f'Flash Next state/cache contract changed: {name}')
 
 
+def check_qsa_split_sources(root):
+    """Vendor names adapters/qsa_streaming.py patches for qsa_split_selector."""
+    path = root / 'models/qwen4_exp/nvidia/b12x_qsa.py'
+    if not path.is_file():
+        raise UnsupportedEngine(f'Flash Next B12X capability missing: {path}')
+    source = path.read_text()
+    for name, parameters in (
+            ('Qwen4ExpQSAAttention.bind_kv_cache', ('kv_cache',)),
+            ('Qwen4ExpQSAAttention._ensure_qsa_context_buffers', ('context',)),
+            ('Qwen4ExpQSAAttention._stage_runtime_metadata',
+             ('metadata', 'rows', 'row_capacity', 'main_block_table', 'compressed_block_table')),
+            ('Qwen4ExpQSAAttention._require_qsa_metadata', ('metadata',)),
+            ('Qwen4ExpQSAAttention._bind_qsa_context', ('context', 'staged', 'output'))):
+        check_source(source, name, parameters)
+    # The main K/V views B12X binds must come from self.kv_cache, which the
+    # adapter narrows to the pages below the carve during the call.
+    binder = find_symbol(source, 'Qwen4ExpQSAAttention._bind_qsa_context')
+    wanted = ast.dump(ast.parse('impl._kv_cache_views(self.kv_cache)', mode='eval').body)
+    if not any(ast.dump(node) == wanted for node in ast.walk(binder)):
+        raise UnsupportedEngine('Flash Next QSA binding no longer derives main K/V views from self.kv_cache')
+    # The selector view must come from the module-level helper the adapter
+    # replaces, and must be the cache every plan and binding uses.
+    tree = ast.parse(source)
+    if not any(isinstance(node, ast.ImportFrom) and any(a.name == 'qsa_compressed_cache_view' and a.asname is None
+                                                        for a in node.names) for node in tree.body):
+        raise UnsupportedEngine('Flash Next selector view is no longer a module-level import')
+    method = find_symbol(source, 'Qwen4ExpQSAAttention.bind_kv_cache')
+    for expression in ('qsa_compressed_cache_view(kv_cache, compress_ratio=self.compress_ratio, '
+                       'index_head_dim=self.index_head_dim)',):
+        wanted = ast.dump(ast.parse(expression, mode='eval').body)
+        if not any(ast.dump(node) == wanted for node in ast.walk(method)):
+            raise UnsupportedEngine('Flash Next selector binding contract changed: ' + expression)
+    assigned = [node for node in ast.walk(method) if isinstance(node, ast.Assign) and
+                any(ast.unparse(t) == 'self._compressed_cache' for t in node.targets)]
+    if [ast.unparse(node.value) for node in assigned] != ['compressed_cache']:
+        raise UnsupportedEngine('Flash Next selector cache ownership changed in bind_kv_cache')
+
+
 @lru_cache(maxsize=1)
 def verify_qsa_sources():
     check_qsa_sources(engine_root())

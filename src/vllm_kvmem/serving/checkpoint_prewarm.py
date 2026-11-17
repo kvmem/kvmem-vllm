@@ -43,10 +43,11 @@ def requested_count(options):
 
 def prewarm_checkpoint_payloads(runner, options, stage='kv_cache_init'):
     requested = requested_count(options)
-    if not requested:
+    if not requested or not options.session_capacity:
+        # Only prompt-session checkpoints use these pinned blocks. The preset
+        # turns warming on for every profile; a session-less profile (Flash
+        # Next) captures nothing, so there is nothing to warm.
         return None
-    if not options.session_capacity:
-        raise ValueError('Pinned checkpoint prewarm needs prompt sessions')
     speculation = getattr(runner, 'speculative_config', None)
     if speculation is not None and speculation.method != 'mtp':
         raise ValueError('Pinned checkpoint prewarm only supports target-only or MTP')

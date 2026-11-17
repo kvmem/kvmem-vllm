@@ -198,6 +198,22 @@ class KVMemScheduler(Scheduler):
         if self._bounded_target:
             from .capacity import ReservedKVCacheManager
             manager_type, extra = ReservedKVCacheManager, {}
+            if options.qsa_split_selector:
+                from ..adapters.qsa_streaming import plan_qsa_carves
+                if options.gpu_memory_admission != 'static':
+                    raise ValueError('qsa_split_selector requires static GPU admission')
+                draft = self.draft_contract.query_tokens - 1 if self.draft_contract is not None else 0
+                extra['selector_carve'], extra['streaming_carve'], _ = plan_qsa_carves(
+                    self.vllm_config, self.kv_cache_config, options, draft)
+                if options.qsa_streaming:
+                    carve = extra['streaming_carve']
+                    for manager in self.window_managers.values():
+                        if manager.block_size != carve.page_tokens:
+                            raise ValueError('QSA streaming requires one attention page size')
+                        manager.set_streaming(carve.pages_per_request * carve.page_tokens)
+                    # Prefill attends from a shared frame-sized staging run, so
+                    # at most staging_requests streaming requests prefill per step.
+                    self._streaming_prefill_limit = 1
             if options.gpu_memory_admission == 'incremental':
                 from .incremental_capacity import IncrementalKVCacheManager
                 from .request_swap_control import RequestSwapController
@@ -220,6 +236,10 @@ class KVMemScheduler(Scheduler):
                     min_resident_steps=options.request_swap_min_resident_steps)
                 manager_type = IncrementalKVCacheManager
                 extra['pause_controller'] = self.swap_controller
+            if (getattr(self, '_streaming_prefill_limit', None) is None and
+                    _settings.get('KVMEM_QSA_SINGLE_PREFILL') == '1'):
+                # Exactness / throughput reference: the resident path with streaming's step shapes.
+                self._streaming_prefill_limit = 1
             self.kv_cache_manager = manager_type(self.kv_cache_manager, self.vllm_config,
                 draft_contract=self.draft_contract,
                 max_authorities=(self.scheduler_config.max_num_seqs
@@ -750,7 +770,14 @@ class KVMemScheduler(Scheduler):
         controller = getattr(self, 'swap_controller', None)
         if controller is not None and controller.is_suspended(request.request_id):
             return 0
+        limit = getattr(self, '_streaming_prefill_limit', None)
+        prefill = num_computed_tokens < request.num_prompt_tokens
+        if (limit is not None and prefill and request.request_id not in self._streaming_prefills and
+                len(self._streaming_prefills) >= limit):
+            return 0  # qsa_streaming: the staging run is taken this step.
         tokens = self._reserve_kvmem_lookahead(request, num_computed_tokens, num_new_tokens)
+        if limit is not None and prefill and tokens:
+            self._streaming_prefills.add(request.request_id)
         if tokens and controller is not None:
             if not self.kv_cache_manager.can_schedule(request, tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens,
@@ -1792,6 +1819,7 @@ class KVMemScheduler(Scheduler):
                         break
             if getattr(self, '_bounded_target', False):
                 self.kv_cache_manager.begin_step()
+            self._streaming_prefills = set()
             try:
                 output = super().schedule(throttle_prefills or self._throttle_mixed_prefill())
             except BaseException:

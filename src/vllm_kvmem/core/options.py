@@ -368,6 +368,15 @@ class RuntimeOptions:
     assembly_read_prefetch: bool = False
     assembly_fused_layers: bool = False
     flashinfer_gemm_bucket_alignment: bool = False
+    # Flash Next only: QSA's compressed selector keys live in pages carved from
+    # the KV pool, addressed by request state slot, instead of in the tail of
+    # each main K/V page (adapters/qsa_streaming.py).
+    qsa_split_selector: bool = False
+    # Flash Next only, requires qsa_split_selector: each request keeps qsa_hot_pages
+    # hot pages plus one write (ring) page per QSA layer on the GPU; its frame K/V
+    # lives in a pinned host pool and misses stream in per step (adapters/qsa_stream_serving.py).
+    qsa_streaming: bool = False
+    qsa_hot_pages: int = 3
     prefill_physical_coalescing: bool = False
     # Opt-in: physical coalescing with graph_mode=off (historical GC requires
     # graphs off). Logical publication then commits each child's accepted
@@ -697,9 +706,14 @@ class RuntimeOptions:
         for name in ('split_capture_dma', 'native_prefill_commit', 'async_checkpoint_capture',
                      'restore_stage_timing', 'host_stage_timing', 'native_checkpoint_capture',
                      'native_restore_frame', 'native_action_metadata',
-                     'action_profiling', 'flashinfer_gemm_bucket_alignment'):
+                     'action_profiling', 'flashinfer_gemm_bucket_alignment', 'qsa_split_selector',
+                     'qsa_streaming'):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f'{name} must be boolean')
+        if type(self.qsa_hot_pages) is not int or not 1 <= self.qsa_hot_pages <= 8:
+            raise ValueError('qsa_hot_pages must be an integer in [1, 8]')
+        if self.qsa_streaming and not self.qsa_split_selector:
+            raise ValueError('qsa_streaming requires qsa_split_selector')
         for name in ('action_profile_interval', 'action_profile_max_events'):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f'{name} must be a positive integer')
@@ -1152,6 +1166,9 @@ class RuntimeOptions:
             ('assembly_read_prefetch', False),
             ('assembly_fused_layers', False),
             ('flashinfer_gemm_bucket_alignment', False),
+            ('qsa_split_selector', False),
+            ('qsa_streaming', False),
+            ('qsa_hot_pages', 3),
             ('prefill_physical_coalescing', False),
             ('prefill_physical_graphless', False),
             ('prefill_physical_multi_owner', False),

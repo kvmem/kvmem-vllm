@@ -122,8 +122,14 @@ def install_bounded_target(runner):
                 expansion = stored_expansions(runner.block_tables)[group_id]
                 expected_pages = [block * expansion + page for block in ticket.original_block_ids
                                   for page in range(expansion)]
-                count = int(runner.block_tables.num_blocks.np[group_id, request_index])
-                actual_pages = runner.block_tables.block_tables[group_id].gpu[request_index, :count].cpu().tolist()
+                stream = getattr(runner, '_kvmem_qsa_stream', None)
+                if stream is not None and stream.is_streaming(request_index):
+                    # qsa_streaming rows map every frame column to the ring page;
+                    # the owned pages are the runtime's admitted hot + ring pages.
+                    actual_pages = stream.owned_pages(request_index, group_id)
+                else:
+                    count = int(runner.block_tables.num_blocks.np[group_id, request_index])
+                    actual_pages = runner.block_tables.block_tables[group_id].gpu[request_index, :count].cpu().tolist()
                 if actual_pages != expected_pages:
                     raise ValueError("Worker physical pages do not match the scheduler refresh reservation")
             tickets = [ticket for _, ticket in job.command.groups]

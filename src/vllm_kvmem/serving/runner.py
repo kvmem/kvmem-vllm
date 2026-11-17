@@ -131,6 +131,13 @@ def make_probe_runner(base):
             install_mtp_runtime(self)
             from ..adapters.qsa_adapter import install_qsa_archive
             install_qsa_archive(self)
+            if options.qsa_split_selector and not qsa:
+                raise ValueError('qsa_split_selector requires the Flash Next QSA adapter')
+            if qsa:
+                from ..adapters.qsa_streaming import install_qsa_split_selector
+                install_qsa_split_selector(self, options)
+                from ..adapters.qsa_trace import install_qsa_trace
+                install_qsa_trace(self)
             self._kvmem_capture_opaque = (install_opaque_capture(self, opaque_fingerprint)
                 if options.capture_opaque_projection else None)
             self._kvmem_serving = _settings.get('KVMEM_SERVING') == '1'
@@ -250,6 +257,9 @@ def make_probe_runner(base):
                     from .restore_lease import FreshRestoreLease
                     self._kvmem_restore_allocations[request.req_id] = FreshRestoreLease.capture(
                         self, request.req_id, request.block_ids)
+            if getattr(self, '_kvmem_qsa_stream', None) is not None:
+                from ..adapters.qsa_stream_runtime import after_add_requests
+                after_add_requests(self, scheduler_output)
             return result
 
         def update_requests(self, scheduler_output):
@@ -273,7 +283,11 @@ def make_probe_runner(base):
                 scheduler_output = replace(scheduler_output, scheduled_cached_reqs=replace(
                     cached, new_block_ids=[None if rid in table_updates else blocks
                         for rid, blocks in zip(cached.req_ids, cached.new_block_ids, strict=True)]))
-            return super().update_requests(scheduler_output)
+            result = super().update_requests(scheduler_output)
+            if getattr(self, '_kvmem_qsa_stream', None) is not None:
+                from ..adapters.qsa_stream_runtime import after_update_requests
+                after_update_requests(self, scheduler_output, table_updates)
+            return result
 
         def initialize_kv_cache(self, *args, **kwargs):
             result = super().initialize_kv_cache(*args, **kwargs)
@@ -283,6 +297,9 @@ def make_probe_runner(base):
             refresh = getattr(self, '_kvmem_async_refresh', None)
             if refresh is not None:
                 refresh.initialize_cache()
+            if getattr(self, '_kvmem_qsa_stream', None) is not None and not is_profiling:
+                from ..adapters.qsa_streaming import bind_qsa_streaming
+                bind_qsa_streaming(self)
             if getattr(self, '_kvmem_graph', False):
                 from .graph_runtime import initialize_graph_window
                 initialize_graph_window(self)
@@ -311,6 +328,9 @@ def make_probe_runner(base):
         def finish_requests(self, scheduler_output):
             if getattr(self, '_kvmem_restore_allocations', {}).keys() & scheduler_output.finished_req_ids:
                 raise RuntimeError('Native request was freed before its restore fence')
+            if getattr(self, '_kvmem_qsa_stream', None) is not None:
+                from ..adapters.qsa_stream_runtime import before_finish_requests
+                before_finish_requests(self, scheduler_output)
             result = super().finish_requests(scheduler_output)
             for request_id in scheduler_output.finished_req_ids:
                 self._kvmem_request_generations.pop(request_id, None)
@@ -642,6 +662,9 @@ def make_probe_runner(base):
             if not dummy_run and not is_profile:
                 from .systemone_fork import before_step
                 before_step(self, scheduler_output)
+                stream = getattr(self, '_kvmem_qsa_stream', None)
+                if stream is not None and stream.carve is not None:
+                    stream.begin_step(scheduler_output)
             timing = getattr(self, '_kvmem_step_timing', None)
             if (timing is not None and not dummy_run and not is_profile and
                     scheduler_output.total_num_scheduled_tokens and

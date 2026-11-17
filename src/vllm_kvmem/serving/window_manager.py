@@ -49,6 +49,22 @@ class WorkingSetManager:
         self.pending: dict[str, RefreshTicket] = {}
         self.imports: dict[str, tuple[int, int]] = {}
         self.resident_imports: dict[str, tuple] = {}
+        # qsa_streaming: every request owns exactly this many token slots of
+        # native pages (hot pages + the ring page), whatever its frame extent.
+        # Logical extents, refresh limits and offsets are unchanged.
+        self.physical_tokens = None
+
+    def set_streaming(self, physical_tokens):
+        if type(physical_tokens) is not int or physical_tokens <= 0 or physical_tokens % self.native.block_size:
+            raise ValueError('Streaming page extent must be a positive multiple of the page size')
+        if self.native.req_to_blocks or self.offsets or self.imports:
+            raise ValueError('Streaming must be configured before any request is admitted')
+        self.physical_tokens = physical_tokens
+
+    def _physical(self, tokens):
+        if self.physical_tokens is None:
+            return tokens
+        return self.physical_tokens if tokens > 0 else 0
 
     def __getattr__(self, name):
         return getattr(self.native, name)
@@ -78,12 +94,13 @@ class WorkingSetManager:
         local_computed = (0 if external else
                           self._local(request_id, num_local_computed_tokens,
                                       admission=apply_admission_cap))
+        physical = self._physical
         required = self.native.get_num_blocks_to_allocate(
-            request_id, self._local(request_id, num_tokens, admission=apply_admission_cap),
+            request_id, physical(self._local(request_id, num_tokens, admission=apply_admission_cap)),
             new_computed_blocks,
-            self._local(request_id, total_computed_tokens, admission=apply_admission_cap),
-            local_computed,
-            self._local(request_id, num_tokens_main_model, admission=apply_admission_cap),
+            physical(self._local(request_id, total_computed_tokens, admission=apply_admission_cap)),
+            physical(local_computed),
+            physical(self._local(request_id, num_tokens_main_model, admission=apply_admission_cap)),
             apply_admission_cap=apply_admission_cap,
             **kwargs,
         )
@@ -170,8 +187,8 @@ class WorkingSetManager:
         del self.offsets[request_id]
 
     def allocate_new_blocks(self, request_id, num_tokens, num_tokens_main_model):
-        return self.native.allocate_new_blocks(request_id, self._local(request_id, num_tokens),
-                                               self._local(request_id, num_tokens_main_model))
+        return self.native.allocate_new_blocks(request_id, self._physical(self._local(request_id, num_tokens)),
+                                               self._physical(self._local(request_id, num_tokens_main_model)))
 
     def prepare_refresh(self, request_id: str, history_end: int, window_tokens: int, *, replay_tokens=0,
                         allow_import=False):
@@ -183,11 +200,14 @@ class WorkingSetManager:
         if type(replay_tokens) is not int or replay_tokens < 0 or old_window + replay_tokens > self.capacity:
             raise ValueError("Query probe exceeds the admitted old working window")
         blocks = self.native.req_to_blocks.get(request_id)
-        if not blocks or old_window + replay_tokens > len(blocks) * self.native.block_size:
+        if not blocks or (self.physical_tokens is None and
+                          old_window + replay_tokens > len(blocks) * self.native.block_size):
             raise ValueError("Refresh references unallocated history")
         # The worker can replay the scheduled query before acknowledging. Keep
         # its destination pages as well as the selected historical prefix.
-        count_kept = (window_tokens + replay_tokens + self.native.block_size - 1) // self.native.block_size
+        # Streaming pages hold no frame positions: a refresh keeps all of them.
+        count_kept = (len(blocks) if self.physical_tokens is not None else
+                      (window_tokens + replay_tokens + self.native.block_size - 1) // self.native.block_size)
         ticket = RefreshTicket(request_id, next(_ticket_ids), history_end, window_tokens,
                                tuple(b.block_id for b in blocks),
                                tuple(b.block_id for b in blocks[:count_kept]), replay_tokens)
@@ -215,7 +235,8 @@ class WorkingSetManager:
             return False
         blocks = self.native.req_to_blocks[ticket.request_id]
         selected_tokens = ticket.window_tokens if selected_tokens is None else selected_tokens
-        keep = (selected_tokens + ticket.replay_tokens + self.native.block_size - 1) // self.native.block_size
+        keep = (len(blocks) if self.physical_tokens is not None else
+                (selected_tokens + ticket.replay_tokens + self.native.block_size - 1) // self.native.block_size)
         removed = blocks[keep:]
         del blocks[keep:]
         self.native.block_pool.free_blocks(reversed(removed))

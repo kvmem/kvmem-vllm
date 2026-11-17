@@ -121,3 +121,10 @@ def test_graph_memory_profile_does_not_consume_checkpoint_prewarm(monkeypatch):
     assert runner.capture_model() == 7
     assert events[-1] == ('capture', False)
     assert len(events) == 4
+
+
+def test_session_less_profiles_skip_warming_under_the_preset(monkeypatch):
+    # Flash Next runs without prompt sessions; the default-on preset must not stop it.
+    monkeypatch.setenv('KVMEM_CHECKPOINT_PINNED_PREWARM', '17')
+    options = SimpleNamespace(checkpoint_pinned_prewarm_count=0, session_capacity=0)
+    assert prewarm_checkpoint_payloads(None, options) is None
