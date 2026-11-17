@@ -131,6 +131,9 @@ def make_probe_runner(base):
                     self.input_buffers.positions)
             from ..adapters.mtp_runtime import install_mtp_runtime
             install_mtp_runtime(self)
+            from ..adapters import draft_seq_lens
+            if draft_seq_lens.enabled():
+                draft_seq_lens.install()
             from ..adapters.qsa_adapter import install_qsa_archive
             install_qsa_archive(self)
             self._kvmem_capture_opaque = (install_opaque_capture(self, opaque_fingerprint)
