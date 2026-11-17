@@ -84,6 +84,28 @@ def global_only(kvmem, environment):
     return found
 
 
+def check_qsa(kvmem, environment):
+    """Flash Next QSA, strategy_path=layer: per-layer MeanK at the final Query (the
+    first KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS layers shared) and per-layer pressure
+    from QSA's own sparse-attention mass (serving/qsa_pressure.py) for the attention
+    and lift scorers; recency keeps the global pressure selection."""
+    from .. import strategy
+    choice = chosen(kvmem, strategy.LAYER)
+    for role, name in choice:
+        strategy.check_path(role, name, strategy.LAYER)
+    query, pressure_name, picker = (name for _, name in choice)
+    if query != 'meank' or picker != 'native':
+        raise ValueError('The QSA per-layer path runs the built-in MeanK Query scorer and native picker')
+    if pressure_name not in ('attention', 'lift', 'recency'):
+        raise ValueError('The QSA per-layer path supports the attention, lift and recency pressure scorers')
+    shared = str(environment.get('KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS', '0') or '0')
+    if not shared.isdigit():
+        raise ValueError('KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS must be a non-negative integer')
+    return dict(path='layer', backend='qsa', query_scorer=query, pressure_scorer=pressure_name,
+                picker=picker, shared_query_layers=int(shared),
+                per_layer_pressure=pressure_name in ('attention', 'lift'))
+
+
 def check(kvmem, *, query_mode, pressure, batch_selection=False, environment=None):
     """Refuse what the launched configuration cannot run; return a report of what it will run.
 
@@ -92,6 +114,8 @@ def check(kvmem, *, query_mode, pressure, batch_selection=False, environment=Non
     """
     from .. import strategy
     environment = environment or {}
+    if query_mode == 'qsa':
+        return check_qsa(kvmem, environment)
     path = strategy.LAYER if query_mode else strategy.GLOBAL
     signals = provided_signals(kvmem)
     choice = chosen(kvmem, path)

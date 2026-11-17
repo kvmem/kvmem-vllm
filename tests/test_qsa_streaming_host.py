@@ -155,17 +155,18 @@ class FakePool:
         self.free.extend(blocks)
 
 
-def _runtime(slots=4, hot_pages=2, width=6):
+def _runtime(slots=4, hot_pages=2, width=6, ring_pages=1):
     """A StreamingRuntime with only its mask/table state (CPU tensors)."""
     from vllm_kvmem.adapters.qsa_stream_runtime import SPOOF, StreamingRuntime
     runtime = StreamingRuntime.__new__(StreamingRuntime)
     runtime.hot_pages = hot_pages
+    runtime.ring_pages = ring_pages
     runtime.verify_rows = 4
     runtime.streaming = torch.zeros(slots + 1, dtype=torch.uint8)
     runtime.decode_mask = torch.zeros(slots + 1, dtype=torch.uint8)
     runtime.spoof = torch.full((16,), SPOOF, dtype=torch.int64)
     runtime.row_positions = torch.zeros(16, dtype=torch.int64)
-    runtime.state = [dict(hot_page_ids=torch.tensor([[100 * layer + 10 * s + j for j in range(hot_pages + 1)]
+    runtime.state = [dict(hot_page_ids=torch.tensor([[100 * layer + 10 * s + j for j in range(hot_pages + ring_pages)]
                                                      for s in range(slots)], dtype=torch.int32))
                      for layer in range(2)]
     runtime.carve = SimpleNamespace(staging_buffers=2)
@@ -255,3 +256,19 @@ def test_staging_steps_never_replay_a_graph():
     runtime.hosts = {}
     assert manager.dispatch(1, 30, None, 0, max_query_len=30) is full                        # nothing streams
     assert runtime.eager_staging_steps == 1
+
+
+def test_multi_page_ring_rows_cycle_and_decode_tables_cover_every_ring_page():
+    runtime = _runtime(ring_pages=2, width=8)
+    runtime.page_tokens = 32
+    runtime.hosts = {1: [[11, 12, 13, 14], [21, 22, 23, 24]]}          # H0 H1 R0 R1 per layer
+    # Frame column c writes to ring page c % 2.
+    assert runtime.override_row(5, None, 1, 0) == [13, 14, 13, 14, 13]
+    assert [runtime.ring_page_at(1, 1, f) for f in (0, 31, 32, 64, 100)] == [23, 23, 24, 23, 24]
+    runtime.streaming[:4] = 1
+    table = torch.full((2, 8), 7, dtype=torch.int32)
+    metadata = SimpleNamespace(query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32))
+    runtime.rewrite_main_table(0, metadata, table, torch.tensor([1, 2], dtype=torch.int32), 2)
+    # Decode rows attend [H0, H1, R0, R1]: the plan's ring token indices reach both ring pages.
+    assert table[0].tolist() == [10, 11, 12, 13, -1, -1, -1, -1]
+    assert table[1].tolist() == [20, 21, 22, 23, -1, -1, -1, -1]

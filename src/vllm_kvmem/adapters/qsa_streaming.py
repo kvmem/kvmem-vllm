@@ -34,7 +34,8 @@ def plan_qsa_carves(vllm_config, kv_cache_config, options, draft_tokens):
     """Placed (selector, streaming or None, main_end): the scheduler's view; SelectorState derives the same."""
     selector = selector_carve_for(vllm_config, kv_cache_config, options, draft_tokens)
     streaming = (plan_streaming_carve(selector, hot_pages=options.qsa_hot_pages,
-                                      max_rows=vllm_config.scheduler_config.max_num_batched_tokens)
+                                      max_rows=vllm_config.scheduler_config.max_num_batched_tokens,
+                                      ring_pages=getattr(options, 'qsa_ring_pages', 1))
                  if getattr(options, 'qsa_streaming', False) else None)
     return place_carves(selector, streaming, kv_cache_config.num_blocks)
 
@@ -64,7 +65,7 @@ class SelectorState:
         self.layer_count = layers
         self.frame = frame
         self.slots = slots
-        self.streaming = streaming          # (hot_pages, max_rows) with qsa_streaming
+        self.streaming = streaming          # (hot_pages, max_rows, ring_pages) with qsa_streaming
         self.carve = None
         self.streaming_carve = None
         self.main_end = None                # QSA main K/V views stop here (first selector block)
@@ -81,7 +82,8 @@ class SelectorState:
                            page_tokens=page_tokens, native_page_bytes=native_page_bytes,
                            compress_ratio=compress_ratio, index_head_dim=index_head_dim,
                            index_element_bytes=INDEX_ELEMENT_BYTES)
-        streaming = (plan_streaming_carve(carve, hot_pages=self.streaming[0], max_rows=self.streaming[1])
+        streaming = (plan_streaming_carve(carve, hot_pages=self.streaming[0], max_rows=self.streaming[1],
+                                          ring_pages=self.streaming[2] if len(self.streaming) > 2 else 1)
                      if self.streaming is not None else None)
         tail = carve.blocks + (streaming.blocks if streaming is not None else 0)
         if int(kv_cache.shape[0]) < tail + 2:
@@ -144,7 +146,8 @@ def install_qsa_split_selector(runner, options):
     vendor = importlib.import_module(VENDOR_MODULE)
     layers = list(runner._kvmem_qsa_layers.items())
     draft = int(getattr(runner.vllm_config.speculative_config, 'num_speculative_tokens', 0) or 0)
-    streaming = ((options.qsa_hot_pages, runner.vllm_config.scheduler_config.max_num_batched_tokens)
+    streaming = ((options.qsa_hot_pages, runner.vllm_config.scheduler_config.max_num_batched_tokens,
+                  getattr(options, 'qsa_ring_pages', 1))
                  if getattr(options, 'qsa_streaming', False) else None)
     state = SelectorState(len(layers), frame_tokens(options.memory, draft),
                           runner.vllm_config.scheduler_config.max_num_seqs, streaming)

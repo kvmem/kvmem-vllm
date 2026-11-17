@@ -111,3 +111,34 @@ def layer_records(authority, plan, global_slots, per_layer):
         else:
             out.append(sorted((by_slot[slot] for slot in entry), key=lambda r: r.history_begin))
     return out
+
+
+def pressure_layer_records(authority, plan, picked, fallback, *, draft_layers, draft_selection, scorer):
+    """Per-layer pressure picks (serving/qsa_pressure.py) as one frame per QSA layer.
+
+    picked[i] is target layer i's history-ordered record list, or None (no attention
+    recorded yet: the global pick). Draft layers follow layer 0 or the global pick.
+    Every frame must have the global pick's token count, or that layer keeps it."""
+    by_slot = {r.handle.slot: r for r in authority.records.values()}
+    ordered_global = [by_slot[remap.block_id] for remap in sorted(plan.remaps, key=lambda r: r.to_base)]
+    total = plan.total_window_tokens
+    out, kept_global = [], list(fallback)
+    target = iter(picked)
+    for index in range(len(picked) + len(draft_layers)):
+        if index in draft_layers:
+            out.append('draft')
+            continue
+        layer = next(target)
+        if layer is None or sum(r.count for r in layer) != total:
+            if layer is not None:
+                kept_global.append(index)
+            out.append(ordered_global)
+        else:
+            out.append(layer)
+    first = out[0] if out[0] != 'draft' else ordered_global
+    out = [(first if draft_selection == 'layer0' else ordered_global) if entry == 'draft' else entry
+           for entry in out]
+    report = dict(qsa_pressure_scorer=scorer, qsa_pressure_global_layers=sorted(set(kept_global)),
+                  qsa_pressure_overlap=[round(len({r.handle.slot for r in entry} & {r.handle.slot for r in ordered_global})
+                                              / max(1, len(ordered_global)), 4) for entry in out])
+    return out, report

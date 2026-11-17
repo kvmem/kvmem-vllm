@@ -197,9 +197,23 @@ def test_residency_copy_and_writeback_move_exact_bytes():
             ring_bytes = cache[ring_page, p, f % page_tokens].cpu()
             pool_bytes = pool[1, layer_offset + p * frame * token_bytes + f * token_bytes:][:token_bytes]
             assert torch.equal(ring_bytes, pool_bytes)
+    # A two-page ring (columns 2..3 of the row): frame column c writes to ring page c % 2.
+    two = torch.tensor([[1, 2, 5, 6]], dtype=torch.int32, device=device)
+    for f, page in ((70, 5), (100, 6), (131, 5)):
+        cache[page, :, f % page_tokens].random_(0, 256)
+    ext.residency_writeback(torch.zeros(3, dtype=torch.int32, device=device),
+                            torch.tensor([70, 100, 131], dtype=torch.int64, device=device), 3,
+                            torch.tensor([0], dtype=torch.int32, device=device),
+                            torch.tensor([1, 0], dtype=torch.uint8, device=device), pool_base, layer_offset,
+                            frame * token_bytes, backing, stride, plane, two, 2, page_tokens, token_bytes, 2)
+    torch.cuda.synchronize()
+    for f, page in ((70, 5), (100, 6), (131, 5)):
+        for p in (0, 1):
+            assert torch.equal(cache[page, p, f % page_tokens].cpu(),
+                               pool[0, layer_offset + p * frame * token_bytes + f * token_bytes:][:token_bytes])
 
 
-def _mini_runtime(page_tokens=32, token_bytes=512, frame_pages=4, slots=2, layers=2, hot_pages=2):
+def _mini_runtime(page_tokens=32, token_bytes=512, frame_pages=4, slots=2, layers=2, hot_pages=2, ring_pages=1):
     """StreamingRuntime fields for the copy helpers over a small native pool and a registered host pool."""
     import mmap
     import torch
@@ -209,10 +223,12 @@ def _mini_runtime(page_tokens=32, token_bytes=512, frame_pages=4, slots=2, layer
     ext = kernels()
     rt = StreamingRuntime.__new__(StreamingRuntime)
     rt.ext, rt.page_tokens, rt.token_bytes, rt.hot_pages = ext, page_tokens, token_bytes, hot_pages
-    rt.ring_tokens = page_tokens
+    rt.ring_pages = ring_pages
+    rt.ring_tokens = ring_pages * page_tokens
     rt.plane_stride = page_tokens * token_bytes
     rt.page_stride = 2 * rt.plane_stride + 1024                  # padded native page
-    blocks = 1 + 2 * frame_pages + slots * layers * (hot_pages + 1)
+    owned = hot_pages + ring_pages
+    blocks = 1 + 2 * frame_pages + slots * layers * owned
     backing = torch.zeros(blocks * rt.page_stride, dtype=torch.uint8, device='cuda')
     rt.carve = NS(staging_buffers=2, frame_pages=frame_pages,
                   staging_row=lambda b: list(range(1 + b * frame_pages, 1 + (b + 1) * frame_pages)))
@@ -225,7 +241,7 @@ def _mini_runtime(page_tokens=32, token_bytes=512, frame_pages=4, slots=2, layer
     rt._pool_dev = ext.host_register(host.data_ptr(), host.numel())
     rt.pool_view = ext.device_view(rt._pool_dev, host.numel(), 0)
     first = 1 + 2 * frame_pages
-    rt.hosts = {s: [[first + (s * layers + i) * (hot_pages + 1) + j for j in range(hot_pages + 1)]
+    rt.hosts = {s: [[first + (s * layers + i) * owned + j for j in range(owned)]
                     for i in range(layers)] for s in range(slots)}
     return rt, backing, host
 
@@ -235,19 +251,19 @@ def _page_token(backing, rt, page, plane, token):
     return backing[start:start + rt.token_bytes]
 
 
-def test_host_pool_helpers_and_prefill_staging_fill():
+@pytest.mark.parametrize('ring_pages', (1, 2))
+def test_host_pool_helpers_and_prefill_staging_fill(ring_pages):
     import torch
     from vllm_kvmem.adapters.qsa_stream_runtime import RING_MARGIN
-    rt, backing, host = _mini_runtime()
+    rt, backing, host = _mini_runtime(ring_pages=ring_pages)
     try:
         host.copy_(torch.randint(0, 256, host.shape, dtype=torch.uint8))
         # device_view aliases the host pool.
         assert torch.equal(rt.pool_view[:4096].cpu(), host[:4096])
         slot, index, first, end = 1, 1, 80, 100           # chunk [80, 100) already written to the ring
-        ring = rt.ring_page(slot, index)
         for f in range(end - rt.ring_tokens, end):
             for plane in (0, 1):
-                _page_token(backing, rt, ring, plane, f % rt.page_tokens).random_(0, 256)
+                _page_token(backing, rt, rt.ring_page_at(slot, index, f), plane, f % rt.page_tokens).random_(0, 256)
         torch.cuda.synchronize()
         rt._fill_staging(index, backing, index * rt.layer_bytes, slot, first, end)
         torch.cuda.synchronize()
@@ -262,7 +278,8 @@ def test_host_pool_helpers_and_prefill_staging_fill():
                     start = pool + plane * rt.plane_bytes + f * rt.token_bytes
                     want = host[start:start + rt.token_bytes]
                 else:
-                    want = _page_token(backing, rt, ring, plane, f % rt.page_tokens).cpu()
+                    want = _page_token(backing, rt, rt.ring_page_at(slot, index, f), plane,
+                                       f % rt.page_tokens).cpu()
                 assert torch.equal(got, want), (f, plane)
         # seed_ring: ring <- newest page_tokens frame positions from the pool.
         rt.seed_ring(slot, index, backing, 90)
@@ -270,7 +287,7 @@ def test_host_pool_helpers_and_prefill_staging_fill():
         for f in range(90 - rt.ring_tokens, 90):
             for plane in (0, 1):
                 start = pool + plane * rt.plane_bytes + f * rt.token_bytes
-                got = _page_token(backing, rt, ring, plane, f % rt.page_tokens).cpu()
+                got = _page_token(backing, rt, rt.ring_page_at(slot, index, f), plane, f % rt.page_tokens).cpu()
                 assert torch.equal(got, host[start:start + rt.token_bytes]), (f, plane)
         # pool_layer_views: FP8 page layout over the host pool (written by kernels by device address).
         key, value = rt.pool_layer_views(0, 1, 2, 256)
@@ -282,10 +299,11 @@ def test_host_pool_helpers_and_prefill_staging_fill():
         rt.ext.host_unregister(host.data_ptr())
 
 
-def test_device_stage_fill_matches_the_host_reference():
+@pytest.mark.parametrize('ring_pages', (1, 2))
+def test_device_stage_fill_matches_the_host_reference(ring_pages):
     import torch
     from vllm_kvmem.adapters.qsa_stream_runtime import RING_MARGIN
-    rt, backing, host = _mini_runtime()
+    rt, backing, host = _mini_runtime(ring_pages=ring_pages)
     try:
         host.copy_(torch.randint(0, 256, host.shape, dtype=torch.uint8))
         backing.random_(0, 256)
@@ -322,10 +340,11 @@ def test_device_stage_fill_matches_the_host_reference():
         rt.ext.host_unregister(host.data_ptr())
 
 
-def test_prefetched_pool_plus_ring_only_fill_rebuilds_the_frame():
+@pytest.mark.parametrize('ring_pages', (1, 2))
+def test_prefetched_pool_plus_ring_only_fill_rebuilds_the_frame(ring_pages):
     import torch
     from vllm_kvmem.adapters.qsa_stream_runtime import RING_MARGIN
-    rt, backing, host = _mini_runtime()
+    rt, backing, host = _mini_runtime(ring_pages=ring_pages)
     try:
         host.copy_(torch.randint(0, 256, host.shape, dtype=torch.uint8))
         backing.random_(0, 256)
@@ -352,7 +371,6 @@ def test_prefetched_pool_plus_ring_only_fill_rebuilds_the_frame():
                           rt.page_tokens, rt.token_bytes, RING_MARGIN, stats, 16, True)
         torch.cuda.synchronize()
         ring_start = max(0, end - rt.ring_tokens + RING_MARGIN)
-        ring = rt.ring_page(slot, index)
         pool = slot * rt.slot_bytes + index * rt.layer_bytes
         for f in range(end):
             page, offset = divmod(f, rt.page_tokens)
@@ -362,7 +380,8 @@ def test_prefetched_pool_plus_ring_only_fill_rebuilds_the_frame():
                     start = pool + plane * rt.plane_bytes + f * rt.token_bytes
                     want = host[start:start + rt.token_bytes]
                 else:
-                    want = _page_token(backing, rt, ring, plane, f % rt.page_tokens).cpu()
+                    want = _page_token(backing, rt, rt.ring_page_at(slot, index, f), plane,
+                                       f % rt.page_tokens).cpu()
                 assert torch.equal(got, want), (f, plane)
         assert int(stats[3]) == 0 and rt.prefetch_layers == 1
     finally:

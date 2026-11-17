@@ -98,8 +98,8 @@ def frame_tokens(memory, draft_tokens):
 # ---------------------------------------------------------------------------
 # qsa_streaming: native blocks reserved after the selector carve.
 #
-# Every streaming request owns exactly hot_pages + 1 native pages per QSA layer
-# (hot pages, then the ring page every K/V write lands in); its frame K/V lives
+# Every streaming request owns exactly hot_pages + ring_pages native pages per QSA
+# layer (hot pages, then the ring pages every K/V write lands in); its frame K/V lives
 # in a pinned host pool. Shared, startup-reserved blocks complete the design:
 #
 # - prefill staging: ``staging_buffers`` frame-sized runs of native pages. A
@@ -117,7 +117,7 @@ _DTYPE_BYTES = {'uint8': 1, 'int32': 4, 'int64': 8}
 GROUP_TOKENS = 4
 
 
-def residency_map_plan(*, layers, slots, max_groups, hot_groups, hot_pages, max_rows):
+def residency_map_plan(*, layers, slots, max_groups, hot_groups, hot_pages, max_rows, ring_pages=1):
     """[(key, shape, dtype)] in allocation order; one source for both sides."""
     # Slot masks carry one extra, always-zero entry: a dummy target for rows
     # without a state slot, so masked updates need no host branch.
@@ -128,7 +128,7 @@ def residency_map_plan(*, layers, slots, max_groups, hot_groups, hot_pages, max_
         plan += [((layer, 'group_slot'), (slots, max_groups), 'int32'),
                  ((layer, 'slot_group'), (slots, hot_groups), 'int32'),
                  ((layer, 'referenced'), (slots, hot_groups), 'uint8'),
-                 ((layer, 'hot_page_ids'), (slots, hot_pages + 1), 'int32'),
+                 ((layer, 'hot_page_ids'), (slots, hot_pages + ring_pages), 'int32'),
                  ((layer, 'copy_list'), (slots * hot_groups, 3), 'int32'),
                  ((layer, 'copy_count'), (1,), 'int32')]
     return plan
@@ -156,6 +156,7 @@ class StreamingCarve:
     max_rows: int
     staging_first: int = -1     # set by place_carves
     maps_first: int = -1
+    ring_pages: int = 1
 
     @property
     def native_page_bytes(self):
@@ -206,7 +207,7 @@ class StreamingCarve:
     @property
     def pages_per_request(self):
         """Native pages a streaming request owns in each QSA layer."""
-        return self.hot_pages + 1
+        return self.hot_pages + self.ring_pages
 
     def staging_row(self, buffer):
         if not 0 <= buffer < self.staging_buffers:
@@ -216,20 +217,23 @@ class StreamingCarve:
 
     def map_plan(self):
         return residency_map_plan(layers=self.layers, slots=self.slots, max_groups=self.max_groups,
-                                  hot_groups=self.hot_groups, hot_pages=self.hot_pages, max_rows=self.max_rows)
+                                  hot_groups=self.hot_groups, hot_pages=self.hot_pages, max_rows=self.max_rows,
+                                  ring_pages=self.ring_pages)
 
     def pool_bytes_per_slot(self, token_bytes):
         return self.layers * 2 * self.frame_capacity_tokens * token_bytes
 
     def describe(self):
-        return dict(hot_pages=self.hot_pages, frame_pages=self.frame_pages, staging_buffers=self.staging_buffers,
+        return dict(hot_pages=self.hot_pages, ring_pages=self.ring_pages, frame_pages=self.frame_pages,
+                    staging_buffers=self.staging_buffers,
                     staging_blocks=self.staging_blocks, map_bytes=self.map_bytes, map_blocks=self.map_blocks,
                     first_block=self.first_block, blocks=self.blocks, max_groups=self.max_groups,
                     hot_groups=self.hot_groups, max_rows=self.max_rows)
 
 
-def plan_streaming_carve(selector, *, hot_pages, max_rows, staging_buffers=2):
-    for name, value in (('hot_pages', hot_pages), ('max_rows', max_rows), ('staging_buffers', staging_buffers)):
+def plan_streaming_carve(selector, *, hot_pages, max_rows, staging_buffers=2, ring_pages=1):
+    for name, value in (('hot_pages', hot_pages), ('max_rows', max_rows), ('staging_buffers', staging_buffers),
+                        ('ring_pages', ring_pages)):
         if type(value) is not int or value <= 0:
             raise ValueError(f'QSA streaming carve requires a positive integer {name}')
     if selector.page_tokens % GROUP_TOKENS:
@@ -238,10 +242,10 @@ def plan_streaming_carve(selector, *, hot_pages, max_rows, staging_buffers=2):
     max_groups = frame_pages * selector.page_tokens // GROUP_TOKENS
     hot_groups = hot_pages * selector.page_tokens // GROUP_TOKENS
     plan = residency_map_plan(layers=selector.layers, slots=selector.slots, max_groups=max_groups,
-                              hot_groups=hot_groups, hot_pages=hot_pages, max_rows=max_rows)
+                              hot_groups=hot_groups, hot_pages=hot_pages, max_rows=max_rows, ring_pages=ring_pages)
     return StreamingCarve(selector=selector, hot_pages=hot_pages, frame_pages=frame_pages,
                           staging_buffers=staging_buffers, map_bytes=residency_map_bytes(plan),
-                          max_groups=max_groups, hot_groups=hot_groups, max_rows=max_rows)
+                          max_groups=max_groups, hot_groups=hot_groups, max_rows=max_rows, ring_pages=ring_pages)
 
 
 class MapAllocator:

@@ -1,7 +1,8 @@
 """qsa_streaming worker runtime (Flash Next).
 
-Each streaming request owns ``hot_pages + 1`` native pages per QSA layer: hot
-pages H0..H{h-1}, then the ring page R. Its frame K/V (target and MTP layers)
+Each streaming request owns ``hot_pages + ring_pages`` native pages per QSA
+layer: hot pages H0..H{h-1}, then ring pages R0..R{r-1} (frame column c writes
+to R[c % r], so the ring holds the newest r * page_tokens positions). Its frame K/V (target and MTP layers)
 lives in a pinned host pool, laid out ``[slot][layer][K|V][frame token][bytes]``.
 Selector keys stay resident in carved slot pages (adapters/qsa_streaming.py), so
 QSA's selection never depends on which K/V pages are resident.
@@ -48,6 +49,7 @@ class StreamingRuntime:
         self.options = options
         self.selector = selector
         self.hot_pages = options.qsa_hot_pages
+        self.ring_pages = getattr(options, 'qsa_ring_pages', 1)
         self.layers = list(runner._kvmem_qsa_layers.items())
         self.draft = int(getattr(runner.vllm_config.speculative_config, 'num_speculative_tokens', 0) or 0)
         # A request attends from hot pages only when its step is at most one
@@ -95,7 +97,8 @@ class StreamingRuntime:
         if any(layer.layer_name not in self.group_of for _, layer in self.layers):
             raise ValueError('Every QSA layer needs its own KV cache group')
         carve = self.carve = self.selector.streaming_carve     # placed by the selector binding
-        if carve is None or (carve.hot_pages, carve.max_rows) != (self.hot_pages, self.max_rows):
+        if carve is None or (carve.hot_pages, carve.max_rows, carve.ring_pages) != (
+                self.hot_pages, self.max_rows, self.ring_pages):
             raise RuntimeError('QSA streaming carve was not placed with this runtime geometry')
         layer0 = self.layers[0][1]
         cache = layer0.kv_cache
@@ -110,12 +113,19 @@ class StreamingRuntime:
                 int(cache.stride(1)) * cache.element_size() != self.plane_stride or
                 int(cache.shape[3]) * cache.element_size() != self.token_bytes):
             raise ValueError('QSA streaming requires [pages, 2, page, packed] native caches')
-        self.ring_tokens = self.page_tokens
+        self.ring_tokens = self.ring_pages * self.page_tokens
         self.hot_tokens = carve.hot_pages * self.page_tokens
-        if self.max_rows > self.ring_tokens - RING_MARGIN:
-            # One request's step (prefill chunk or atomic Query replay) must not wrap its ring page.
-            raise ValueError(f'qsa_streaming needs max_num_batched_tokens <= {self.ring_tokens - RING_MARGIN} '
-                             f'(got {self.max_rows}): lower query_replay_budget / prefill_chunk_tokens')
+        # One request's step (prefill chunk or atomic Query replay) must not wrap its
+        # ring. Request planning sizes the batch as the replay budget plus one verify
+        # interval per request; _step_slot also checks every staging step.
+        from ..core import settings as _settings
+        seqs = int(self.runner.vllm_config.scheduler_config.max_num_seqs)
+        per_request = max(self.max_rows - seqs * self.verify_rows,
+                          int(_settings.get('KVMEM_PREFILL_CHUNK_TOKENS', '0') or 0))
+        if per_request > self.ring_tokens - RING_MARGIN:
+            raise ValueError(f'qsa_streaming fits steps of at most {self.ring_tokens - RING_MARGIN} tokens per '
+                             f'request (planned {per_request}): lower query_replay_budget / prefill_chunk_tokens '
+                             f'or raise qsa_ring_pages')
         for _, layer in self.layers:
             other = layer.kv_cache
             if (other.untyped_storage().data_ptr() != cache.untyped_storage().data_ptr() or
@@ -186,7 +196,7 @@ class StreamingRuntime:
         if len(layer_rows) != len(self.layers):
             raise ValueError('QSA streaming admission needs pages for every QSA layer')
         for index, row in enumerate(layer_rows):
-            if len(row) != self.hot_pages + 1 or len(set(row)) != len(row) or min(row) <= 0:
+            if len(row) != self.hot_pages + self.ring_pages or len(set(row)) != len(row) or min(row) <= 0:
                 raise ValueError('A streaming request must own exactly its hot and ring pages')
         self.reset_slot(slot)
         ids = torch.tensor(layer_rows, dtype=torch.int32)
@@ -218,12 +228,18 @@ class StreamingRuntime:
                 return list(self.hosts[slot][index])
         raise KeyError(f'KV group {group_id} is not a QSA layer group')
 
-    def ring_page(self, slot, index):
-        return self.hosts[slot][index][self.hot_pages]
+    def ring_pages_of(self, slot, index):
+        return self.hosts[slot][index][self.hot_pages:]
+
+    def ring_page_at(self, slot, index, position):
+        """The ring page frame position ``position`` is written to."""
+        ring = self.ring_pages_of(slot, index)
+        return ring[(position // self.page_tokens) % len(ring)]
 
     def override_row(self, frame_columns, row, slot, index):
-        """Worker block-table row of QSA layer ``index``: every frame column is the ring page."""
-        return [self.ring_page(slot, index)] * frame_columns
+        """Worker block-table row of QSA layer ``index``: frame column c is ring page c % r."""
+        ring = self.ring_pages_of(slot, index)
+        return [ring[column % len(ring)] for column in range(frame_columns)]
 
     # ----------------------------------------------------------- staged table
     def rewrite_main_table(self, index, metadata, table, slots, num_reqs, reuse=False):
@@ -242,7 +258,7 @@ class StreamingRuntime:
         decode, staging = stream & ~prefill, stream & prefill
         rows = table[:num_reqs]
         hot = self.state[index]['hot_page_ids'][clamped]
-        columns = min(width, self.hot_pages + 1)
+        columns = min(width, self.hot_pages + self.ring_pages)
         decode_rows = torch.full_like(rows, -1)
         decode_rows[:, :columns] = hot[:, :columns]
         run = self.staging_tables[index % self.carve.staging_buffers][:width]
@@ -382,6 +398,8 @@ class StreamingRuntime:
                     slots[slot] = (request_id, count)
         if len(slots) > 1:
             raise RuntimeError('More than one streaming request needs staging in one step')
+        if any(count > self.ring_tokens - RING_MARGIN for _, count in slots.values()):
+            raise RuntimeError('A streaming request step exceeds its write ring (qsa_ring_pages)')
         self.step_slot, self.step_pages = None, self.carve.frame_pages
         if slots:
             self.step_slot, (request_id, count) = slots.popitem()
@@ -475,12 +493,12 @@ class StreamingRuntime:
                 self.ext.memcpy2d(main_base + run[0] * self.page_stride + plane * self.plane_stride,
                                   self.page_stride, pool + plane * self.plane_bytes,
                                   self.plane_stride, self.plane_stride, pages)
-        ring = self.ring_page(slot, index)
         at = ring_start
         while at < end:
             page, offset = divmod(at, self.page_tokens)
             stop = min(end, (page + 1) * self.page_tokens)
             length = (stop - at) * self.token_bytes
+            ring = self.ring_page_at(slot, index, at)
             for plane in (0, 1):
                 self.ext.memcpy2d(main_base + run[page] * self.page_stride + plane * self.plane_stride +
                                   offset * self.token_bytes, length,
@@ -498,8 +516,7 @@ class StreamingRuntime:
         return (key.view(torch.float8_e4m3fn).view(shape), value.view(torch.float8_e4m3fn).view(shape))
 
     def seed_ring(self, slot, index, main, frame_end):
-        """Ring <- the newest page_tokens positions of a freshly assembled frame."""
-        ring = self.ring_page(slot, index)
+        """Ring <- the newest ring_tokens positions of a freshly assembled frame."""
         pool = self._pool_dev + slot * self.slot_bytes + index * self.layer_bytes
         at = max(0, frame_end - self.ring_tokens)
         main_base = main.data_ptr()
@@ -507,6 +524,7 @@ class StreamingRuntime:
             offset = at % self.page_tokens
             stop = min(frame_end, at + self.page_tokens - offset)
             length = (stop - at) * self.token_bytes
+            ring = self.ring_page_at(slot, index, at)
             for plane in (0, 1):
                 self.ext.memcpy2d(main_base + ring * self.page_stride + plane * self.plane_stride +
                                   offset * self.token_bytes, length,

@@ -653,6 +653,11 @@ def main(argv=None):
         profile['tensor_parallel_size'] = args.tensor_parallel_size
     if isinstance(profile.get('kvmem'), dict):
         path = strategy_path(args.layerwise_query_diagnostic)
+        if (profile['kvmem'].get('qsa_split_selector') and not args.layerwise_query_diagnostic and
+                profile['kvmem'].get('strategy_path') == 'layer'):
+            # Flash Next QSA runs its per-layer path inside the synchronous refresh
+            # (serving/qsa_layerwise.py, serving/qsa_pressure.py), chosen by the profile.
+            path = 'layer'
         if profile['kvmem'].get('strategy_path', path) != path:
             raise ValueError('strategy_path=%s contradicts the launch flags (%s path)'
                              % (profile['kvmem']['strategy_path'], path))
@@ -826,7 +831,9 @@ def main(argv=None):
         # Strategy layer: one check of every chosen strategy against the launched path.
         from .capabilities import check as check_capabilities
         plan['strategy'] = check_capabilities(
-            plan['profile']['kvmem'], query_mode=args.layerwise_query_diagnostic,
+            plan['profile']['kvmem'], query_mode=args.layerwise_query_diagnostic or (
+                'qsa' if plan['profile']['kvmem'].get('qsa_split_selector') and
+                plan['profile']['kvmem'].get('strategy_path') == 'layer' else None),
             pressure=args.layerwise_prefill_pressure,
             batch_selection=plan['environment'].get('KVMEM_LAYERWISE_PRESSURE_BATCH_SELECTION') == '1',
             environment=plan['environment'])

@@ -136,6 +136,14 @@ def make_probe_runner(base):
             if qsa:
                 from ..adapters.qsa_streaming import install_qsa_split_selector
                 install_qsa_split_selector(self, options)
+                from .qsa_pressure import enabled as pressure_enabled
+                if pressure_enabled(options):
+                    # strategy_path=layer with the attention or lift scorer: per-layer
+                    # pressure from QSA's sparse-attention mass, after the streaming hook.
+                    from ..adapters.qsa_split import install_split
+                    from .qsa_pressure import QSALayerPressure
+                    self._kvmem_qsa_pressure = QSALayerPressure(self, options)
+                    install_split(self).append(self._kvmem_qsa_pressure.hook)
                 from ..adapters.qsa_trace import install_qsa_trace
                 install_qsa_trace(self)
             self._kvmem_capture_opaque = (install_opaque_capture(self, opaque_fingerprint)
@@ -343,6 +351,10 @@ def make_probe_runner(base):
             if getattr(self, '_kvmem_qsa_stream', None) is not None:
                 from ..adapters.qsa_stream_runtime import before_finish_requests
                 before_finish_requests(self, scheduler_output)
+            pressure = getattr(self, '_kvmem_qsa_pressure', None)
+            if pressure is not None:
+                for request_id in scheduler_output.finished_req_ids:
+                    pressure.retire(request_id)
             result = super().finish_requests(scheduler_output)
             for request_id in scheduler_output.finished_req_ids:
                 self._kvmem_request_generations.pop(request_id, None)
@@ -677,6 +689,9 @@ def make_probe_runner(base):
                 stream = getattr(self, '_kvmem_qsa_stream', None)
                 if stream is not None and stream.carve is not None:
                     stream.begin_step(scheduler_output)
+                pressure = getattr(self, '_kvmem_qsa_pressure', None)
+                if pressure is not None:
+                    pressure.flush()          # the previous step's chunks are complete
             timing = getattr(self, '_kvmem_step_timing', None)
             if (timing is not None and not dummy_run and not is_profile and
                     scheduler_output.total_num_scheduled_tokens and

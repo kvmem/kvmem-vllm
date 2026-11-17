@@ -259,7 +259,7 @@ def install_bounded_target(runner):
                     history,int(batch.prefill_len_np[i]),query)
             # Private forwards overwrite the persistent capture buffers.
             public_queries[request_id] = torch.stack([c.query[begin:end] for c in captured]).clone()
-        layerwise = {}
+        layerwise, layer_pressure = {}, {}
         for request_id, job in jobs.items():
             i, history, query = extents[request_id]
             local_tokens_before = history - runner._kvmem_window_adapter.offsets.get(request_id, 0)
@@ -288,6 +288,15 @@ def install_bounded_target(runner):
                 raise ValueError('Required historical blocks are missing from the durable source')
             if job.command.selection == 'pressure':
                 from .prefill_attention import select_pressure
+                qsa_pressure = getattr(runner, '_kvmem_qsa_pressure', None)
+                if qsa_pressure is not None and history < int(batch.prefill_len_np[i]):
+                    # Per-layer prefill pressure from QSA's sparse-attention mass
+                    # (attention or lift scorer, serving/qsa_pressure.py); each layer
+                    # keeps K of its own window. The global pick stays the native frame.
+                    local = history - runner._kvmem_window_adapter.offsets.get(request_id, 0)
+                    layer_pressure[request_id] = qsa_pressure.select(
+                        request_id, authority, [h.slot for h in mandatory], selected_cfg.select_budget,
+                        history, local)
                 plan = select_pressure(authority,mandatory,max_tokens=selected_cfg.select_budget)
             elif history <= selected_cfg.select_budget:
                 plan = authority.memory.select({})  # Exact all-history bootstrap.
@@ -327,14 +336,17 @@ def install_bounded_target(runner):
                         guided_seconds = time.perf_counter() - guided_started
                 score_query = queries.shape[1]
                 qsa_layers = getattr(runner, '_kvmem_qsa_layers', None)
-                if (getattr(runtime.options, 'qsa_layerwise_query', False) and qsa_layers and
+                if (getattr(runtime.options, 'strategy_path', 'global') == 'layer' and qsa_layers and
                         job.command.selection == 'query'):
-                    # Per-layer MeanK selections from the same probe Queries (serving/qsa_layerwise.py).
+                    # strategy_path=layer on Flash Next: per-layer MeanK selections from the
+                    # same probe Queries, the first KVMEM_LAYERWISE_QUERY_GLOBAL_LAYERS layers
+                    # sharing the global one (serving/qsa_layerwise.py).
+                    from .layerwise_query import query_global_layers
                     from .qsa_layerwise import layer_selections
                     drafts = set(getattr(runner, '_kvmem_mtp_modules', {}))
                     layerwise[request_id] = layer_selections(
                         authority, queries, mandatory, selected_cfg.select_budget, layers=len(qsa_layers),
-                        global_layers=runtime.options.qsa_layerwise_global_layers,
+                        global_layers=query_global_layers(),
                         draft_layers={i for i, name in enumerate(qsa_layers) if name in drafts},
                         draft_selection=runtime.options.qsa_layerwise_mtp)
                 plan = authority.select_for_queries(queries,mandatory,max_tokens=selected_cfg.select_budget)
@@ -345,14 +357,29 @@ def install_bounded_target(runner):
             assembler = NativeWindowAssembler.from_runner(runner, request_id, runtime.names, cfg.block_tokens,
                                                           packed=runtime.options.packed_assembly,
                                                           direct_pinned_reads=runtime.options.direct_pinned_reads)
-            layer_report = {}
+            layer_report, per_layer_records = {}, None
             if request_id in layerwise:
                 from .qsa_layerwise import layer_records
                 global_slots, per_layer, layer_report = layerwise.pop(request_id)
-                assembly = assembler.assemble(authority, plan,
-                                              layer_records=layer_records(authority, plan, global_slots, per_layer))
+                per_layer_records = layer_records(authority, plan, global_slots, per_layer)
+            elif request_id in layer_pressure:
+                from .qsa_layerwise import pressure_layer_records
+                picked, fallback = layer_pressure.pop(request_id)
+                per_layer_records, layer_report = pressure_layer_records(
+                    authority, plan, picked, fallback, draft_layers=qsa_pressure.draft_indices,
+                    draft_selection=runtime.options.qsa_layerwise_mtp,
+                    scorer=getattr(runtime.options, 'strategy_pressure_scorer', 'attention'))
+            if per_layer_records is not None:
+                assembly = assembler.assemble(authority, plan, layer_records=per_layer_records)
             else:
                 assembly = assembler.assemble(authority, plan)
+            qsa_pressure = getattr(runner, '_kvmem_qsa_pressure', None)
+            if qsa_pressure is not None:
+                # Later packets and pressure picks see each layer's own window.
+                if per_layer_records is not None:
+                    qsa_pressure.remember(request_id, per_layer_records, history)
+                else:
+                    qsa_pressure.forget(request_id)
             assembly.event.synchronize()
             authority.memory.attach_completion(assembly)
             assert authority.memory.commit_selection()

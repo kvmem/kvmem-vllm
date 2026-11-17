@@ -260,7 +260,9 @@ __global__ void writeback_kernel(const int32_t* __restrict__ row_request, const 
     int slot = request_slot[request];
     if (slot < 0 || !streaming[slot]) continue;
     int64_t f = query_positions[row];
-    int page = hot_pages[slot * hot_page_columns + ring_column];
+    // Ring pages are the row's columns from ring_column on; frame column c writes to ring page c % r.
+    int ring_pages = hot_page_columns - ring_column;
+    int page = hot_pages[slot * hot_page_columns + ring_column + (int)((f / page_tokens) % ring_pages)];
     const int4* src = reinterpret_cast<const int4*>(cache + page * page_stride + plane * plane_stride +
                                                     (f % page_tokens) * token_bytes);
     int4* dst = reinterpret_cast<int4*>(reinterpret_cast<uint8_t*>(pool_base[slot]) + pool_layer_offset +
@@ -273,7 +275,7 @@ __global__ void writeback_kernel(const int32_t* __restrict__ row_request, const 
 // The staging request is the streaming request with more rows than one verify
 // interval; at most one per step (scheduler.py). Frame tokens [0, end) go to
 // the staging run in page layout: positions below ring_start from the pinned
-// pool, the newest ones from the ring page (pool copies of those may lag).
+// pool, the newest ones from the ring pages (pool copies of those may lag).
 __global__ void stage_fill_kernel(const int32_t* __restrict__ query_start, int requests,
                                   const int64_t* __restrict__ query_positions,
                                   const int32_t* __restrict__ request_slot, const uint8_t* __restrict__ streaming,
@@ -300,13 +302,14 @@ __global__ void stage_fill_kernel(const int32_t* __restrict__ query_start, int r
   if (request < 0 || chosen[1] > 1) return;
   int slot = request_slot[request];
   int64_t end = query_positions[query_start[request + 1] - 1] + 1;
-  int64_t ring_start = end - page_tokens + ring_margin;
+  int ring_pages = hot_page_columns - ring_column;
+  int64_t ring_start = end - (int64_t)ring_pages * page_tokens + ring_margin;
   if (ring_start < 0) ring_start = 0;
   if (end > (int64_t)staging_count * page_tokens) {
     if (blockIdx.x == 0 && threadIdx.x == 0) atomicAdd(&stats->errors, 1ull);
     return;
   }
-  int ring = hot_pages[slot * hot_page_columns + ring_column];
+  const int32_t* ring = hot_pages + (int64_t)slot * hot_page_columns + ring_column;
   const uint8_t* pool = reinterpret_cast<const uint8_t*>(pool_base[slot]) + pool_layer_offset;
   int lane = threadIdx.x & 31;
   int warp = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
@@ -320,7 +323,8 @@ __global__ void stage_fill_kernel(const int32_t* __restrict__ query_start, int r
     int plane = (int)(item & 1);
     const uint8_t* src = f < ring_start
         ? pool + plane * pool_plane_stride + f * token_bytes
-        : cache + (int64_t)ring * page_stride + plane * plane_stride + (f % page_tokens) * token_bytes;
+        : cache + (int64_t)ring[(f / page_tokens) % ring_pages] * page_stride + plane * plane_stride +
+              (f % page_tokens) * token_bytes;
     uint8_t* dst = cache + (int64_t)staging_pages[f / page_tokens] * page_stride + plane * plane_stride +
                    (f % page_tokens) * token_bytes;
     const int4* s4 = reinterpret_cast<const int4*>(src);

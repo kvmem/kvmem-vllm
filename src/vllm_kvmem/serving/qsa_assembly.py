@@ -128,8 +128,9 @@ class QSAWindowAssembler:
         handles = [item[2] for item in items]
         item_groups = [None if item[0] is None else [item[0]] for item in items]
         io = dict(archive_direct_bytes=0, archive_direct_requests=0, archive_direct_wait_s=0.0)
-        direct = getattr(authority.archive, 'direct_reads', False)
-        if direct and getattr(authority.archive, 'layer_major', False):
+        archive = getattr(authority, 'archive', None)
+        direct = getattr(archive, 'direct_reads', False)
+        if direct and getattr(archive, 'layer_major', False):
             # SSD tier, archive_layout=layer: packed per-layer groups, no padding read.
             from .direct_assembly_reads import direct_layer_chunks
             first = self.layers[0]
