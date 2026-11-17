@@ -8,7 +8,7 @@ from types import SimpleNamespace as NS
 import pytest
 import torch
 
-from vllm_kvmem.serving.native_attention import NativeAttentionStats
+from vllm_kvmem.serving.native_attention import NativeAttentionStats, fa2_overlay_capability
 
 pytestmark=pytest.mark.skipif(os.getenv('KVMEM_RUN_GPU_TESTS')!='1',
                             reason='Explicit native static-aligned GPU qualification')
@@ -155,6 +155,8 @@ def test_actual_split_k_uses_static_only_when_page_proves_all_split_boundaries(t
     ('partial','unaligned_logical_segments'),('mixed','noncontiguous_owner_frame'),
     ('small','small_prefill'),('owner','noncontiguous_owner_frame')])
 def test_ineligible_call_keeps_generic_native_scores(tmp_path,case,reason):
+    if fa2_overlay_capability(torch.cuda.get_device_capability()) and case == 'mixed':
+        pytest.skip('decode-prefix rows come from the SM12x XQA producer; an FA2-only GPU (SM80, SM89 opt-in) needs an FA2 decode wrapper for them and declines the whole batch by design')
     qlen=5 if case=='small' else 129
     env=geometry(tmp_path,qlens=(qlen,),lengths=(259,),prefix=3 if case=='mixed' else 0)
     current=plans(env,[[0,qlen-1]],partial=case=='partial',owners=(2,) if case=='owner' else None)

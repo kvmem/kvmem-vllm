@@ -6,7 +6,7 @@ import pytest
 import torch
 
 import test_native_attention_stats_gpu as existing
-from vllm_kvmem.serving.native_attention import NativeAttentionStats
+from vllm_kvmem.serving.native_attention import NativeAttentionStats, fa2_overlay_capability
 
 pytestmark = pytest.mark.skipif(os.getenv('KVMEM_RUN_GPU_TESTS') != '1',
                                reason='Explicit aligned FA2 CUDA qualification')
@@ -113,6 +113,8 @@ def mixed_geometry(tmp_path):
 
 
 def test_mixed_decode_prefix_two_prefill_owners_use_global_requests_mapping(tmp_path):
+    if fa2_overlay_capability(torch.cuda.get_device_capability()):
+        pytest.skip('decode-prefix rows come from the SM12x XQA producer; an FA2-only GPU (SM80, SM89 opt-in) needs an FA2 decode wrapper for them and declines the whole batch by design')
     bank,plans,execute,output=mixed_geometry(tmp_path)
     name='model.layers.3.attn'
     bank.arm(plans)
