@@ -170,3 +170,38 @@ def test_compiled_dflash_keeps_transaction_guards(tmp_path,change,match):
         (cfg['kvmem'] if key in ('async_restore','async_refresh','recent_blocks') else cfg)[key]=value
     with pytest.raises(ValueError,match=match):
         build_launch(cfg,tmp_path,tmp_path/'bad')
+
+
+def _dflash_async(tmp_path):
+    cfg=configured(tmp_path)
+    cfg.update(draft_tokens=1,execution_mode='compiled_graph',experimental_dflash_async_refresh=True)
+    cfg['kvmem'].update(async_refresh=True,async_restore=True,active_resident_pressure_only=False,
+                        active_resident_ttl_ms=0,maintenance_max_steps=8,session_capacity=4,
+                        session_checkpoint_bytes=2**30,rolling_active_window=True,cpu_history_coordination=True,
+                        async_archive_retirement=True,archive_backend='cpu',repository_gc=False,
+                        cpu_read_cache_bytes=8*1024**3,nvme_preallocate=False,nvme_max_bytes=0)
+    return cfg
+
+
+def test_dflash_async_refresh_opt_in_launches_on_the_asynchronous_lifecycle(tmp_path):
+    plan=build_launch(_dflash_async(tmp_path),tmp_path,tmp_path/'async')
+    assert plan['profile']['kvmem']['async_refresh'] and plan['profile']['kvmem']['async_restore']
+    assert plan['environment']['KVMEM_DFLASH_ASYNC_REFRESH']=='1'
+    assert plan['environment']['KVMEM_BOUNDED_DFLASH']=='1'
+    assert build_launch(plan['profile'],tmp_path,tmp_path/'again')['vllm_argv']==plan['vllm_argv']
+    sync=tmp_path/'sync';sync.mkdir()
+    assert 'KVMEM_DFLASH_ASYNC_REFRESH' not in build_launch(configured(sync),sync,sync/'plan')['environment']
+
+
+@pytest.mark.parametrize('change,match',[
+    ({'experimental_dflash_async_refresh':1},'must be boolean'),
+    ({'experimental_dflash_query_planning':False},'query planning'),
+    ({'active_resident_pressure_only':True},'idle active residency'),
+    ({'async_restore':False},'refresh/restore'),
+])
+def test_dflash_async_refresh_opt_in_keeps_its_guards(tmp_path,change,match):
+    cfg=_dflash_async(tmp_path)
+    for key,value in change.items():
+        (cfg['kvmem'] if key in cfg['kvmem'] else cfg)[key]=value
+    with pytest.raises(ValueError,match=match):
+        build_launch(cfg,tmp_path,tmp_path/'bad')

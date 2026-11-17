@@ -111,7 +111,7 @@ class PromptStateAdapter:
                 result[name, 'ssm'] = ssm[rows[0]]
         return result
 
-    def _draft_views(self, request_id, begin, end):
+    def _draft_views(self, request_id, begin, end, *, lease=None):
         if self.contract is not None and self.contract.method == 'mtp':
             if begin != end:
                 raise ValueError('MTP working KV belongs to the immutable window checkpoint')
@@ -133,13 +133,26 @@ class PromptStateAdapter:
         for gid in groups:
             from ..core.native_pages import kernel_block_size, kernel_table
             block_size = kernel_block_size(self.runner, gid)
-            table = kernel_table(self.runner, gid, index)
+            if lease is not None:
+                # Asynchronous import (KVMEM_DFLASH_ASYNC_REFRESH): the fresh allocation
+                # witness holds this group's rows; pages outside the sliding window may
+                # be null, pages inside the restored context may not.
+                rows = lease.group_rows(gid)
+                per_block = len(rows) // len(lease.block_ids[gid])
+                table = torch.tensor(rows, dtype=torch.int64, device=self.runner.device)
+            else:
+                table = kernel_table(self.runner, gid, index)
             count = len(table)
             first, stop = begin // block_size, (end + block_size - 1) // block_size
             if not 0 <= first < stop <= count:
                 raise ValueError('Draft checkpoint context is outside its native page table')
-            with checkpoint_stage(self.runner, 'draft_page_table_gpu_read', sync=True):
-                pages = table[first:stop].cpu().tolist()
+            if lease is not None:
+                pages = list(rows[first:stop])
+                if any(lease.block_ids[gid][row // per_block] == 0 for row in range(first, stop)):
+                    raise ValueError('Draft checkpoint context reaches a null sliding-window page')
+            else:
+                with checkpoint_stage(self.runner, 'draft_page_table_gpu_read', sync=True):
+                    pages = table[first:stop].cpu().tolist()
             if any(p <= 0 for p in pages) or len(set(pages)) != len(pages):
                 raise ValueError('Draft checkpoint has null or aliased context pages')
             logical = torch.arange(begin, end, device=table.device, dtype=torch.int64)
@@ -266,7 +279,9 @@ class PromptStateAdapter:
             raise ValueError('Prompt state belongs to another worker/model load')
         if not snapshot.query():
             raise RuntimeError('Prompt model checkpoint payload is not ready')
-        if lease is not None and self.contract is not None and self.contract.method != 'mtp':
+        from ..core import settings as _settings
+        if (lease is not None and self.contract is not None and self.contract.method != 'mtp' and
+                not (self.contract.method == 'dflash' and _settings.get('KVMEM_DFLASH_ASYNC_REFRESH') == '1')):
             raise ValueError('CPU allocation restore currently supports target-only or native MTP state')
         index = self._prefill_index(request_id, snapshot.position)
         recurrent = self._recurrent_views(request_id, lease=lease) if lease is not None else self._recurrent_views(request_id)
@@ -274,7 +289,7 @@ class PromptStateAdapter:
                           if self.contract and self.contract.method == 'dflash' else snapshot.position)
         if snapshot.draft_begin != expected_begin:
             raise ValueError('Checkpoint draft context differs from the model window')
-        draft = self._draft_views(request_id, snapshot.draft_begin, snapshot.position)
+        draft = self._draft_views(request_id, snapshot.draft_begin, snapshot.position, lease=lease)
         if recurrent.keys() != snapshot.recurrent.keys() or draft.keys() != snapshot.draft.keys():
             raise ValueError('Incomplete prompt model checkpoint')
         # Validate every tensor before the first native state/page write.

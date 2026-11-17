@@ -60,8 +60,11 @@ class KVMemScheduler(Scheduler):
         self._deferred_prefill_validation = options.prefill_deferred_validation
         self.connector.request_plan_memory = options.memory if options.request_planning else None
         self.connector.request_plan_pressure_policy = options.pressure_policy
+        from ..core import settings as _dflash_settings
+        dflash_async = _dflash_settings.get('KVMEM_DFLASH_ASYNC_REFRESH') == '1'
         if options.rolling_active_window and not (self.draft_contract is not None and (
-                self.draft_contract.method == 'mtp' and options.async_refresh and options.async_restore or
+                (self.draft_contract.method == 'mtp' or self.draft_contract.method == 'dflash' and dflash_async)
+                and options.async_refresh and options.async_restore or
                 self.draft_contract.method == 'dflash' and not options.async_refresh and not options.async_restore)):
             raise ValueError('Rolling active window requires asynchronous MTP or '
                              'synchronous DFlash2 accepted-prefix admission')

@@ -25,6 +25,7 @@ DEFAULTS = {
     'verify_session_restore_digest': False,
     'verify_request_swap': False,
     'experimental_dflash_query_planning': False,
+    'experimental_dflash_async_refresh': False,
     'draft_tokens': 7,
     'draft_method': 'dflash',
     'draft_quantization': None,
@@ -140,6 +141,8 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
         raise ValueError('Digest verification requires enabled session restore verification')
     if type(cfg['experimental_dflash_query_planning']) is not bool:
         raise ValueError('experimental_dflash_query_planning must be boolean')
+    if type(cfg['experimental_dflash_async_refresh']) is not bool:
+        raise ValueError('experimental_dflash_async_refresh must be boolean')
     if cfg['draft_method'] not in ('dflash', 'mtp'):
         raise ValueError('draft_method must be dflash or mtp')
     allowed_depths = (1, 3, 7) if cfg['draft_method'] == 'dflash' else (1, 2, 3, 4, 7)
@@ -263,6 +266,17 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
     if cfg['experimental_dflash_query_planning'] and (
             cfg['draft_method'] != 'dflash' or not options.request_planning):
         raise ValueError('experimental_dflash_query_planning requires DFlash2 and request planning')
+    # Opt-in: DFlash2 on the asynchronous refresh/restore lifecycle (the one
+    # layerwise selection runs in). The draft keeps its own sliding pages, so
+    # refreshes change only the target window; session imports restore the
+    # draft's sliding context through the fresh allocation witness. Idle active
+    # residency is not yet qualified with DFlash2.
+    dflash_async = cfg['experimental_dflash_async_refresh']
+    if dflash_async and (cfg['draft_method'] != 'dflash' or not cfg['experimental_dflash_query_planning'] or
+                         not options.async_refresh or not options.async_restore or
+                         options.active_residency_enabled):
+        raise ValueError('experimental_dflash_async_refresh requires DFlash2 query planning, asynchronous '
+                         'refresh/restore and no idle active residency')
     from ..core.options import canonical_policy_payload
     payload = canonical_policy_payload(payload, options)
     cfg['kvmem'] = payload
@@ -280,7 +294,7 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
     if options.active_residency_enabled and cfg['draft_method'] != 'mtp':
         raise ValueError('Idle active residency currently qualifies native Qwen MTP')
     if options.rolling_active_window and not (
-            cfg['draft_method'] == 'mtp' and options.async_refresh and options.async_restore or
+            (cfg['draft_method'] == 'mtp' or dflash_async) and options.async_refresh and options.async_restore or
             cfg['draft_method'] == 'dflash' and cfg['experimental_dflash_query_planning'] and
             not options.async_refresh and not options.async_restore):
         raise ValueError('Rolling active window requires asynchronous native MTP or '
@@ -306,7 +320,7 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
                 raise ValueError('Explicit Query planning currently requires native Qwen MTP; '
                                  'DFlash2 needs explicit experimental opt-in')
             if (cfg['draft_method'] != 'dflash' or cfg['draft_tokens'] not in (1, 3, 7) or cfg['execution_mode'] not in ('full_graph', 'compiled_graph') or
-                    options.async_refresh or options.async_restore or
+                    (not dflash_async and (options.async_refresh or options.async_restore)) or
                     options.memory.recent_blocks * options.memory.block_tokens < 2047):
                 raise ValueError('Experimental DFlash2 planning requires k=1, 3 or 7, FULL graphs or compiled graphs, synchronous '
                                  'refresh/restore and a 2048-token recent band')
@@ -418,6 +432,8 @@ def build_launch(profile, base, run_dir, *, check_paths=True):
         # spellings consistently, before native workers import/init CUDA.
         env['PYTORCH_ALLOC_CONF'] = env['PYTORCH_CUDA_ALLOC_CONF'] = settings
     env['KVMEM_BOUNDED_MTP' if cfg['draft_method'] == 'mtp' else 'KVMEM_BOUNDED_DFLASH'] = '1'
+    if cfg['experimental_dflash_async_refresh']:
+        env['KVMEM_DFLASH_ASYNC_REFRESH'] = '1'
     if cfg['draft_method'] == 'mtp':
         # The DFlash loader patch is unrelated to native MTP and may not exist
         # in otherwise compatible vendor builds.

@@ -527,8 +527,10 @@ def validate_configuration(profile, *, query_mode, optimized, pressure, single_a
         raise ValueError('Layerwise rolling requires rolling request planning and accepted attention')
     if kv.get('pressure_policy') != 'attention' or kv.get('repository_gc', False):
         raise ValueError('Layerwise rolling requires attention pressure and retained CPU history')
-    if profile.get('draft_method', 'mtp') != 'mtp':
-        raise ValueError('Layerwise rolling currently requires the MTP draft contract')
+    if profile.get('draft_method', 'mtp') != 'mtp' and not (
+            profile.get('draft_method') == 'dflash' and profile.get('experimental_dflash_async_refresh')):
+        raise ValueError('Layerwise rolling currently requires the MTP draft contract '
+                         '(DFlash2 needs experimental_dflash_async_refresh)')
     # Opt-in score sources: reject malformed values at launch, not mid-run.
     from types import SimpleNamespace
     scope_options = SimpleNamespace(action_interval=kv.get('action_interval', 16),

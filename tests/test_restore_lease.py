@@ -169,3 +169,33 @@ def test_direct_restore_layer_borrows_leased_view_without_gpu_validation(monkeyp
     with pytest.raises(ValueError, match='no longer leased'):
         window.NativeWindowAssembler((parent.layers[0],), 4, 8, staging=parent.staging,
             borrowed_staging=True, raw_dtype=torch.bfloat16, lease=lease)
+
+
+def test_sliding_group_may_hold_null_pages_only_when_declared():
+    from vllm_kvmem.serving.restore_lease import _blocks
+    blocks = ((2, 3), (0, 0, 6, 7))
+    assert _blocks(blocks, sliding=(1,)) == blocks
+    with pytest.raises(ValueError):
+        _blocks(blocks)                              # the strict rule without a sliding group
+    for bad in (((0, 3), (0, 6)), ((2, 3), (0, 6, 6)), ((2, 3), (0, 0)), ((2, 3), (0, -1))):
+        with pytest.raises(ValueError):
+            _blocks(bad, sliding=(1,))               # null target page, alias, all-null, negative
+
+
+def test_dflash_async_lease_keeps_null_sliding_pages_and_checks_the_command(monkeypatch):
+    from vllm_kvmem.serving import restore_lease
+    runner, _ = allocation()
+    runner.block_tables.num_blocks.np[1, 0] = 4
+    monkeypatch.setattr(restore_lease, 'sliding_groups', lambda _runner: (1,))
+    lease = FreshRestoreLease.capture(runner, 'restore', ((2, 3), (0, 5)))
+    runner._kvmem_restore_allocations['restore'] = lease
+    assert lease.sliding == (1,) and lease.rows == ((2, 3), (0, 1, 10, 11))
+    lease.validate(runner, expected_block_ids=((2, 3), (0, 5)))
+    with pytest.raises(ValueError, match='native allocation witness'):
+        lease.validate(runner, expected_block_ids=((2, 3), (5, 0)))
+
+
+def test_sliding_groups_require_the_dflash_async_opt_in(monkeypatch):
+    from vllm_kvmem.serving.restore_lease import sliding_groups
+    monkeypatch.delenv('KVMEM_DFLASH_ASYNC_REFRESH', raising=False)
+    assert sliding_groups(SimpleNamespace()) == ()

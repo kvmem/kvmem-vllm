@@ -98,9 +98,11 @@ def make_probe_runner(base):
                 if self._kvmem_native_compilation:
                     method = getattr(self.speculative_config, 'method', None)
                     if method == 'dflash':
+                        dflash_async = _settings.get('KVMEM_DFLASH_ASYNC_REFRESH') == '1'
                         if (self.speculative_config.num_speculative_tokens != 1 or
-                                not options.request_planning or options.async_refresh or
-                                options.async_restore or options.capture_opaque_projection or
+                                not options.request_planning or
+                                (not dflash_async and (options.async_refresh or options.async_restore)) or
+                                options.capture_opaque_projection or
                                 options.memory.recent_blocks * options.memory.block_tokens < 2048):
                             raise ValueError('Compiled DFlash2 requires k=1, synchronous planned '
                                              'capture and a 2048-token recent band')

@@ -69,8 +69,10 @@ def install_bounded_target(runner):
     # Private read transactions must bypass the public refresh-job wrapper.
     runner._kvmem_private_forward = runner.model.forward
     if options.async_refresh:
-        if getattr(runner.speculative_config, 'method', None) != 'mtp':
-            raise ValueError('Asynchronous refresh currently qualifies native Qwen MTP')
+        method = getattr(runner.speculative_config, 'method', None)
+        if method != 'mtp' and not (method == 'dflash' and _settings.get('KVMEM_DFLASH_ASYNC_REFRESH') == '1'):
+            raise ValueError('Asynchronous refresh currently qualifies native Qwen MTP '
+                             '(DFlash2 needs experimental_dflash_async_refresh)')
         from .async_refresh import AsyncRefresh
         runner._kvmem_async_refresh = AsyncRefresh(runner, options)
         runner._kvmem_query_refresh = runner._kvmem_async_refresh.enqueue
