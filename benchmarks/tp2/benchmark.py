@@ -363,8 +363,10 @@ def main():
         kv['action_native_max_bytes']=args.native_max_mib*2**20
     if args.native_verify:
         # Verify mode also runs the reference scorer; features that consume native
-        # scores in place of it (prefill action before MTP) require reuse mode.
-        kv.update(action_native_scores='verify',prefill_action_before_mtp=False)
+        # scores in place of it (prefill action before MTP, physical prefill
+        # coalescing and its plan arm) require reuse mode.
+        kv.update(action_native_scores='verify',prefill_action_before_mtp=False,prefill_physical_coalescing=False,
+                  prefill_native_plan_arm=False,prefill_physical_graphless=False,prefill_physical_multi_owner=False)
     if args.eager:
         kv.update(capture_opaque_projection=False,query_replay_backend='eager',query_replay_cobatch=False)
     profile.update(draft_method=args.draft_method,
