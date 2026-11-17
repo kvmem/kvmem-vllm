@@ -28,6 +28,20 @@ TOKENIZER = MODEL
 CUDA = os.environ.get('BENCH_CUDA_HOME', '/root/blockdata/cuda13.0/nvidia/cu13')
 HOST_CC = os.environ.get('BENCH_CC', '/usr/bin/gcc-11')
 HOST_CXX = os.environ.get('BENCH_CXX', '/usr/bin/g++-11')
+
+
+def cuda_arch():
+    """TORCH_CUDA_ARCH_LIST for JIT builds: BENCH_CUDA_ARCH, else the GPUs' compute capability
+    (8.0 on the A800, 8.9 on the RTX 4090), else 8.0."""
+    value = os.environ.get('BENCH_CUDA_ARCH')
+    if value:
+        return value
+    try:
+        caps = subprocess.run(['nvidia-smi', '--query-gpu=compute_cap', '--format=csv,noheader'],
+                              capture_output=True, text=True, timeout=30).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        caps = []
+    return caps[0] if caps and len(set(caps)) == 1 else '8.0'
 PORT = 18977
 
 
@@ -389,7 +403,7 @@ def main():
         NVCC_CCBIN=HOST_CXX,
         PATH=str(BASE/'venv/bin')+':'+CUDA+'/bin:'+env.get('PATH',''),
         CPATH=CUDA+'/include/cccl',LD_LIBRARY_PATH=CUDA+'/lib64:'+env.get('LD_LIBRARY_PATH',''),
-        TORCH_CUDA_ARCH_LIST='8.0',TRITON_PTXAS_PATH=CUDA+'/bin/ptxas',
+        TORCH_CUDA_ARCH_LIST=cuda_arch(),TRITON_PTXAS_PATH=CUDA+'/bin/ptxas',
         VLLM_CACHE_ROOT=str(BASE/'cache/vllm'),FLASHINFER_WORKSPACE_BASE=str(BASE/'cache/flashinfer'),
         TORCH_EXTENSIONS_DIR=str(BASE/'cache/extensions'),TRITON_CACHE_DIR=str(BASE/'cache/triton'),
         TORCHINDUCTOR_CACHE_DIR=str(BASE/'cache/inductor'),MAX_JOBS='4',FLASHINFER_NVCC_THREADS='1',

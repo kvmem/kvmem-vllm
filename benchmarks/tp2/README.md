@@ -3,7 +3,9 @@
 The harness behind the 16 × 32K tensor-parallel decode measurement: 718.1 decode tokens/s on
 2×A800-80GB at commit aac5998, DFlash2 + combined layerwise selection, K=128K / G=32K.
 It is the A800 copy that produced that result, except that the CUDA toolkit and host compiler
-paths can be overridden (`BENCH_CUDA_HOME`, `BENCH_CC`, `BENCH_CXX`).
+paths can be overridden (`BENCH_CUDA_HOME`, `BENCH_CC`, `BENCH_CXX`) and the CUDA
+architecture for JIT builds is detected from the GPUs (`BENCH_CUDA_ARCH` overrides it), so the
+same harness runs on the 2×RTX 4090 host (sm89).
 
 ## Base directory
 
