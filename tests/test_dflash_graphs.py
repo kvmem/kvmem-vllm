@@ -30,3 +30,68 @@ def test_independent_policy_preserves_native_backend_checks(monkeypatch,target,s
     assert seen==[(expected,2)]
     with pytest.raises(ValueError,match="already installed"):
         install_independent_draft_graphs(runner)
+
+
+def test_deferred_capture_submit_runs_after_the_draft_and_falls_back(monkeypatch):
+    from types import SimpleNamespace
+    from vllm_kvmem.adapters import draft_graphs
+    order = []
+    runtime = SimpleNamespace(submit=lambda *args: order.append(('submit', args)))
+    speculator = SimpleNamespace(propose=lambda *args, **kwargs: order.append(('draft', args)) or 'drafts')
+    runner = SimpleNamespace(speculator=speculator, _kvmem_capture_runtime=runtime)
+    draft_graphs.install_deferred_capture_submit(runner)
+    assert runner._kvmem_defer_dflash_submit
+    runner._kvmem_deferred_submit = ('captured', 'batch', 'rejected')
+    assert speculator.propose('inputs') == 'drafts'
+    assert order == [('draft', ('inputs',)), ('submit', ('captured', 'batch', 'rejected'))]
+    assert runner._kvmem_deferred_submit is None
+    assert not draft_graphs.flush_deferred_submit(runner)        # nothing waiting
+    runner._kvmem_deferred_submit = ('c2', 'b2', 'r2')            # a step without a proposal
+    assert draft_graphs.flush_deferred_submit(runner)
+    assert order[-1] == ('submit', ('c2', 'b2', 'r2'))
+    assert runner._kvmem_deferred_submit_counts == {'after_draft': 1, 'fallback': 1}
+    with pytest.raises(ValueError):
+        draft_graphs.install_deferred_capture_submit(runner)
+
+
+def test_deferred_capture_submit_flag_is_validated(monkeypatch):
+    from vllm_kvmem.adapters.draft_graphs import deferred_submit_enabled
+    monkeypatch.setenv('KVMEM_DFLASH_SUBMIT_AFTER_DRAFT', 'yes')
+    with pytest.raises(ValueError):
+        deferred_submit_enabled()
+
+
+def test_staged_capture_runs_before_the_draft_and_submits_after(monkeypatch):
+    from types import SimpleNamespace
+    from vllm_kvmem.adapters import draft_graphs
+    monkeypatch.setenv('KVMEM_DFLASH_STAGE_BEFORE_DRAFT', '1')
+    order = []
+    action = SimpleNamespace(stage_before_mtp=lambda captured, batch: order.append(('stage', captured, batch)) or True,
+                             _mtp_capture_frame=None, cancel_before_mtp=lambda: order.append('cancel'))
+    runtime = SimpleNamespace(submit=lambda *args: order.append(('submit', args)), action=action,
+                              quarantine_publication=lambda error: order.append(('quarantine', str(error))))
+    speculator = SimpleNamespace(propose=lambda *a, **k: order.append('draft') or 'drafts')
+    runner = SimpleNamespace(speculator=speculator, _kvmem_capture_runtime=runtime)
+    draft_graphs.install_deferred_capture_submit(runner)
+    runner._kvmem_deferred_submit = ('cap', 'batch', 'rej')
+    assert speculator.propose() == 'drafts'
+    assert order == [('stage', 'cap', 'batch'), 'draft', ('submit', ('cap', 'batch', 'rej'))]
+
+
+def test_failed_draft_after_staging_quarantines_publication(monkeypatch):
+    from types import SimpleNamespace
+    from vllm_kvmem.adapters import draft_graphs
+    monkeypatch.setenv('KVMEM_DFLASH_STAGE_BEFORE_DRAFT', '1')
+    order = []
+    action = SimpleNamespace(stage_before_mtp=lambda *a: True, _mtp_capture_frame=None,
+                             cancel_before_mtp=lambda: order.append('cancel'))
+    runtime = SimpleNamespace(submit=lambda *a: order.append('submit'), action=action,
+                              quarantine_publication=lambda error: order.append(('quarantine', str(error))))
+    def broken(*a, **k):
+        raise RuntimeError('draft failed')
+    runner = SimpleNamespace(speculator=SimpleNamespace(propose=broken), _kvmem_capture_runtime=runtime)
+    draft_graphs.install_deferred_capture_submit(runner)
+    runner._kvmem_deferred_submit = ('cap', 'batch', 'rej')
+    with pytest.raises(RuntimeError, match='draft failed'):
+        runner.speculator.propose()
+    assert order == [('quarantine', 'draft failed'), 'cancel'] and runner._kvmem_deferred_submit is None

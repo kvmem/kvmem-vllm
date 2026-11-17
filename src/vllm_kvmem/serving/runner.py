@@ -106,8 +106,11 @@ def make_probe_runner(base):
                                 options.memory.recent_blocks * options.memory.block_tokens < 2048):
                             raise ValueError('Compiled DFlash2 requires k=1, synchronous planned '
                                              'capture and a 2048-token recent band')
-                        from ..adapters.draft_graphs import install_independent_draft_graphs
+                        from ..adapters.draft_graphs import (install_independent_draft_graphs,
+                                                             deferred_submit_enabled, install_deferred_capture_submit)
                         install_independent_draft_graphs(self)
+                        if deferred_submit_enabled():
+                            install_deferred_capture_submit(self)
                     elif method != 'mtp':
                         raise ValueError('Compiled KVMem capture requires native Qwen MTP or DFlash2')
             self._kvmem_layers = install_qwen_capture(self.model)
@@ -498,6 +501,13 @@ def make_probe_runner(base):
                     # MTP's authoritative shifted-token prefix is produced by
                     # propose after sampling; publish both layers together.
                     self._kvmem_mtp_rejected = result[2]
+                elif getattr(self, '_kvmem_defer_dflash_submit', False):
+                    # Opt-in KVMEM_DFLASH_SUBMIT_AFTER_DRAFT: submitted right after
+                    # the draft is enqueued (adapters/draft_graphs.py).
+                    if getattr(self, '_kvmem_deferred_submit', None) is not None:
+                        raise RuntimeError('A deferred DFlash2 capture submission was never flushed')
+                    self._kvmem_deferred_submit = (captured, input_batch, result[2])
+                    self._kvmem_pending_capture = None
                 else:
                     self._kvmem_capture_runtime.submit(captured, input_batch, result[2])
                     self._kvmem_pending_capture = None
@@ -510,6 +520,10 @@ def make_probe_runner(base):
                 gil_gate.open()     # the engine now blocks on the GPU's results
             try:
                 result = super().sample_tokens(grammar_output)
+                if getattr(self, '_kvmem_deferred_submit', None) is not None:
+                    # A step that ran no proposal still submits before returning.
+                    from ..adapters.draft_graphs import flush_deferred_submit
+                    flush_deferred_submit(self)
             finally:
                 if gil_gate is not None:
                     gil_gate.end_step()  # update and schedule; reopens itself if idle
