@@ -50,6 +50,26 @@ def _write(path, value):
             tmp.unlink(missing_ok=True)
 
 
+def _publish_tree(source, path):
+    """Copy a directory into a shared cache once; concurrent TP workers may race.
+
+    The copy is built privately and published with one rename, so nobody sees a
+    partial tree; a worker that loses the rename discards its own copy.
+    """
+    if path.is_dir():
+        return
+    staging = Path(tempfile.mkdtemp(dir=path.parent, prefix='.' + path.name + '-'))
+    try:
+        shutil.copytree(source, staging, dirs_exist_ok=True)
+        try:
+            os.rename(staging, path)
+        except OSError:
+            if not path.is_dir():
+                raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def patch_xqa(source, name):
     """Extend the native ABI all the way to its existing post-QK accumulator."""
     if name == 'mha.cu':
@@ -223,8 +243,7 @@ def source_overlay(directory, *, prefill_cta_gate=False, prefill_static_aligned=
     target = env.FLASHINFER_GEN_SRC_DIR / 'kvmem_stats' / digest.hexdigest()[:16]
     target.mkdir(parents=True, exist_ok=True)
     xqa = target / 'xqa'
-    if not xqa.exists():
-        shutil.copytree(roots['csrc'] / 'xqa', xqa)
+    _publish_tree(roots['csrc'] / 'xqa', xqa)
     for name in ('mha.cu', 'mha.h', 'xqa_wrapper.cu'):
         _write(xqa / name, patch_xqa((roots['csrc'] / 'xqa' / name).read_text(), name))
     name = 'flashinfer_xqa_binding.cu'

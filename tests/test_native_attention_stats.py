@@ -180,3 +180,36 @@ def test_canonical_segments_bound_repeated_page_fragments_without_changing_mass_
     from vllm_kvmem.serving.native_attention_planning import canonical_segments
     result=canonical_segments([0,32,64],[32,32,7],[0,0,0],71,32)
     assert result.tolist()==[[0,32,0],[32,32,0],[64,7,0]]
+
+
+def test_overlay_tree_publication_survives_concurrent_tp_workers(tmp_path):
+    """Both TP ranks build the same content-addressed overlay on a fresh cache."""
+    import threading
+    from vllm_kvmem.serving.native_attention_build import _publish_tree
+    source = tmp_path / 'xqa-src'
+    (source / 'nested').mkdir(parents=True)
+    for i in range(64):
+        (source / f'f{i}.cu').write_text(str(i) * 1000)
+    (source / 'nested' / 'h.h').write_text('header')
+    target = tmp_path / 'cache' / 'xqa'
+    target.parent.mkdir()
+    barrier, errors = threading.Barrier(8), []
+
+    def worker():
+        try:
+            barrier.wait()
+            _publish_tree(source, target)
+        except BaseException as error:    # pragma: no cover - reported below
+            errors.append(error)
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors
+    assert sorted(p.name for p in target.iterdir()) == sorted(p.name for p in source.iterdir())
+    assert all((target / f'f{i}.cu').read_text() == str(i) * 1000 for i in range(64))
+    assert (target / 'nested' / 'h.h').read_text() == 'header'
+    # No private staging copy is left behind, and a second call is a no-op.
+    assert [p.name for p in target.parent.iterdir()] == ['xqa']
+    _publish_tree(source, target)

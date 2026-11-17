@@ -448,6 +448,16 @@ class NativeAttentionStats:
         self.host_bytes = sum(math.prod(shapes[field][0])*4 for field in host_fields)
         self.allocated_bytes += self.host_bytes
         if self.allocated_bytes > options.action_native_max_bytes:
+            if (self.mode == 'reuse' and getattr(options, 'prefill_native_plan_arm', False) and
+                    getattr(options, 'prefill_physical_coalescing', False)):
+                # Logical prefill groups have no fallback when the overlay is
+                # available but too large (only an unsupported platform uses the
+                # portable scorer), so the first prefill would fail. Say so now.
+                raise ValueError(
+                    f'Native prefill scores need {self.allocated_bytes} bytes for {len(layers)} layers x '
+                    f'{self.max_rows} rows x {self.heads} heads x width {self.width}, above '
+                    f'action_native_max_bytes={options.action_native_max_bytes}; raise action_native_max_bytes '
+                    'or turn off prefill_physical_coalescing')
             self.disabled = 'startup_buffer_capacity'
             self.allocated_bytes = 0
             self.gpu_bytes = self.host_bytes = 0
