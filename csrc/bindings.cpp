@@ -2849,6 +2849,7 @@ PYBIND11_MODULE(_native, m) {
             HSTAT(thinking_classified); HSTAT(thinking_pure);
             HSTAT(shared_marked); HSTAT(shared_released);
             HSTAT(thinking_age_retired); HSTAT(thinking_age_ineligible); HSTAT(thinking_age_protected);
+            HSTAT(thinking_age_passes); HSTAT(thinking_turns);
 #undef HSTAT
             return result;
         });

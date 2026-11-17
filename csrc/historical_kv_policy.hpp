@@ -49,6 +49,8 @@ struct HistoricalPressure {
     // Assistant messages complete in this scope's accepted history (from the
     // session's exact message boundaries). Not a capacity signal.
     uint64_t thinking_turns = 0;
+    // Pure-thinking records classified so far in this scope (monotonic).
+    uint64_t thinking_pure = 0;
     uint64_t scope_cpu_bytes = 0, scope_cpu_limit = UINT64_MAX, scope_pending_cpu_bytes = 0;
     // Shared prefixes: the part of scope_cpu_bytes held in shared payloads. The
     // scope's byte budget applies to its private bytes only.

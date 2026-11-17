@@ -23,7 +23,7 @@ using Payload = HistoricalPayloadArena;
     X(policy_failures) X(shadow_decisions) X(admission_attempts) X(admission_retries) \
     X(redundancy_retired) X(lossy_retired) X(rejected_ineligible) X(cancelled_decisions) \
     X(lru_fallback_retired) X(lru_representative_retired) X(thinking_classified) X(thinking_pure) \
-    X(shared_marked) X(shared_released) X(thinking_age_retired) X(thinking_age_ineligible) X(thinking_age_protected)
+    X(shared_marked) X(shared_released) X(thinking_age_retired) X(thinking_age_ineligible) X(thinking_age_protected) X(thinking_age_passes) X(thinking_turns)
 
 struct AtomicStats {
 #define FIELD(name) std::atomic<uint64_t> name{0};
@@ -494,6 +494,7 @@ struct HistoricalScopeState {
         result.pending_cpu_bytes = global_pending;
         result.requested_ready_slots = requested_ready.load(std::memory_order_acquire);
         result.thinking_turns = thinking_turns.load(std::memory_order_acquire);
+        result.thinking_pure = stats.thinking_pure.load(std::memory_order_relaxed);
         const auto shared_released = stats.shared_released.load(std::memory_order_relaxed);
         result.scope_cpu_bytes = (stats.published.load(std::memory_order_relaxed) -
                                   stats.cpu_released.load(std::memory_order_relaxed) - shared_released) *
@@ -729,8 +730,10 @@ struct HistoricalScopeState {
                                              {config.scan_blocks, config.delete_blocks}, batch);
             stats.examined.fetch_add(result.examined, std::memory_order_relaxed);
             stats.decisions.fetch_add(result.emitted, std::memory_order_relaxed);
-            if (result.thinking_age_protected >= 0)
+            if (result.thinking_age_protected >= 0) {
                 stats.thinking_age_protected.store(uint64_t(result.thinking_age_protected), std::memory_order_relaxed);
+                stats.thinking_age_passes.fetch_add(1, std::memory_order_relaxed);
+            }
             policy_round_done = result.status == HistoricalPolicyStatus::Complete ||
                                 result.status == HistoricalPolicyStatus::NoCandidate;
             if (!batch.empty()) {
@@ -1275,7 +1278,9 @@ bool HistoricalGcScope::publish_thinking(const Repo::Lease &lease, uint32_t thin
     return true;
 }
 void HistoricalGcScope::publish_turns(uint64_t completed) {
-    if (state_) state_->thinking_turns.store(completed, std::memory_order_release);
+    if (!state_) return;
+    state_->thinking_turns.store(completed, std::memory_order_release);
+    state_->stats.thinking_turns.store(completed, std::memory_order_relaxed);
 }
 uint64_t HistoricalGcScope::begin_question(uint64_t expected_tokens) {
     if (!state_ || state_->closing.load(std::memory_order_acquire) || !state_->features) return 0;

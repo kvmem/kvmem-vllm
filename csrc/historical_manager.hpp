@@ -43,6 +43,8 @@ struct HistoricalGcStats {
     // (a gauge from the last pass) old thinking left in place because the
     // current window, recent range or a hold protected it. Retried each turn.
     uint64_t thinking_age_retired = 0, thinking_age_ineligible = 0, thinking_age_protected = 0;
+    // Completed age passes, and the session's last published completed turns (a gauge).
+    uint64_t thinking_age_passes = 0, thinking_turns = 0;
 };
 
 struct HistoricalStorageStats {

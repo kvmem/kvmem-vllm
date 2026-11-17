@@ -36,7 +36,7 @@ public:
         taken_.clear();
         filtered_.blocks.clear();
         inner_snapshot_ = nullptr;
-        incarnation_ = round_ = round_turns_ = turns_ = scanned_turns_ = 0;
+        incarnation_ = round_ = round_turns_ = turns_ = scanned_turns_ = round_pure_ = scanned_pure_ = 0;
     }
     void bind_features(std::shared_ptr<const HistoricalFeatureSource> features) override {
         inner_->bind_features(std::move(features));
@@ -47,9 +47,12 @@ public:
     bool wants_snapshot(const HistoricalPressure &pressure) override {
         turns_ = pressure.thinking_turns;
         inner_round_ = inner_->wants_snapshot(pressure);
-        // One proactive pass per newly completed turn. It also retries records
-        // that the current window or recent range protected last time.
-        return inner_round_ || (armed(turns_) && turns_ != scanned_turns_);
+        // A pass per newly completed turn; it also retries records that the
+        // current window or recent range protected last time. Records keep
+        // arriving after the turn count (a long prefill, asynchronous
+        // archiving), so newly classified thinking re-arms it in batches.
+        return inner_round_ || (armed(turns_) && (turns_ != scanned_turns_ ||
+            pressure.thinking_pure >= scanned_pure_ + rescan_records));
     }
     bool permits_pressure(const HistoricalPressure &pressure) override {
         turns_ = pressure.thinking_turns;
@@ -75,6 +78,7 @@ public:
             incarnation_ = snapshot.incarnation;
             round_ = snapshot.round;
             round_turns_ = pressure.thinking_turns;
+            round_pure_ = pressure.thinking_pure;
             age_active_ = armed(round_turns_);
             cursor_ = protected_ = 0;
             taken_.clear();
@@ -106,6 +110,7 @@ public:
         if (age_active_) {
             age_active_ = false;
             scanned_turns_ = round_turns_;
+            scanned_pure_ = round_pure_;
             reported = static_cast<int64_t>(protected_);
         }
         if (!inner_round_) {
@@ -154,7 +159,10 @@ private:
     std::vector<qw3::KvMemBlockHandle> taken_;
     HistoricalSnapshot filtered_;
     const HistoricalSnapshot *inner_snapshot_ = nullptr;
+    // 64 records = 2,048 tokens of new thinking at 32-token records.
+    static constexpr uint64_t rescan_records = 64;
     uint64_t incarnation_ = 0, round_ = 0, round_turns_ = 0, turns_ = 0, scanned_turns_ = 0;
+    uint64_t round_pure_ = 0, scanned_pure_ = 0;
     bool initialized_ = false, age_active_ = false, inner_round_ = false, age_batch_ = false;
 };
 

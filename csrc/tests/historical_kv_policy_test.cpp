@@ -339,6 +339,10 @@ static void thinking_age_retires_old_pure_thinking_without_pressure() {
     check(done.status == HistoricalPolicyStatus::Complete && batch.empty() && done.thinking_age_protected == 1,
           "calm round did not end after the age pass, or missed the protected record");
     check(!policy->wants_snapshot(calm), "unchanged turn count rescanned without pressure");
+    calm.thinking_pure = 63;
+    check(!policy->wants_snapshot(calm), "a few new thinking records started a pass");
+    calm.thinking_pure = 64;
+    check(policy->wants_snapshot(calm), "64 newly classified thinking records did not re-arm the age pass");
 
     // Under capacity pressure the wrapped policy still runs after the age pass.
     snapshot.round = 2;
