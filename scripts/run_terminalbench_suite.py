@@ -248,7 +248,7 @@ def prepare(root, dataset, reuse_images_from=None, agent_time_limit='relaxed', d
             profile_path=None, task_names=None, query_mode='task', trial_concurrency=None,
             container_memory_admission_bytes=DEFAULT_CONTAINER_MEMORY_BYTES):
     validate_memory_budget(container_memory_admission_bytes,total=psutil.virtual_memory().total)
-    if agent_time_limit not in ('none', 'official', 'relaxed'):
+    if agent_time_limit not in ('none', 'official', 'relaxed', 'fixed'):
         raise ValueError('Unknown Agent time limit policy')
     if root.exists():raise ValueError('New root required')
     source = REPO/'artifacts/rolling-long-output-20261026-r1'
@@ -370,6 +370,7 @@ def prepare(root, dataset, reuse_images_from=None, agent_time_limit='relaxed', d
                'Verified task Query metadata and bounded duplex recorder; complete messages unchanged',
                {'none': 'Agent execution has no wall-clock limit; custom local evaluation',
                 'relaxed': 'Agent deadlines are 2x official; recorded pauses excluded; custom local evaluation',
+                'fixed': 'Every task has a 1-hour Agent wall-clock deadline; custom local evaluation',
                 'official': 'Official Agent deadlines retained'}[agent_time_limit],
                'Verifier/setup/tool timeouts retained; smoke Agent deadline remains 300 seconds',
                'No automatic summarization; retain reasoning across turns for exact token history',
@@ -576,7 +577,7 @@ if __name__=='__main__':
     p.add_argument('--dataset',type=Path)
     p.add_argument('--reuse-images-from',type=Path)
     p.add_argument('--download-cache',type=Path,help='Verified public uv/Python archive cache')
-    p.add_argument('--agent-time-limit',choices=['none','official','relaxed'],default='relaxed',
+    p.add_argument('--agent-time-limit',choices=['none','official','relaxed','fixed'],default='relaxed',
                    help='Default: relaxed (2x official Agent limits, recorded pauses excluded); verifier/setup unchanged')
     p.add_argument('--profile',type=Path,help='Model and GC configuration to freeze')
     p.add_argument('--tasks',nargs='+',help='Explicit official task subset; omitted runs all 89')

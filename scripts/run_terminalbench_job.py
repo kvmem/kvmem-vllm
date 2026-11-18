@@ -146,7 +146,8 @@ async def run(root, config_path):
         if any(not path.resolve().is_relative_to(root.resolve()) for path in bundles.values()):
             raise ValueError('Dependency bundle outside frozen experiment')
         install(root/(config.job_name+'-harness.jsonl'), manifest['harness_repair']['upstream_sources'], bundles,
-                recorder_transport=manifest['harness_repair'].get('recorder_transport', False))
+                recorder_transport=manifest['harness_repair'].get('recorder_transport', False),
+                tool_install_timeout_sec=manifest['harness_repair'].get('tool_install_timeout_sec'))
     job = await Job.create(config)
     expected = 1 if config_path.name.startswith('smoke') else len(manifest.get('launched_task_names', range(89)))
     if len(job) != expected:
