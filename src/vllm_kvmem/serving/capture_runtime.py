@@ -285,12 +285,11 @@ class CaptureRuntime(EarlyCaptureFeedback):
             worker = getattr(self.runner, '_kvmem_request_swap_worker', None)
             return worker.snapshot() if worker is not None else {}
 
-        submit = None
         if lazy_archive_report():
             self._report_writer = LatestReportWriter(self.output)
-            submit = self._report_writer.submit
         self._archive_resource_reporter = ArchiveResourceReporter(
-            self.output, self.archive, checkpoint_sampler=checkpoint_resources, submit=submit)
+            self.output, self.archive, checkpoint_sampler=checkpoint_resources,
+            writer=getattr(self, '_report_writer', None))
 
     def submit(self, captured, batch, rejected):
         self._raise_publication_error()

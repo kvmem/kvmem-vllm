@@ -113,16 +113,20 @@ def test_worker_feedback_continues_while_resource_snapshot_write_is_blocked(tmp_
 
     monkeypatch.setattr(report_writer, 'write_report', slow_write)
     runtime = _runtime(tmp_path, monkeypatch)
+    reporter = runtime._archive_resource_reporter
+    reporter.interval = 0
     try:
         runtime.publication_blocked_requests()
         assert entered.wait(5)
-        runtime._archive_resource_reporter.publish(2, 1, force=True)
+        reporter.publish(2, 1)
         assert not (tmp_path / 'archive_resources.json').exists()
+        release.set()
+        reporter.publish(0, 0, force=True)
+        terminal = json.loads((tmp_path / 'archive_resources.json').read_text())
+        assert (terminal['resource_sample'], terminal['active_requests'], terminal['retiring_requests']) == (3, 0, 0)
     finally:
         release.set()
         runtime._flush_reports()
-    final = json.loads((tmp_path / 'archive_resources.json').read_text())
-    assert (final['resource_sample'], final['active_requests'], final['retiring_requests']) == (2, 2, 1)
 
 
 def test_writer_keeps_the_latest_snapshot_and_reports_errors(tmp_path):
