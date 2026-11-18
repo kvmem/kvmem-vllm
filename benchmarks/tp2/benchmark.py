@@ -293,8 +293,14 @@ def main():
     p.add_argument('--util', type=float, default=.92)
     p.add_argument('--reps', type=int, default=3)
     p.add_argument('--kv-gib', type=float)
-    p.add_argument('--gc', choices=['none','lru','redundancy'], default='none',
-        help='historical GC (delete mode, automatic watermarks); redundancy = agent fixture policy, thinking_only off')
+    p.add_argument('--gc', choices=['none','lru','redundancy','tool_result_age'], default='none',
+        help='historical GC (delete mode, automatic watermarks); redundancy = agent fixture policy, thinking_only off; '
+             'tool_result_age = retire complete tool replies older than --tool-result-age-steps')
+    p.add_argument('--gc-mode', choices=['delete','shadow'], default='delete', help='historical GC mode')
+    p.add_argument('--tool-result-age-steps', type=int, default=12,
+        help='with --gc tool_result_age: complete tool replies each session keeps')
+    p.add_argument('--tool-result-age-lru-fallback', action='store_true',
+        help='with --gc tool_result_age: LRU also retires history under capacity pressure (the 256K cap)')
     p.add_argument('--repository-blocks', type=int, help='per-request retained-history capacity in 32-token blocks')
     p.add_argument('--gc-thinking-only', action='store_true',
         help='with --gc redundancy: keep the agent policy\'s thinking_only (captures accepted thinking labels)')
@@ -368,6 +374,12 @@ def main():
     if args.gc != 'none':
         if args.gc == 'lru':
             gc=dict(mode='delete',policy='lru',policy_params={'keep_mandatory':True},poll_ms=10,scan_blocks=256,delete_blocks=32)
+        elif args.gc == 'tool_result_age':
+            # Same native batching as the lru arm (poll 10 ms, scan 256, delete 32).
+            gc=dict(mode='delete',policy='tool_result_age',
+                    policy_params={'keep_mandatory':True,'tool_result_age_steps':args.tool_result_age_steps,
+                                   'lru_fallback':args.tool_result_age_lru_fallback},
+                    poll_ms=10,scan_blocks=256,delete_blocks=32)
         else:
             # kv.update above already set the fixture's own historical_gc to None: reread it.
             gc=json.loads((BASE/'runtime/benchmarks/gate/agent.json').read_text())['profile']['kvmem']['historical_gc']
@@ -380,6 +392,7 @@ def main():
                 gc['policy_params'].update(thinking_only=False)
                 gc['policy_params'].pop('query_capture_bytes',None)
         gc.pop('ready_low',None); gc.pop('ready_high',None)
+        gc['mode']=args.gc_mode
         kv['historical_gc']=gc
     if args.repository_blocks:
         kv['repository_blocks']=args.repository_blocks
