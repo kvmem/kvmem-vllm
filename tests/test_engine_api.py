@@ -54,14 +54,20 @@ def test_compatibility_adapters_compile_against_upstream():
         compile(patch(source + b'\n# upstream documentation update'), relative, 'exec')
 
 
-def test_native_loader_fix_and_logprob_support_are_preserved():
+@pytest.mark.parametrize('load_config', [
+    'get_draft_load_config(vllm_config)',
+    'get_pp_safe_draft_load_config(get_draft_load_config(vllm_config))',
+])
+def test_native_draft_loader_is_preserved(load_config):
     from vllm_kvmem.adapters.compat import patched_source
-    from vllm_kvmem.adapters.logprob_patch import patch_rejection_source
-    source = b'''def load_dflash_model(target_model, vllm_config):
-    return replace(vllm_config,
-        load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)))
+    source = f'''def load_dflash_model(target_model, vllm_config):
+    return replace(vllm_config, load_config={load_config})
 '''
-    assert patched_source(source) == source.decode()
+    assert patched_source(source.encode()) == source
+
+
+def test_native_logprob_support_is_preserved():
+    from vllm_kvmem.adapters.logprob_patch import patch_rejection_source
     source = (source_root() / 'v1/worker/gpu/spec_decode/rejection_sampler.py').read_bytes()
     patched = patch_rejection_source(source)
     assert patch_rejection_source(patched.encode()) == patched
