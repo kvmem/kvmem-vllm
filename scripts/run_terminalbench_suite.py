@@ -519,6 +519,7 @@ def run(root):
             '--gen-budget',str(profile['kvmem']['gen_budget']),
             '--max-output-tokens',str(plan.get('output_cap',131072)),'--max-sessions',str(plan.get('bridge_max_sessions',BRIDGE_MAX_SESSIONS)),
             '--optimized-handoff',
+            *(['--observation-tool-spans'] if plan.get('observation_tool_spans') else []),
             '--abort-on-disconnect','--progress-interval','2','--release-control-token',conn['control_token'],
             *(['--require-query-provenance'] if plan.get('query_provenance') else [])],
             runtime,direct_environment(q.environment(runtime)),root/'bridge.log',root/'bridge-process.json')

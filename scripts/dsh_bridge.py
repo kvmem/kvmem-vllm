@@ -246,6 +246,25 @@ async def bounded_host_work(slots,function,*values,**kwargs):
         return result
 
 
+def observation_tool_spans(plan):
+    """Opt-in --observation-tool-spans: label every user message after the first as a tool reply.
+
+    Terminus sends terminal output (and its own harness feedback) as user messages.
+    Only KVMem span metadata changes: the first user message (instructions, task and
+    initial screen) stays the root; prompt tokens, the Query span and mandatory parts
+    are unchanged. Applied to the whole span list each turn, so inherited spans keep
+    the same role across a session.
+    """
+    first = True
+    for span in plan.get('kvmem_locality_spans') or ():
+        if span.get('role') == 'user':
+            if first:
+                first = False
+            else:
+                span['role'] = 'tool'
+    return plan
+
+
 def create_app(args,tokenizer):
     output_cap=getattr(args,'max_output_tokens',None)
     if output_cap is not None:
@@ -345,6 +364,7 @@ def create_app(args,tokenizer):
                 # Locality/query coordinates remain available for graph recall;
                 # transport policy explicitly disables all semantic extra pins.
                 plan['kvmem_mandatory_parts']='none';plan['kvmem_mandatory_spans']=[]
+                if getattr(args,'observation_tool_spans',False):observation_tool_spans(plan)
                 first_limit=limit if output_cap is not None else min(limit,args.gen_budget)
                 if len(tokens)+first_limit>args.max_model_len:
                     raise ValueError('Complete history plus output exceeds the logical context limit')
@@ -530,6 +550,8 @@ if __name__=='__main__':
         help='Independent cap for one native request; above G requires rolling_active_window on the backend. Cannot combine with max-output-segments > 1')
     p.add_argument('--require-query-provenance',action='store_true')
     p.add_argument('--optimized-handoff',action='store_true')
+    p.add_argument('--observation-tool-spans',action='store_true',
+        help='Label user messages after the first as tool spans (Terminus terminal output); prompt unchanged')
     p.add_argument('--release-control-token',help='Opt-in local controller token for fenced session release')
     p.add_argument('--abort-on-disconnect',action='store_true',help='Cancel uncommitted native generation when a non-streaming caller disconnects')
     p.add_argument('--progress-interval',type=float,default=0,help='Optional accepted-token progress snapshot interval in seconds')
