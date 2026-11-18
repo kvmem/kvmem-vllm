@@ -335,22 +335,33 @@ def _prepare_batch(histories, pending, accepted, logical, masses):
 _LAYER_MAP_CACHE_LIMIT = 1024
 
 
-def _fused_identities(controller, rid, begin, local, count, starts, counts, batch=False):
+def _fused_identities(controller, rid, begin, local, count, starts, counts, batch=False, authority=None):
     """All layers' identities via the native fused path, or None to run Python.
 
     Equals segment_identities(controller.records(rid, authority, begin, local, layer), ...)
     for every layer; any input the native helper cannot reproduce exactly (including
     every error case) returns None so the original per-layer code runs and raises.
 
-    With ``batch`` the result is (layer-0 list, int64 [layers, columns] array)
-    from one native call, or None to run the per-layer native path.
+    With ``batch`` the result is (layer-0 list, read-only int64 [layers, columns]
+    array). A live window shared by every layer needs just one identity row.
     """
     from .layerwise_pressure import LayerwisePrefillPressure
     if getattr(type(controller), 'records', None) is not LayerwisePrefillPressure.records:
         return None
     frame = controller.resolved_maps(rid)
     if frame is None:
-        return None
+        # Until the first layer-specific selection, every layer reads the
+        # same live working set. Validate its score columns once per packet.
+        if (not batch or authority is None or type(controller) is not LayerwisePrefillPressure
+                or not native_segments_enabled()):
+            return None
+        records = controller._layer_records(frame, authority, begin, local, 0)
+        history = _native.decode_segment_identities(records, begin, local, count, starts, counts, 32)
+        if history is None:
+            return None
+        row = np.asarray(history, dtype=np.int64)
+        row.flags.writeable = False
+        return history, np.broadcast_to(row, (len(controller.names), row.size))
     origin, layers = frame
     cache = controller.__dict__.setdefault('_decode_layer_maps', {})
     if batch:
@@ -396,7 +407,8 @@ def attach_packet(controller, pending, rid, authority, starts, counts, masses):
              else sum(map(int, counts))) - count
     logical = history = None
     if layer_batch_enabled():
-        fused = _fused_identities(controller, rid, begin, local, count, starts, counts, batch=True)
+        fused = _fused_identities(controller, rid, begin, local, count, starts, counts,
+                                  batch=True, authority=authority)
         if fused is not None:
             history, logical = fused
     if logical is None and layer_map_enabled():

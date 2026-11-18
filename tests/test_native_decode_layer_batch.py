@@ -284,6 +284,58 @@ def _pend(begin, count, interval):
               state=NS(options=NS(action_interval=interval, action_commit_max_bytes=CAP)))
 
 
+def test_live_window_shared_identities_keep_separate_layer_scores(monkeypatch):
+    rng = random.Random(12)
+    layers = 4
+    controller, begin, local = _controller(rng, layers=layers, blocks=40)
+    records = controller.maps.pop('r')[1][0]
+    reads = []
+    lookups = []
+    resolve = controller.resolved_maps
+
+    def resolve_once(rid):
+        lookups.append(rid)
+        return resolve(rid)
+
+    monkeypatch.setattr(controller, 'resolved_maps', resolve_once)
+
+    def working_records():
+        reads.append(1)
+        return records
+
+    authority = NS(memory=NS(_store=NS(working_records=working_records)))
+    count = 5
+    starts, counts, _ = columns(rng, records, begin, local, count, 'split')
+    shape = (layers, count, len(starts))
+    masses = np.random.default_rng(4).random(shape)
+    masses = (masses / masses.sum(axis=2, keepdims=True)).astype(np.float32)
+
+    def evaluate(batch):
+        _flags(monkeypatch, batch)
+        monkeypatch.setenv('KVMEM_NATIVE_DECODE_SEGMENTS', '1')
+        monkeypatch.setenv('KVMEM_NATIVE_DECODE_PREPARE_BATCH', '1')
+        controller.decode_histories['r'] = [
+            layerwise_decode.NativeDecodeHistory(_batch().DecodeMassMap.from_dict({}), 0, 0, 0)
+            for _ in range(layers)]
+        reads.clear()
+        lookups.clear()
+        pending = _pend(begin, count, 1)
+        layerwise_decode.attach_packet(controller, pending, 'r', authority, starts, counts, masses)
+        _, staged, _ = layerwise_decode.prepare_accept(controller, pending, 3)
+        return pending, staged, len(reads)
+
+    old, reference, old_reads = evaluate('0')
+    new, staged, new_reads = evaluate('1')
+    assert (old_reads, new_reads) == (layers, 1)
+    assert lookups == ['r']
+    assert old.history == new.history
+    targets = new.layerwise_decode[2]
+    np.testing.assert_array_equal(targets, old.layerwise_decode[2])
+    assert not targets.flags.writeable and targets.strides[0] == 0
+    assert [list(h.mass.items()) for h in staged] == [list(h.mass.items()) for h in reference]
+    assert staged[0].mass != staged[1].mass
+
+
 def _run_chain(seed, interval, steps=30, requests=4, layers=16):
     """Interleaved decode steps of several requests: attach, accept, commit."""
     from vllm_kvmem.serving.layerwise_decode import DecodeHistory

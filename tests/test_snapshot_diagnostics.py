@@ -147,3 +147,42 @@ def test_new_query_shape_is_published_without_waiting_for_period(tmp_path, monke
     scheduler._scheduled_queries['prefill']['64'] = 1
     scheduler._write_scheduled_queries()
     assert json.loads((tmp_path/'scheduled_queries.json').read_text())['queries']['prefill']['64'] == 1
+
+
+def test_periodic_query_counts_do_not_wait_for_disk_and_final_state_is_exact(tmp_path, monkeypatch):
+    import json
+    from threading import Event
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm_kvmem.serving import report_writer
+
+    scheduler, _, _ = make_scheduler(tmp_path, monkeypatch)
+    monkeypatch.setenv('KVMEM_LIFECYCLE_TRACE', '0')
+    monkeypatch.setattr(Scheduler, 'shutdown', lambda self: None)
+    now = [0.]
+    scheduler._snapshot_cadences['queries'] = SnapshotCadence(1., clock=lambda: now[0])
+    scheduler.prefill_decode_burst = True
+    scheduler._burst_stats = {'bursts': 1}
+    scheduler._write_scheduled_queries()
+    write = report_writer.write_report
+    writing, release = Event(), Event()
+    snapshots = []
+
+    def hold_periodic_write(output, name, report, **kwargs):
+        writing.set()
+        assert release.wait(timeout=5)
+        snapshots.append(report)
+        write(output, name, report, **kwargs)
+
+    monkeypatch.setattr(report_writer, 'write_report', hold_periodic_write)
+    now[0] += 1.
+    scheduler._scheduled_queries['decode']['5'] = 2
+    try:
+        scheduler._write_scheduled_queries()
+        assert writing.wait(timeout=5)
+        scheduler._scheduled_queries['decode']['5'] = 3
+        scheduler._burst_stats['bursts'] = 2
+    finally:
+        release.set()
+        scheduler.shutdown()
+    assert [(r['queries']['decode']['5'], r['decode_burst']['bursts']) for r in snapshots] == [(2, 1), (3, 2)]
+    assert json.loads((tmp_path/'scheduled_queries.json').read_text()) == snapshots[-1]
