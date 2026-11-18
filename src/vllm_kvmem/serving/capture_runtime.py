@@ -265,11 +265,6 @@ class CaptureRuntime(EarlyCaptureFeedback):
         self.completed = CompletionHistory(serving=bool(getattr(runner, '_kvmem_serving', False)))
         self.batches = 0
         self._progress_batch = -1
-        def checkpoint_resources():
-            worker = getattr(self.runner, '_kvmem_request_swap_worker', None)
-            return worker.snapshot() if worker is not None else {}
-        self._archive_resource_reporter = ArchiveResourceReporter(
-            self.output, self.archive, checkpoint_sampler=checkpoint_resources)
         self.retiring = {}
         self.retirement = None
         if self.options.async_archive_retirement:
@@ -285,6 +280,16 @@ class CaptureRuntime(EarlyCaptureFeedback):
         if getattr(self.options, 'graph_mode', 'off') != 'off':
             from .block_graph import GraphBudget
             self.block_graph_budget = GraphBudget(self.options.graph_max_total_bytes)
+
+        def checkpoint_resources():
+            worker = getattr(self.runner, '_kvmem_request_swap_worker', None)
+            return worker.snapshot() if worker is not None else {}
+
+        if lazy_archive_report():
+            self._report_writer = LatestReportWriter(self.output)
+        self._archive_resource_reporter = ArchiveResourceReporter(
+            self.output, self.archive, checkpoint_sampler=checkpoint_resources,
+            writer=getattr(self, '_report_writer', None))
 
     def submit(self, captured, batch, rejected):
         self._raise_publication_error()

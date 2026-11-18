@@ -12,10 +12,11 @@ class ArchiveResourceReporter:
 
     Called by worker feedback after its publication lock is released. It does
     not traverse authority records, synchronize CUDA, or include completed
-    request histories. The existing full archive.json report remains intact.
+    request histories. With a snapshot writer, disk publication can coalesce
+    while the sampled counters and their sequence numbers remain exact.
     """
     def __init__(self, output, archive, *, interval=.1, clock=time.monotonic,
-                 memory_sampler=sample_process_memory, checkpoint_sampler=None):
+                 memory_sampler=sample_process_memory, checkpoint_sampler=None, writer=None):
         self.output, self.archive = Path(output), archive
         self.interval, self.clock, self.memory_sampler = interval, clock, memory_sampler
         self._lock = Lock()
@@ -23,6 +24,7 @@ class ArchiveResourceReporter:
         self._memory = None
         self.samples = 0
         self.checkpoint_sampler = checkpoint_sampler
+        self.writer = writer
 
     def publish(self, active_requests, retiring_requests, *, force=False):
         now = self.clock()
@@ -39,9 +41,14 @@ class ArchiveResourceReporter:
                           process_memory=self._memory, **self.archive.io_usage())
             if self.checkpoint_sampler is not None:
                 report['request_checkpoints'] = self.checkpoint_sampler()
-            temporary = self.output/'archive_resources.tmp'
-            temporary.write_text(json.dumps(report, separators=(',', ':'))+'\n')
-            temporary.replace(self.output/'archive_resources.json')
+            if self.writer is None:
+                temporary = self.output/'archive_resources.tmp'
+                temporary.write_text(json.dumps(report, separators=(',', ':'))+'\n')
+                temporary.replace(self.output/'archive_resources.json')
+            else:
+                self.writer.submit('archive_resources', report)
+                if force:
+                    self.writer.flush()
             self.samples += 1
             self._next = now + self.interval
             return True
