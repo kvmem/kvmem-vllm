@@ -194,7 +194,7 @@ def review(root):
     for owner in owners:
         for p in sorted((root/'bridge'/owner).glob('*/plan.json')):
             plan=read(p);require(plan['seed']==1000,'Actual seed changed')
-            require(plan['max_tokens']==131072,'Actual output cap changed')
+            require(plan['max_tokens']==manifest.get('output_cap',131072),'Actual output cap changed')
             require(plan['thinking_token_budget']==4096,'Thinking cap changed')
             for name,value in [('temperature',.6),('top_p',.95),('top_k',20),('min_p',0),('repetition_penalty',1),('presence_penalty',0)]:
                 require(plan[name]==value,'Actual sampling changed: '+name)
@@ -241,7 +241,7 @@ def review(root):
         subset=expected!=89,benchmark_total_tasks=89,
         agent_time_limit=timing_mode,official_timing_comparable=(timing_mode=='official'),
         actual_requests=request_count,accepted_completed_response_tokens=accepted,
-        actual_seed=1000,output_cap=131072,thinking_budget=4096,
+        actual_seed=1000,output_cap=manifest.get('output_cap',131072),thinking_budget=4096,
         exact_prefix_reused_requests=reuse,finish_reasons=dict(finishes),
         incomplete_native_requests=token_failures,cleanup=cleanup,
         task_containers_retained=containers,gc=archive.get('historical_gc'),
