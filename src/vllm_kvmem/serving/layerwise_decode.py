@@ -355,7 +355,7 @@ def _fused_identities(controller, rid, begin, local, count, starts, counts, batc
         if (not batch or authority is None or type(controller) is not LayerwisePrefillPressure
                 or not native_segments_enabled()):
             return None
-        records = controller.records(rid, authority, begin, local, 0)
+        records = controller._layer_records(frame, authority, begin, local, 0)
         history = _native.decode_segment_identities(records, begin, local, count, starts, counts, 32)
         if history is None:
             return None

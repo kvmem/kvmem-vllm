@@ -290,6 +290,14 @@ def test_live_window_shared_identities_keep_separate_layer_scores(monkeypatch):
     controller, begin, local = _controller(rng, layers=layers, blocks=40)
     records = controller.maps.pop('r')[1][0]
     reads = []
+    lookups = []
+    resolve = controller.resolved_maps
+
+    def resolve_once(rid):
+        lookups.append(rid)
+        return resolve(rid)
+
+    monkeypatch.setattr(controller, 'resolved_maps', resolve_once)
 
     def working_records():
         reads.append(1)
@@ -310,6 +318,7 @@ def test_live_window_shared_identities_keep_separate_layer_scores(monkeypatch):
             layerwise_decode.NativeDecodeHistory(_batch().DecodeMassMap.from_dict({}), 0, 0, 0)
             for _ in range(layers)]
         reads.clear()
+        lookups.clear()
         pending = _pend(begin, count, 1)
         layerwise_decode.attach_packet(controller, pending, 'r', authority, starts, counts, masses)
         _, staged, _ = layerwise_decode.prepare_accept(controller, pending, 3)
@@ -318,6 +327,7 @@ def test_live_window_shared_identities_keep_separate_layer_scores(monkeypatch):
     old, reference, old_reads = evaluate('0')
     new, staged, new_reads = evaluate('1')
     assert (old_reads, new_reads) == (layers, 1)
+    assert lookups == ['r']
     assert old.history == new.history
     targets = new.layerwise_decode[2]
     np.testing.assert_array_equal(targets, old.layerwise_decode[2])
