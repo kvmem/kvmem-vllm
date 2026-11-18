@@ -27,6 +27,12 @@ Codex or start Claude Code from that directory.
 git worktree add -b codex/decode-metrics ../kvmem-vllm-decode-metrics main
 ```
 
+## Remote development
+
+You may also develop directly on a remote server using a feature branch.
+Once the changes are ready and the relevant checks pass, push the branch
+and open a pull request targeting `main`.
+
 ## Builds and benchmarks
 
 Build native extensions in the worktree under test and verify that the test
