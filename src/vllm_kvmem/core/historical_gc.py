@@ -22,7 +22,7 @@ REDUNDANCY_Q_MAX_SLOTS = 4
 # Public schemas mirror the native factory. No Python policy callbacks execute
 # on the worker; adding a policy requires registering its native constructor.
 _POLICY_DEFAULTS = {'lru': {'keep_mandatory': True},
-    'tool_result_age': {'keep_mandatory': True, 'tool_result_age_steps': 12},
+    'tool_result_age': {'keep_mandatory': True, 'tool_result_age_steps': 12, 'lru_fallback': False},
     'redundancy': {
     'keep_mandatory': True, 'importance_weight': 0.1,
     'representative_similarity': 0.9, 'reference_blocks': 32,

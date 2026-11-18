@@ -194,6 +194,7 @@ struct HistoricalScopeState {
                          std::unique_ptr<HistoricalKvPolicy> p, std::shared_ptr<HistoricalScopeStorage> buffers)
         : repository(std::move(r)), arena(std::move(a)), config(c), incarnation(epoch),
           tool_age_enabled(c.policy == "tool_result_age"),
+          tool_age_strict(tool_age_enabled && !historical_policy_detail::tool_result_age_lru_fallback(c.policy_params)),
           storage(std::move(buffers)), records(storage->records.get()), jobs(storage->jobs),
           completion_words(storage->completion_words), completion_bits(storage->completion_bits.get()),
           shadow(storage->shadow), external_slots(storage->external_slots),
@@ -209,6 +210,10 @@ struct HistoricalScopeState {
     const HistoricalGcWorker::Config config;
     const uint64_t incarnation;
     const bool tool_age_enabled;
+    // Without an LRU fallback only expired tool pages may retire, so a
+    // follower vetoes any other record. With it the leader's pressure policy
+    // also proposes other records; followers then apply the generic rule only.
+    const bool tool_age_strict;
     // Updates to eligibility serialize with the local retirement commit.
     // Archive publishers and frame releases read an immutable copy.
     std::mutex tool_ranges_gate;
@@ -913,7 +918,7 @@ struct HistoricalScopeState {
         const auto code = external_check(entry, current);
         if (code != HistoricalCommitCode::Committed) return code;
         if (!current.meta.sealed || current.meta.mandatory) return HistoricalCommitCode::Ineligible;
-        if (tool_age_enabled && !current.meta.expired_tool_result) return HistoricalCommitCode::Ineligible;
+        if (tool_age_strict && !current.meta.expired_tool_result) return HistoricalCommitCode::Ineligible;
         return code;
     }
 

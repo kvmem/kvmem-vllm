@@ -24,10 +24,12 @@ def eventually(predicate, seconds=5):
 
 
 def configuration(commit=LOCAL, *, mode=n.HistoricalGcMode.DELETE, delete_blocks=2,
-                  ready_low=2, ready_high=4, policy='lru'):
+                  ready_low=2, ready_high=4, policy='lru', policy_params=None):
     config = n.HistoricalGcConfig()
     config.mode = mode
     config.policy = policy
+    if policy_params is not None:
+        config.policy_params = policy_params
     config.commit = commit
     config.background = False
     config.max_scopes = 1
@@ -142,6 +144,36 @@ def test_expired_tools_revalidate_at_prepare_and_retry_follower_veto(tmp_path):
     finally:
         close(leader)
         close(follower)
+
+
+FALLBACK = {'keep_mandatory': True, 'tool_result_age_steps': 12, 'lru_fallback': True}
+
+
+def test_tool_age_lru_fallback_proposes_under_pressure_and_followers_accept(tmp_path):
+    strict = history(tmp_path/'strict', PROPOSE, policy='tool_result_age')
+    leader = history(tmp_path/'leader', PROPOSE, policy='tool_result_age', policy_params=FALLBACK)
+    follower = history(tmp_path/'follower', FOLLOW, policy='tool_result_age', policy_params=FALLBACK)
+    strict_follower = history(tmp_path/'strict-follower', FOLLOW, policy='tool_result_age')
+    try:
+        # Full repository, no expired tool reply: only the fallback relieves the pressure.
+        advance(strict)
+        assert not strict.scope.external_proposals()
+        advance(leader)
+        choices = leader.scope.external_proposals()
+        assert pairs(choices) == pairs(leader.handles[:2])          # LRU: the two oldest
+        # A strict follower still vetoes records that are not expired tool pages.
+        assert strict_follower.scope.external_prepare(strict_follower.handles[:2]) == [False, False]
+        strict_follower.scope.external_release()
+        assert leader.scope.external_prepare(choices) == follower.scope.external_prepare(follower.handles[:2]) == [True, True]
+        assert leader.scope.external_commit(choices) == follower.scope.external_commit(follower.handles[:2]) == [True, True]
+        leader.scope.external_release()
+        follower.scope.external_release()
+        assert leader.scope.stats['retired'] == follower.scope.stats['retired'] == 2
+        assert leader.scope.stats['tool_result_age_retired'] == 0
+        assert not leader.repo.pin(leader.handles[0]) and not follower.repo.pin(follower.handles[0])
+    finally:
+        for h in (strict, leader, follower, strict_follower):
+            close(h)
 
 
 def test_external_commit_retires_exactly_the_agreed_set(tmp_path):
