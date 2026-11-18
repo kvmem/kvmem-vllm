@@ -171,7 +171,8 @@ async def prepare_recorder(session, audit):
     return command
 
 
-def install(audit_path, expected_sources=None, terminal_tool_bundles=None, recorder_transport=False):
+def install(audit_path, expected_sources=None, terminal_tool_bundles=None, recorder_transport=False,
+            tool_install_timeout_sec=None):
     from harbor.agents.terminus_2.tmux_session import TmuxSession
     from harbor.agents.terminus_2.terminus_2 import Terminus2
     from harbor.agents.terminus_2.terminus_json_plain_parser import TerminusJSONPlainParser
@@ -187,8 +188,16 @@ def install(audit_path, expected_sources=None, terminal_tool_bundles=None, recor
     def audit(**value):
         with audit_path.open('a') as f:
             f.write(json.dumps(dict(at=time.time(), **value))+'\n')
+    if tool_install_timeout_sec is not None:
+        # Harbor gives the tmux/asciinema package install 120 s (whole step 240 s);
+        # through a slow container proxy several concurrent installs took longer and
+        # failed the trial before the Agent ran (11-18). Only these bounds change.
+        if type(tool_install_timeout_sec) not in (int, float) or not 0 < tool_install_timeout_sec <= 3600:
+            raise ValueError('Tool install timeout must be in (0, 3600] seconds')
+        TmuxSession._TOOL_INSTALL_TIMEOUT_SEC = tool_install_timeout_sec
+        TmuxSession._TOOL_INSTALL_BUDGET_SEC = max(TmuxSession._TOOL_INSTALL_BUDGET_SEC, 2*tool_install_timeout_sec)
     audit(event='installed', sources=actual, policy='completion-control-network-v1',
-          recorder_transport=bool(recorder_transport))
+          recorder_transport=bool(recorder_transport), tool_install_timeout_sec=tool_install_timeout_sec)
     old_start, old_init = TmuxSession.start, Terminus2.__init__
     old_parse = TerminusJSONPlainParser._parse_commands
     old_tools, old_send = TmuxSession._attempt_tmux_installation, TmuxSession.send_keys

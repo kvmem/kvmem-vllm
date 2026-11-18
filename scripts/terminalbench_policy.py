@@ -7,6 +7,8 @@ import tomllib
 
 
 RELAXED_AGENT_MULTIPLIER = 2.0
+# One wall-clock Agent deadline for every task (user 11-18): bounds long-running tasks.
+FIXED_AGENT_TIMEOUT_SEC = 3600.0
 
 
 def relaxed_agent_timeout(value):
@@ -22,7 +24,19 @@ def relax_agent_deadline(data):
     """Multiply only the original Agent deadline; never scale verifier/setup."""
     # Reuse the strict single-step/layout validation before making any change.
     _, audit = disable_agent_deadline(data)
-    value = relaxed_agent_timeout(audit['original_agent_timeout_sec'])
+    return set_agent_deadline(data, relaxed_agent_timeout(audit['original_agent_timeout_sec']))
+
+
+def fix_agent_deadline(data):
+    """Replace only the Agent deadline with FIXED_AGENT_TIMEOUT_SEC; never verifier/setup."""
+    return set_agent_deadline(data, FIXED_AGENT_TIMEOUT_SEC)
+
+
+def set_agent_deadline(data, value):
+    """Set only [agent].timeout_sec to ``value``, preserving every other byte."""
+    _, audit = disable_agent_deadline(data)
+    if audit['original_agent_timeout_sec'] is None:
+        raise ValueError('An Agent deadline change requires an original Agent deadline')
     original = tomllib.loads(data.decode('utf-8'))
     expected = deepcopy(original)
     expected['agent']['timeout_sec'] = value
@@ -77,7 +91,7 @@ def disable_agent_deadline(data):
 
 
 def configure_task_deadlines(tasks_dir, mode):
-    if mode not in ('none', 'official', 'relaxed'):
+    if mode not in ('none', 'official', 'relaxed', 'fixed'):
         raise ValueError('Unknown Agent time limit policy')
     rows, updates = {}, []
     for path in sorted(tasks_dir.glob('*/task.toml')):
@@ -86,6 +100,8 @@ def configure_task_deadlines(tasks_dir, mode):
             effective, audit = disable_agent_deadline(original)
         elif mode == 'relaxed':
             effective, audit = relax_agent_deadline(original)
+        elif mode == 'fixed':
+            effective, audit = fix_agent_deadline(original)
         else:
             value = tomllib.loads(original.decode('utf-8')).get('agent', {}).get('timeout_sec')
             digest = hashlib.sha256(original).hexdigest()
@@ -100,6 +116,9 @@ def configure_task_deadlines(tasks_dir, mode):
         path.write_bytes(effective)
     policy = dict(agent_time_limit=mode, official_timing_comparable=(mode == 'official'),
                   scope='Agent execution only; verifier/setup/tool timeouts retained', tasks=rows)
+    if mode == 'fixed':
+        policy.update(agent_timeout_sec=FIXED_AGENT_TIMEOUT_SEC,
+                      clock='Harbor Agent wall time including model and tool waits')
     if mode == 'relaxed':
         policy.update(agent_multiplier=RELAXED_AGENT_MULTIPLIER,
                       clock='Agent elapsed time including model/tool waits, excluding recorded pauses')
