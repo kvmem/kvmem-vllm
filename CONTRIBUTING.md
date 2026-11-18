@@ -4,6 +4,9 @@ Changes that improve correctness, usability, runtime compatibility or documented
 performance are welcome. Start with [installation](docs/installation.md) for GPU
 serving or [development](docs/development.md) for the CPU-only environment.
 
+Follow the [parallel development requirements](AGENTS.md#parallel-development)
+when working on several changes at once.
+
 1. Describe the problem and the expected behavior in an issue or pull request.
 2. Keep the change focused. Use an explicit local profile when a reproduction
    depends on a model, hardware or runtime configuration.
