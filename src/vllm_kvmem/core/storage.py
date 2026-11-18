@@ -835,5 +835,7 @@ class AsyncArchive:
             self._entries.clear()
             self._namespace_counts.clear()
             self._free_ids.clear()
+            if self.memory_only:
+                self._closed_cpu_peak_bytes = self.tier.cpu_peak_bytes
             self.tier = None
             return True

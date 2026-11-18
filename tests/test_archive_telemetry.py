@@ -30,6 +30,9 @@ def test_cpu_publication_peak_survives_unsampled_full_reclamation(tmp_path):
         assert metrics['cpu_peak_scope'] == 'lifetime_published_payload_bytes'
     finally:
         assert archive.close()
+    closed = archive.io_usage()
+    assert closed['cpu_authority_bytes'] == closed['cpu_resident_bytes'] == archive.history_used_bytes() == 0
+    assert closed['cpu_peak_bytes'] == 24
 
 
 def test_failed_publication_does_not_inflate_published_payload_peak():
@@ -103,6 +106,9 @@ def test_native_arena_without_exact_high_water_abi_does_not_invent_one(tmp_path)
         while not archive.close():
             assert time.monotonic() < deadline
             time.sleep(.001)
+    closed = archive.io_usage()
+    assert closed['cpu_authority_bytes'] == closed['cpu_resident_bytes'] == closed['cpu_index_bytes'] == 0
+    assert closed['cpu_peak_bytes'] is None
 
 
 def test_checkpoint_storage_observations_are_separate_from_history(tmp_path):

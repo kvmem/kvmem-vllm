@@ -1205,7 +1205,8 @@ class MemoryArchive(AsyncArchive):
 
     def history_used_bytes(self):
         if self._native_payload_arena is None:
-            return self.tier.used_slots*self.record_bytes
+            tier = self.tier
+            return tier.used_slots * self.record_bytes if tier is not None else 0
         stats = self._native_payload_arena.stats
         return stats['used_bytes'] + stats['external_bytes']
 
@@ -1248,6 +1249,7 @@ class MemoryArchive(AsyncArchive):
 
     def io_usage(self):
         with self._lock:
+            tier = self.tier
             hash_usage = dict(cpu_seal_hash_workers=self.cpu_seal_hash_workers,
                 cpu_seal_serial_allocate=self.cpu_seal_serial_allocate,
                 cpu_seal_serial_copy_workers=min(8,self.gather_workers) if self.cpu_seal_serial_allocate else 0,
@@ -1261,15 +1263,20 @@ class MemoryArchive(AsyncArchive):
             gather_usage = dict(cpu_region_gather_parallel_min_bytes=region_gather_parallel_min_bytes(),
                 **{'cpu_region_gather_'+key:value for key,value in self._region_gather_counts.items()})
         native = self._native_payload_arena.stats if self._native_payload_arena is not None else None
-        with self.tier.lock:
-            resident_bytes = (native['used_bytes'] if native else
-                              len(self.tier.records) * self.record_bytes)
-            # The native arena can reclaim independently; its current ABI has
-            # no exact high-water counter. Do not label a sampled value exact.
-            peak_bytes = None if native else self.tier.cpu_peak_bytes
+        if native is not None:
+            authority_bytes = resident_bytes = native['used_bytes']
+            peak_bytes = None  # The native arena exposes no exact high-water counter.
+        elif tier is None:
+            authority_bytes = resident_bytes = 0
+            peak_bytes = self._closed_cpu_peak_bytes
+        else:
+            with tier.lock:
+                authority_bytes = tier.used_slots * self.record_bytes
+                resident_bytes = len(tier.records) * self.record_bytes
+                peak_bytes = tier.cpu_peak_bytes
         return {**super().io_usage(), 'archive_backend':'cpu', 'disk_read_bytes':0,
                 'disk_write_bytes':0, **hash_usage, **gather_usage,
-                'cpu_authority_bytes':native['used_bytes'] if native else self.tier.used_slots*self.record_bytes,
+                'cpu_authority_bytes': authority_bytes,
                 'cpu_resident_bytes': resident_bytes,
                 'cpu_peak_bytes': peak_bytes,
                 'cpu_peak_scope': ('unavailable_for_native_payload_arena' if native else
