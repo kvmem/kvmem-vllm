@@ -32,6 +32,7 @@ def patched_source(source: bytes) -> str:
     expression = ast.unparse(configs[0])
     # Upstream now owns the fix. Leave its loader entirely intact.
     if expression in (
+            'get_draft_load_config(vllm_config)',
             'get_pp_safe_draft_load_config(get_draft_load_config(vllm_config))',
             'get_pp_safe_draft_load_config(speculative_config.draft_load_config if '
             'speculative_config.draft_load_config is not None else vllm_config.load_config)'):
