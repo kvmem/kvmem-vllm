@@ -14,6 +14,20 @@ PROXY_KEYS = tuple(prefix+suffix for suffix in ('proxy', 'PROXY')
                                   if suffix == 'proxy' else
                                   ('HTTP_', 'HTTPS_', 'ALL_', 'FTP_', 'SOCKS_', 'NO_')))
 DIRECT_CONTAINER_ENV = {key: '' for key in PROXY_KEYS}
+
+
+def relay_container_env(url):
+    """Container HTTP(S) through a host relay (manifest container_proxy); other proxy keys stay empty."""
+    if not re.fullmatch(r'http://[0-9.]+:[0-9]+', url or ''):
+        raise ValueError('Container proxy relay must be http://IPv4:port')
+    return {key: url if key.lower() in ('http_proxy', 'https_proxy') else
+            'localhost,127.0.0.1,::1' if key.lower() == 'no_proxy' else '' for key in PROXY_KEYS}
+
+
+def container_env(manifest):
+    """The container proxy variables a job must carry: direct, or the declared relay."""
+    relay = manifest.get('container_proxy')
+    return relay_container_env(relay) if relay else DIRECT_CONTAINER_ENV
 CACHE_CONTAINER_PATH = '/opt/kvmem-download-cache'
 CACHE_ENV = {
     'UV_INSTALLER_GITHUB_BASE_URL': 'file://'+CACHE_CONTAINER_PATH,

@@ -41,9 +41,15 @@ class Scope:
     def __init__(self):
         self.calls = []
         self.failures = 0
+        self.turn_of = {}
+        self.completed = []
 
-    def publish_thinking(self, lease, thinking, known):
+    def publish_turns(self, completed):
+        self.completed.append(completed)
+
+    def publish_thinking(self, lease, thinking, known, turn=0):
         self.calls.append((lease.handle.slot, lease.handle.generation, thinking, known))
+        self.turn_of[lease.handle.slot, lease.handle.generation] = turn
         if self.failures:
             self.failures -= 1
             return False

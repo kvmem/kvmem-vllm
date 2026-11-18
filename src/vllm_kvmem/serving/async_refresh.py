@@ -745,6 +745,12 @@ class AsyncRefresh:
                         job.history+len(job.command.input_tokens),job.command.query_span is not None)
                     from .layerwise_checkpoints import query_frame_committed
                     query_frame_committed(self.runner,job.command.request_id)
+                if job.command.selection=='pressure' and not getattr(job,'layerwise_pipeline_published',False):
+                    # Install the new per-layer maps before a session snapshot at
+                    # this position reads them, as the pressure pipeline does.
+                    diagnostic=getattr(self.runner,'_kvmem_layerwise_query',None)
+                    if diagnostic is not None:
+                        diagnostic.committed(job);job.layerwise_maps_committed=True
                 self.runner._kvmem_window_adapter.commit(job.command.request_id,job.history,job.selected_tokens)
                 if self.runner._kvmem_sessions is not None:
                     self.runner._kvmem_sessions.selection_committed(job.command.request_id,job.history)

@@ -388,6 +388,25 @@ def _batched_select():
 _BATCHED_SELECT = None
 
 
+def fa2_overlay_capability(capability):
+    """True where the score overlay runs on FlashInfer's FA2 kernels alone
+    (fa2_only: no XQA decode producer): SM80 (A800/A100) and SM89 (RTX 4090),
+    which run the same FlashInfer FA2 prefill/decode kernels; sm12x uses XQA.
+
+    SM89 qualified 2026-11-17 on 2xRTX 4090 TP=2: 124 overlay GPU tests; live
+    verify mode 18,128 comparisons per rank, max |difference| 8.0e-7; MTP4
+    layerwise 8 x 32K 219.8 -> 383.1 decode tok/s. KVMEM_NATIVE_FA2_SM89=0
+    falls back to recomputing scores there."""
+    if tuple(capability) == (8, 0):
+        return True
+    if tuple(capability) == (8, 9):
+        value = _settings.get('KVMEM_NATIVE_FA2_SM89', '1')
+        if value not in ('0', '1'):
+            raise ValueError('KVMEM_NATIVE_FA2_SM89 must be 0 or 1')
+        return value == '1'
+    return False
+
+
 def score_stack_enabled():
     """KVMEM_NATIVE_SCORE_STACK=1 (read once): layerwise capture takes every layer's
     native masses for a request from NativeAttentionStats.score_stack (one gather
@@ -479,7 +498,7 @@ class NativeAttentionStats:
         # use the reference scorer instead of failing (action_attention).
         self.unavailable = False
         capability = torch.cuda.get_device_capability()
-        self.fa2_only = capability == (8, 0)
+        self.fa2_only = fa2_overlay_capability(capability)
         if _settings.get('KVMEM_NATIVE_ATTENTION_FORCE_UNSUPPORTED') == '1':
             # Frozen campaigns use this switch to reproduce the original fallback receipt.
             self.disabled = 'unsupported_architecture_requires_sm12x'

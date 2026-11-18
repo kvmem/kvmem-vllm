@@ -65,6 +65,8 @@ LAUNCHER = frozenset((
     'KVMEM_LAYERWISE_PRESSURE_SUBMIT_ON_PREPARE', 'KVMEM_LAYERWISE_PRESSURE_REUSE_LAYER_VIEWS',
     'KVMEM_LAYERWISE_PRESSURE_RESIDENT_VALUES', 'KVMEM_LAYERWISE_PRESSURE_BATCH_SELECTION',
     'KVMEM_LAYERWISE_PRESSURE_NATIVE_SCORE_EXPORT',
+    # Profile fields experimental_dflash_async_refresh / experimental_dflash_compiled_multi.
+    'KVMEM_DFLASH_ASYNC_REFRESH', 'KVMEM_DFLASH_COMPILED_MULTI',
 ))
 
 # Known to change which blocks are kept, retrieved or retained.

@@ -501,7 +501,8 @@ def test_agent_profile_import_keeps_current_window_protection_and_equals_the_par
         assert record._thinking_published == source._thinking_published
         assert record.key_sum is None and torch.equal(record.mean_key, source.mean_key)
         assert record.index_owner is not source.index_owner
-    assert parent_records[12]._thinking_published == (4, 4)
+    # (thinking, known, assistant turn): the imported record keeps its turn ordinal.
+    assert parent_records[12]._thinking_published == (4, 4, 1)
     # Claiming either session restores the same frame and continues the same way.
     monkeypatch.setattr(NativeWindowAssembler, 'from_runner', lambda *a, **k: NS(
         assemble=lambda owner, plan: NS(event=NS(synchronize=lambda: None), query=lambda: True),

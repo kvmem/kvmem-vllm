@@ -28,6 +28,24 @@ all three) plus the flags validated after them:
   changes which blocks rolling decode keeps (not exact against "all"); outside
   rolling decode it changes nothing.
 
+- Native score capture and DFlash2 staging (2026-11-17), all exact:
+  KVMEM_NATIVE_SCORE_STACK=1 (every layer's native masses from one gather) and
+  KVMEM_NATIVE_WINDOW_FRAME=1 (decode windows from the frozen frame), c1
+  token- and selection-identical on 2xA800; on 2xRTX 4090 MTP4 layerwise
+  8 x 32K they cut score capture 11.8 -> 3.7 ms and the step 60.2 -> 52.9 ms
+  (383.1 -> 404.6 decode tok/s). KVMEM_DFLASH_SUBMIT_AFTER_DRAFT=1 with
+  KVMEM_DFLASH_STAGE_BEFORE_DRAFT=1 (compiled DFlash2 capture staged before the
+  draft, submitted after it): token-identical at c1 on both GPUs, +3.8% at
+  16 x 32K on 2xA800, decode step -7% at 8 x 32K on 2xRTX 4090. Each falls
+  back on its own where it does not apply (no native overlay, not DFlash2).
+
+- Exact CPU lengths for MTP draft steps 2+ (2026-11-17): KVMEM_DRAFT_SEQ_LENS_CPU=1
+  removes FlashInfer's per-draft-step seq_lens.cpu() synchronization on GPUs
+  without trtllm-gen decode; every prediction is verified (a difference
+  raises). 2xRTX 4090 MTP4 layerwise: c1 token- and acceptance-identical, step
+  36.5 -> 34.7 ms; 8 x 32K step 52.9 -> 50.5 ms, 0 mismatches. A no-op where
+  FlashInfer does not read CPU lengths.
+
 - Decode-parallel staging (2026-11-16): KVMEM_NATIVE_DECODE_LAYER_BATCH=1 with
   KVMEM_NATIVE_DECODE_PREPARE_BATCH=1 stage every layer's rolling-decode mass
   and identities in one native call on the publication pool (GIL released);
@@ -145,6 +163,12 @@ DEFAULTS = {
     'KVMEM_RESTORE_DIRECT_LAYERS': '1',
     'KVMEM_RESTORE_PREPARED_READS': '1',
     'KVMEM_RESTORE_GATE_EXEMPT': '1',
+    # Native score capture and DFlash2 staging (2026-11-17; exact).
+    'KVMEM_NATIVE_SCORE_STACK': '1',
+    'KVMEM_NATIVE_WINDOW_FRAME': '1',
+    'KVMEM_DFLASH_SUBMIT_AFTER_DRAFT': '1',
+    'KVMEM_DFLASH_STAGE_BEFORE_DRAFT': '1',
+    'KVMEM_DRAFT_SEQ_LENS_CPU': '1',
     # Default rolling decode scoring policy (user decision 2026-11-11).
     'KVMEM_LAYERWISE_DECODE_SCOPE': 'non-thinking',
     'KVMEM_LAYERWISE_DECODE_INTERVAL': '4',

@@ -6,7 +6,7 @@ from types import SimpleNamespace as NS
 import pytest
 import torch
 
-from vllm_kvmem.serving.native_attention import NativeAttentionStats
+from vllm_kvmem.serving.native_attention import NativeAttentionStats, fa2_overlay_capability
 
 pytestmark=pytest.mark.skipif(os.getenv('KVMEM_RUN_GPU_TESTS')!='1',
                             reason='Explicit native CTA-gate GPU qualification')
@@ -118,6 +118,8 @@ def test_actual_2k_geometry_and_gqa_one(tmp_path):
 
 @pytest.mark.parametrize('aligned',[False,True])
 def test_ragged_multiple_owners_and_decode_prefix_use_exact_global_rows(tmp_path,aligned):
+    if fa2_overlay_capability(torch.cuda.get_device_capability()):
+        pytest.skip('decode-prefix rows come from the SM12x XQA producer; an FA2-only GPU (SM80, SM89 opt-in) needs an FA2 decode wrapper for them and declines the whole batch by design')
     env=geometry(tmp_path,qlens=(65,97),lengths=(2051,3079),prefix=3,aligned=aligned)
     compare_pair(env,plans(env,[[0,10,11,31,64],[0,20,21,63,96]],partial=not aligned,owners=(2,1)))
 

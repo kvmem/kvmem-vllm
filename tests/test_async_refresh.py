@@ -207,3 +207,41 @@ def test_assembly_fence_covers_query_concatenation(monkeypatch):
     obj._submit(job)
     assert events==['restore','cat','fence']
     assert job.assembly_inputs[0] is query
+
+
+@pytest.mark.parametrize('selection', ['pressure', 'query'])
+def test_pressure_maps_install_before_the_session_snapshot(selection):
+    """Non-pipeline commits (TP): a P/M snapshot at this position must read the new layer maps."""
+    calls = []
+    obj = manager()
+    authority = SimpleNamespace(_refresh_background=True,
+        memory=SimpleNamespace(attach_completion=lambda a: None, commit_selection=lambda: True))
+    obj.runner = SimpleNamespace(_kvmem_pending_capture=None,
+        _kvmem_capture_runtime=SimpleNamespace(authorities={'a': authority}),
+        _kvmem_layerwise_query=SimpleNamespace(committed=lambda job: calls.append('maps')),
+        _kvmem_window_adapter=SimpleNamespace(commit=lambda *a: calls.append('window')),
+        _kvmem_sessions=SimpleNamespace(selection_committed=lambda *a: calls.append('sessions')))
+    obj.report = lambda job, *a: calls.append('report')
+    obj._release = lambda job: None
+    job = obj.enqueue(command('a'))
+    job.command = replace(job.command, selection=selection)
+    job.stage, job.authority, job.graph_binding, job.pressure_oracle, job.cancelled = 'assembly', authority, None, None, False
+    assembly = SimpleNamespace(event=SimpleNamespace(query=lambda: True))
+    job.result = (SimpleNamespace(close=lambda: True), assembly, SimpleNamespace(total_window_tokens=96), None, 0.)
+    job.future = SimpleNamespace(done=lambda: True, result=lambda: job.result)
+    if selection == 'query':
+        import vllm_kvmem.serving.prefill_attention as pa, vllm_kvmem.serving.layerwise_checkpoints as lc
+        pa_orig, lc_orig = pa.exclude_query_replay, lc.query_frame_committed
+        pa.exclude_query_replay = lambda *a: None
+        lc.query_frame_committed = lambda *a: calls.append('query_frame')
+    try:
+        assert obj.step(job)
+    finally:
+        if selection == 'query':
+            pa.exclude_query_replay, lc.query_frame_committed = pa_orig, lc_orig
+    if selection == 'pressure':
+        assert calls == ['maps', 'window', 'sessions', 'report'] and job.layerwise_maps_committed
+    else:
+        # Query frames commit through query_frame_committed; the report still installs them.
+        assert calls == ['query_frame', 'window', 'sessions', 'report']
+        assert not getattr(job, 'layerwise_maps_committed', False)

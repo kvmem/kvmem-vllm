@@ -39,6 +39,12 @@ struct HistoricalGcStats {
     // Shared prefixes: records whose payload is shared, and those released
     // logically (no bytes freed). Private bytes exclude marked minus released.
     uint64_t shared_marked = 0, shared_released = 0;
+    // Opt-in thinking age rule: records retired, commit-time refusals, and
+    // (a gauge from the last pass) old thinking left in place because the
+    // current window, recent range or a hold protected it. Retried each turn.
+    uint64_t thinking_age_retired = 0, thinking_age_ineligible = 0, thinking_age_protected = 0;
+    // Completed age passes, and the session's last published completed turns (a gauge).
+    uint64_t thinking_age_passes = 0, thinking_turns = 0;
 };
 
 struct HistoricalStorageStats {
@@ -100,7 +106,12 @@ public:
     bool configure_features(uint32_t layers, uint32_t kv_heads, uint32_t q_heads, uint32_t dimension);
     std::array<size_t, 4> feature_geometry() const;
     bool publish_features(const qw3::KvMemRepository::Lease &, const float *, size_t elements);
-    bool publish_thinking(const qw3::KvMemRepository::Lease &, uint32_t thinking_tokens, uint32_t known_tokens);
+    // turn: 1-based ordinal of the assistant message holding the record's
+    // first token (0 = unknown); used only by the opt-in thinking age rule.
+    bool publish_thinking(const qw3::KvMemRepository::Lease &, uint32_t thinking_tokens, uint32_t known_tokens,
+                          uint32_t turn = 0);
+    // Assistant messages complete in this session's accepted history.
+    void publish_turns(uint64_t completed);
     uint64_t begin_question(uint64_t expected_tokens);
     bool append_question(uint64_t epoch, uint64_t offset, const float *, size_t elements, uint32_t tokens);
     bool observe_query(uint64_t epoch, const float *, size_t elements, uint32_t tokens);

@@ -295,6 +295,82 @@ static void factory_validates_parameters_and_preserves_policy_behavior() {
     }
 }
 
+
+static HistoricalBlockMeta thinking(uint32_t slot, uint32_t turn, bool pure = true) {
+    auto b = block(slot, slot, slot);
+    b.thinking_complete = true;
+    b.thinking_only = pure;
+    b.thinking_turn = turn;
+    return b;
+}
+
+static void thinking_age_retires_old_pure_thinking_without_pressure() {
+    const HistoricalPolicyParameters params{{"thinking_age_steps", int64_t(2)}};
+    validate_historical_kv_policy("lru", params);
+    validate_historical_kv_policy("redundancy", {{"thinking_age_steps", int64_t(10)}, {"thinking_only", true}});
+    auto policy = make_historical_kv_policy("lru", params, 16);
+    HistoricalSnapshot snapshot;
+    snapshot.incarnation = 1;
+    snapshot.round = 1;
+    snapshot.blocks = {thinking(0, 1), thinking(1, 2), thinking(2, 1, false), thinking(3, 0),
+                       block(4, 4, 4), thinking(5, 1)};
+    snapshot.blocks[5].mandatory = true;    // current window, recent range or a hold
+    HistoricalPressure calm;
+    calm.ready_slots = 10; calm.low_slots = 2; calm.high_slots = 4;
+    calm.thinking_turns = 2;
+    check(!policy->wants_snapshot(calm), "age rule armed before a turn N steps newer completed");
+    calm.thinking_turns = 3;
+    check(policy->wants_snapshot(calm), "a newly completed turn did not start an age pass");
+    HistoricalDecisionBatch batch(8);
+    const auto result = policy->step(snapshot, calm, {16, 8}, batch);
+    check(result.emitted == 1 && batch.values().size() == 1 && batch.values()[0].handle == snapshot.blocks[0].handle &&
+          result.thinking_age_protected == -1 &&
+          batch.values()[0].reason == HistoricalDeleteReason::ThinkingAge,
+          "age pass must emit only old, pure, unprotected thinking with a known turn");
+    check(policy->permits_pressure(calm), "an age batch was withdrawn for lack of capacity pressure");
+    check(policy->permits_intent(snapshot.blocks[0], batch.values()[0]), "eligible age intent was refused");
+    calm.thinking_turns = 2;    // a rewind lowered the completed turn count
+    check(policy->permits_pressure(calm) && !policy->permits_intent(snapshot.blocks[0], batch.values()[0]),
+          "age intent survived a rewind below its threshold");
+    calm.thinking_turns = 3;
+    policy->permits_pressure(calm);
+    batch.clear_after_ack();
+    const auto done = policy->step(snapshot, calm, {16, 8}, batch);
+    check(done.status == HistoricalPolicyStatus::Complete && batch.empty() && done.thinking_age_protected == 1,
+          "calm round did not end after the age pass, or missed the protected record");
+    check(!policy->wants_snapshot(calm), "unchanged turn count rescanned without pressure");
+    calm.thinking_pure = 63;
+    check(!policy->wants_snapshot(calm), "a few new thinking records started a pass");
+    calm.thinking_pure = 64;
+    check(policy->wants_snapshot(calm), "64 newly classified thinking records did not re-arm the age pass");
+
+    // Under capacity pressure the wrapped policy still runs after the age pass.
+    snapshot.round = 2;
+    HistoricalPressure tight = calm;
+    tight.ready_slots = 1;
+    tight.thinking_turns = 4;
+    check(policy->wants_snapshot(tight), "pressure round was not requested");
+    auto first = policy->step(snapshot, tight, {16, 8}, batch);
+    check(first.emitted == 2 && batch.values()[0].reason == HistoricalDeleteReason::ThinkingAge &&
+          batch.values()[1].reason == HistoricalDeleteReason::ThinkingAge,
+          "turns 1 and 2 were not both retired by age before the pressure policy");
+    batch.clear_after_ack();
+    auto second = policy->step(snapshot, tight, {16, 8}, batch);
+    check(second.emitted && batch.values()[0].reason == HistoricalDeleteReason::Lru,
+          "wrapped LRU did not run after the age pass");
+    for (const auto &intent : batch.values())
+        check(intent.handle != snapshot.blocks[0].handle && intent.handle != snapshot.blocks[1].handle,
+              "wrapped LRU re-proposed records the age pass already took this round");
+    check(policy->permits_pressure(tight), "wrapped policy's pressure recheck changed");
+
+    bool rejected = false;
+    try { make_historical_kv_policy("lru", {{"thinking_age_steps", int64_t(-1)}}, 16); }
+    catch (const std::invalid_argument &) { rejected = true; }
+    check(rejected, "negative thinking age was accepted");
+    auto plain = make_historical_kv_policy("lru", {{"thinking_age_steps", int64_t(0)}}, 16);
+    check(dynamic_cast<HistoricalLruPolicy *>(plain.get()) != nullptr, "zero thinking age wrapped the policy");
+}
+
 int main() {
     try {
         irreversible_retirement();
@@ -306,6 +382,7 @@ int main() {
         refill_reuses_one_scan_and_observes_current_pressure();
         eligibility_is_a_policy_choice_and_snapshot_is_stable();
         factory_validates_parameters_and_preserves_policy_behavior();
+        thinking_age_retires_old_pure_thinking_without_pressure();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

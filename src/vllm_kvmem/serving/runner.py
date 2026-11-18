@@ -99,12 +99,14 @@ def make_probe_runner(base):
                     method = getattr(self.speculative_config, 'method', None)
                     if method == 'dflash':
                         dflash_async = _settings.get('KVMEM_DFLASH_ASYNC_REFRESH') == '1'
-                        if (self.speculative_config.num_speculative_tokens != 1 or
+                        depths = (1, 3, 7) if _settings.get('KVMEM_DFLASH_COMPILED_MULTI') == '1' else (1,)
+                        if (self.speculative_config.num_speculative_tokens not in depths or
                                 not options.request_planning or
                                 (not dflash_async and (options.async_refresh or options.async_restore)) or
                                 options.capture_opaque_projection or
                                 options.memory.recent_blocks * options.memory.block_tokens < 2048):
-                            raise ValueError('Compiled DFlash2 requires k=1, synchronous planned '
+                            raise ValueError('Compiled DFlash2 requires k=1 (3 or 7 with '
+                                             'experimental_dflash_compiled_multi), synchronous planned '
                                              'capture and a 2048-token recent band')
                         from ..adapters.draft_graphs import (install_independent_draft_graphs,
                                                              deferred_submit_enabled, install_deferred_capture_submit)
@@ -129,6 +131,9 @@ def make_probe_runner(base):
                     self.input_buffers.positions)
             from ..adapters.mtp_runtime import install_mtp_runtime
             install_mtp_runtime(self)
+            from ..adapters import draft_seq_lens
+            if draft_seq_lens.enabled():
+                draft_seq_lens.install()
             from ..adapters.qsa_adapter import install_qsa_archive
             install_qsa_archive(self)
             if options.qsa_split_selector and not qsa:

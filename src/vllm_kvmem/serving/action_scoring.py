@@ -122,3 +122,49 @@ def page_attention(raw_q, positions, key, table, cos_sin, key_scale,
             starts.numel(),triton.next_power_of_2(heads),triton.next_power_of_2(block_tokens))
     mass._action_scoring_backend='reference'
     return mass
+
+
+def portable_layers_enabled():
+    """Opt-in KVMEM_PORTABLE_SCORE_LAYERS=1: on GPUs without the native score
+    overlay, score every layerwise layer of a request in one fused pass
+    (page_attention_layers) instead of one page_attention call per layer."""
+    from ..core import settings as _settings
+    value = _settings.get('KVMEM_PORTABLE_SCORE_LAYERS', '0')
+    if value not in ('0', '1'):
+        raise ValueError('KVMEM_PORTABLE_SCORE_LAYERS must be 0 or 1')
+    return value == '1'
+
+
+def page_attention_layers(raw_q, positions, keys, table, cos_sin, key_scales, q_scales,
+                          starts, counts, length, *, scale, q_dtype, block_tokens):
+    """torch.stack([page_attention(raw_q[l], ..., keys[l], ..., key_scales[l], q_scale=q_scales[l],
+    fused=True, complete_partition=True) for l]) in one pass: [L, rows, segments].
+
+    Every layer shares the sampled rows, positions, page table, RoPE cache and
+    Q codec; RoPE, the Q codec and the fused kernel apply the single-layer
+    per-element arithmetic, so each layer's result is bitwise equal. Returns
+    None where page_attention would not take its fused path for these inputs.
+    """
+    layers = raw_q.shape[0] if raw_q.ndim == 4 else 0
+    if (raw_q.ndim != 4 or len(keys) != layers or key_scales.shape != (layers,) or
+            q_scales.shape != (layers,) or positions.shape != (raw_q.shape[1],) or
+            any(k.ndim != 4 or raw_q.shape[-1] != k.shape[-1] or raw_q.shape[2] % k.shape[2] for k in keys) or
+            not 0 < length <= table.numel()*keys[0].shape[1] or starts.numel() != counts.numel() or
+            q_dtype not in (torch.bfloat16, torch.float16, torch.float8_e4m3fn)):
+        raise ValueError('Invalid layer-batched action attention geometry/codec')
+    rows = raw_q.shape[1]
+    if not (0 < rows <= 64 and 0 < starts.numel() and block_tokens <= 128):
+        return None
+    trig = cos_sin.index_select(0, positions.long())
+    half = trig.shape[-1]//2
+    flat = raw_q.reshape(layers*rows, *raw_q.shape[2:])
+    q = neox_rope(flat, trig[:, :half].repeat(layers, 1), trig[:, half:].repeat(layers, 1)).view(raw_q.shape)
+    if q_dtype == torch.float8_e4m3fn:
+        q = (q.float()/q_scales.view(layers, 1, 1, 1)).clamp(-448, 448).to(q_dtype)
+        effective = key_scales*q_scales
+    else:
+        q = q.to(q_dtype)
+        effective = key_scales
+    from .action_scoring_fused import fused_page_attention_layers
+    return fused_page_attention_layers(q, positions, keys, table, effective.float().contiguous(), starts, counts,
+                                       length, scale=scale, block_tokens=block_tokens)

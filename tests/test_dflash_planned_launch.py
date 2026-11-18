@@ -205,3 +205,41 @@ def test_dflash_async_refresh_opt_in_keeps_its_guards(tmp_path,change,match):
         (cfg['kvmem'] if key in cfg['kvmem'] else cfg)[key]=value
     with pytest.raises(ValueError,match=match):
         build_launch(cfg,tmp_path,tmp_path/'bad')
+
+
+@pytest.mark.parametrize('draft_tokens', [3, 7])
+def test_compiled_dflash_multi_token_needs_its_opt_in(tmp_path, draft_tokens):
+    cfg=configured(tmp_path)
+    cfg.update(draft_tokens=draft_tokens,execution_mode='compiled_graph',cudagraph_capture_sizes=[2,4,8,16,32,64])
+    with pytest.raises(ValueError,match='experimental_dflash_compiled_multi'):
+        build_launch(cfg,tmp_path,tmp_path/'refused')
+    cfg['experimental_dflash_compiled_multi']=True
+    plan=build_launch(cfg,tmp_path,tmp_path/'compiled')
+    argv=plan['vllm_argv']
+    assert json.loads(argv[argv.index('--speculative-config')+1])['num_speculative_tokens']==draft_tokens
+    assert plan['environment']['KVMEM_DFLASH_COMPILED_MULTI']=='1'
+    assert plan['environment']['KVMEM_FULL_GRAPH']=='1'
+    assert build_launch(plan['profile'],tmp_path,tmp_path/'again')['vllm_argv']==argv
+
+
+def test_compiled_dflash_multi_token_opt_in_is_validated_and_dflash_only(tmp_path):
+    cfg=configured(tmp_path)
+    cfg.update(draft_tokens=1,execution_mode='compiled_graph',experimental_dflash_compiled_multi=1)
+    with pytest.raises(ValueError,match='must be boolean'):
+        build_launch(cfg,tmp_path,tmp_path/'bad')
+    k1=tmp_path/'k1';k1.mkdir()
+    cfg=configured(k1)
+    cfg.update(draft_tokens=1,execution_mode='compiled_graph')
+    assert 'KVMEM_DFLASH_COMPILED_MULTI' not in build_launch(cfg,k1,k1/'plan')['environment']
+
+
+def test_native_max_rows_auto_resolves_to_the_rows_one_step_can_hold(tmp_path):
+    cfg=configured(tmp_path)
+    cfg.update(draft_tokens=1,execution_mode='compiled_graph',max_num_batched_tokens=1056,max_num_seqs=16)
+    cfg['kvmem']['action_native_max_rows']='auto'
+    plan=build_launch(cfg,tmp_path,tmp_path/'auto')
+    argv=plan['vllm_argv']
+    kv=json.loads(argv[argv.index('--kv-transfer-config')+1])['kv_connector_extra_config']['kvmem']
+    stride=cfg['kvmem'].get('prefill_attention_stride',32)
+    assert kv['action_native_max_rows']==-(-1056//stride)+16*3
+    assert build_launch(plan['profile'],tmp_path,tmp_path/'again')['vllm_argv']==argv
