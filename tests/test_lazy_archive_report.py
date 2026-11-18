@@ -1,5 +1,6 @@
 """Opt-in KVMEM_LAZY_ARCHIVE_REPORT: rate-limited, off-thread archive reports."""
 import json
+from threading import Event
 from types import SimpleNamespace as NS
 
 import pytest
@@ -96,6 +97,32 @@ def test_shutdown_flushes_a_skipped_report(tmp_path, monkeypatch):
     report = json.loads((tmp_path / 'archive.json').read_text())
     assert report['completed'][-1]['request_id'] == 'b'
     assert '_report_writer' not in runtime.__dict__ and not writer._thread.is_alive()
+
+
+def test_worker_feedback_continues_while_resource_snapshot_write_is_blocked(tmp_path, monkeypatch):
+    from vllm_kvmem.serving import report_writer
+    monkeypatch.setenv('KVMEM_LAZY_ARCHIVE_REPORT', '1')
+    entered, release = Event(), Event()
+    write = report_writer.write_report
+
+    def slow_write(output, name, report, **kwargs):
+        if name == 'archive_resources':
+            entered.set()
+            assert release.wait(5)
+        write(output, name, report, **kwargs)
+
+    monkeypatch.setattr(report_writer, 'write_report', slow_write)
+    runtime = _runtime(tmp_path, monkeypatch)
+    try:
+        runtime.publication_blocked_requests()
+        assert entered.wait(5)
+        runtime._archive_resource_reporter.publish(2, 1, force=True)
+        assert not (tmp_path / 'archive_resources.json').exists()
+    finally:
+        release.set()
+        runtime._flush_reports()
+    final = json.loads((tmp_path / 'archive_resources.json').read_text())
+    assert (final['resource_sample'], final['active_requests'], final['retiring_requests']) == (2, 2, 1)
 
 
 def test_writer_keeps_the_latest_snapshot_and_reports_errors(tmp_path):
