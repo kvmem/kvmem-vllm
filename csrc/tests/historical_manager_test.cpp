@@ -962,6 +962,27 @@ static void expired_tools_retry_after_backing_and_window_protection_change() {
           "late backing did not re-arm the tool age rule");
 }
 
+static void expired_tools_with_lru_fallback_also_relieve_capacity_pressure() {
+    HistoricalPolicyParameters params{{"keep_mandatory", true}, {"tool_result_age_steps", int64_t(12)},
+                                      {"lru_fallback", true}};
+    Fixture fixture(HistoricalGcMode::Delete, false, {}, 1, false, params, "tool_result_age");
+    for (int i = 0; i < 3; ++i) fixture.append();
+    auto &scope = *fixture.scope;
+    scope.history_changed(12, 12);
+    scope.set_expired_tool_ranges({{4, 8}});
+    fixture.step(8);
+    check(scope.stats().tool_result_age_retired == 1 && scope.stats().retired == 1 &&
+          !fixture.repo->try_pin(fixture.handles[1]),
+          "the age pass did not retire the expired tool page first");
+    check(bool(fixture.repo->try_pin(fixture.handles[0])) && bool(fixture.repo->try_pin(fixture.handles[2])),
+          "the fallback retired history without capacity pressure");
+    scope.request_capacity(8, 0);
+    fixture.step(8);
+    check(scope.stats().retired == 3 && scope.stats().tool_result_age_retired == 1 &&
+          !fixture.repo->try_pin(fixture.handles[0]) && !fixture.repo->try_pin(fixture.handles[2]),
+          "capacity pressure did not fall back to LRU outside the expired tool ranges");
+}
+
 int main() {
     try {
         lru_retirement_and_cpu_reclamation_do_not_wait_for_gpu();
@@ -998,6 +1019,7 @@ int main() {
         builtin_commit_rechecks_pressure_and_recent_range();
         thinking_age_retires_through_the_manager_and_respects_the_window();
         expired_tools_retry_after_backing_and_window_protection_change();
+        expired_tools_with_lru_fallback_also_relieve_capacity_pressure();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

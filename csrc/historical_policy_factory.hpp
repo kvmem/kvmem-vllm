@@ -58,10 +58,21 @@ inline void validate_tool_result_age(const HistoricalPolicyParameters &params) {
             const auto *keep = std::get_if<bool>(&value);
             if (!keep || !*keep)
                 throw std::invalid_argument("historical_gc tool_result_age requires keep_mandatory=true");
+        } else if (key == "lru_fallback") {
+            if (!std::get_if<bool>(&value))
+                throw std::invalid_argument("historical_gc.policy_params.lru_fallback must be boolean");
         } else {
             throw std::invalid_argument("Unknown historical_gc.policy_params.tool_result_age parameter: " + key);
         }
     }
+}
+// tool_result_age with lru_fallback: LRU (keep_mandatory) handles capacity
+// pressure once the age pass has proposed its expired tool pages.
+inline bool tool_result_age_lru_fallback(const HistoricalPolicyParameters &params) {
+    const auto it = params.find("lru_fallback");
+    if (it == params.end()) return false;
+    const auto *value = std::get_if<bool>(&it->second);
+    return value && *value;
 }
 inline HistoricalRedundancyConfig redundancy_config(const HistoricalPolicyParameters &params) {
     HistoricalRedundancyConfig config;
@@ -156,6 +167,9 @@ inline std::unique_ptr<HistoricalKvPolicy> make_historical_kv_policy(
         size_t capacity, bool keep_mandatory = true) {
     if (name == "tool_result_age") {
         historical_policy_detail::validate_tool_result_age(params);
+        if (historical_policy_detail::tool_result_age_lru_fallback(params))
+            return std::make_unique<HistoricalToolResultAgePolicy>(
+                std::make_unique<HistoricalLruPolicy>(capacity, true));
         return std::make_unique<HistoricalToolResultAgePolicy>();
     }
     const auto [steps, rest] = historical_policy_detail::split_thinking_age(params);

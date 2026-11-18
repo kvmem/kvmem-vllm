@@ -71,7 +71,7 @@ coordination 和 owned sessions。与旧 `repository_gc`、block graph 的组合
 "historical_gc": {
   "mode": "shadow",
   "policy": "tool_result_age",
-  "policy_params": {"tool_result_age_steps": 12}
+  "policy_params": {"tool_result_age_steps": 12, "lru_fallback": false}
 }
 ```
 
@@ -88,8 +88,14 @@ thinking、工具调用以及其它助手内容保留。显式必留区间、sin
 
 单卡可用 `shadow` 查看 `shadow_decisions`，切换到 `delete` 后用
 `tool_result_age_retired` 和 `cpu_released` 分别核对提交和实际释放。
-Tensor parallel 走已有的 rank 同步提交。容量吃紧时仍只删除合格的旧工具页，
-其余容量缺口由现有准入机制处理。
+Tensor parallel 走已有的 rank 同步提交。默认容量吃紧时仍只删除合格的旧工具页，
+其余容量缺口由现有准入机制处理：会话的保留历史达到上限（`repository_blocks`）后，
+下一轮准入一直等待，不报错。
+
+`"lru_fallback": true` 在每轮先运行工具页的年龄扫描，再由 LRU（`keep_mandatory`）
+处理容量压力，与 thinking age 包装 redundancy 的方式相同。LRU 不会再选本轮已提交
+的工具页；它的退休计入 `retired`，不计入 `tool_result_age_retired`。TP 下 follower
+只做通用检查（已封页、非必留），不再要求记录是过期工具页。
 
 ## 资源与并发契约
 

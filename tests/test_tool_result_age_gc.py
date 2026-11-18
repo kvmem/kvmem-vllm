@@ -61,10 +61,12 @@ def test_unknown_and_split_tool_boundaries_do_not_expire_a_page():
 def test_settings_require_explicit_tool_policy_and_mandatory_protection():
     assert HistoricalGcSettings().policy == 'lru'
     settings = HistoricalGcSettings(policy='tool_result_age')
-    assert settings.policy_params == {'keep_mandatory': True, 'tool_result_age_steps': 12}
+    assert settings.policy_params == {'keep_mandatory': True, 'tool_result_age_steps': 12, 'lru_fallback': False}
+    assert HistoricalGcSettings(policy='tool_result_age',
+                                policy_params={'lru_fallback': True}).policy_params['lru_fallback'] is True
     for params in ({'tool_result_age_steps': 0}, {'tool_result_age_steps': True},
                    {'tool_result_age_steps': 1_000_001}, {'keep_mandatory': False},
-                   {'thinking_age_steps': 1}):
+                   {'thinking_age_steps': 1}, {'lru_fallback': 1}):
         with pytest.raises(ValueError):
             HistoricalGcSettings(policy='tool_result_age', policy_params=params)
 
