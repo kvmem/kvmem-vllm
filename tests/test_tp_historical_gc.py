@@ -23,9 +23,11 @@ def eventually(predicate, seconds=5):
         time.sleep(.001)
 
 
-def configuration(commit=LOCAL, *, mode=n.HistoricalGcMode.DELETE, delete_blocks=2, ready_low=2, ready_high=4):
+def configuration(commit=LOCAL, *, mode=n.HistoricalGcMode.DELETE, delete_blocks=2,
+                  ready_low=2, ready_high=4, policy='lru'):
     config = n.HistoricalGcConfig()
     config.mode = mode
+    config.policy = policy
     config.commit = commit
     config.background = False
     config.max_scopes = 1
@@ -102,6 +104,44 @@ def test_leader_proposes_without_retiring(tmp_path):
         assert not h.scope.completions(16)
     finally:
         close(h)
+
+
+def test_expired_tools_revalidate_at_prepare_and_retry_follower_veto(tmp_path):
+    leader = history(tmp_path/'leader', PROPOSE, policy='tool_result_age')
+    follower = history(tmp_path/'follower', FOLLOW, policy='tool_result_age')
+    try:
+        leader.scope.set_expired_tool_ranges([(4, 8)])
+        advance(leader)
+        stale = leader.scope.external_proposals()
+        assert pairs(stale) == pairs(leader.handles[1:2])
+        leader.scope.set_expired_tool_ranges([])  # The accepted prefix was rewound.
+        assert leader.scope.external_prepare(stale) == [False]
+        assert leader.scope.external_commit([]) == []
+        leader.scope.external_release()
+        assert leader.repo.pin(stale[0])
+
+        leader.scope.set_expired_tool_ranges([(4, 8)])
+        advance(leader)
+        choices = leader.scope.external_proposals()
+        assert leader.scope.external_prepare(choices) == [True]
+        assert follower.scope.external_prepare(follower.handles[1:2]) == [False]
+        assert leader.scope.external_commit([]) == []
+        leader.scope.external_release()
+        follower.scope.external_release()
+
+        follower.scope.set_expired_tool_ranges([(4, 8)])
+        advance(leader)
+        choices = leader.scope.external_proposals()
+        assert pairs(choices) == pairs(leader.handles[1:2])
+        assert leader.scope.external_prepare(choices) == follower.scope.external_prepare(follower.handles[1:2]) == [True]
+        assert leader.scope.external_commit(choices) == follower.scope.external_commit(follower.handles[1:2]) == [True]
+        leader.scope.external_release()
+        follower.scope.external_release()
+        assert leader.scope.stats['tool_result_age_retired'] == follower.scope.stats['retired'] == 1
+        assert not leader.repo.pin(leader.handles[1]) and not follower.repo.pin(follower.handles[1])
+    finally:
+        close(leader)
+        close(follower)
 
 
 def test_external_commit_retires_exactly_the_agreed_set(tmp_path):

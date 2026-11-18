@@ -1573,6 +1573,19 @@ class CaptureRuntime(EarlyCaptureFeedback):
             from ..strategy import PICKER, resolve
             authority.memory.picker = resolve(PICKER, picker_name)
         authority.graph_options = self.options
+        gc_settings = getattr(self.options, 'historical_gc', None)
+        if (binding is not None and gc_settings is not None and gc_settings.mode != 'off' and
+                gc_settings.policy == 'tool_result_age' and
+                request_id not in getattr(sessions, 'release_requests', ())):
+            from .tool_result_history import ToolResultHistory
+            try:
+                tool_results = ToolResultHistory(authority.gc.scope, self.config.block_tokens,
+                                                 gc_settings.policy_params['tool_result_age_steps'])
+                tool_results.bind(binding, authority.history_end)
+                authority.tool_result_history = tool_results
+            except BaseException:
+                authority.close()
+                raise
         if binding is not None and getattr(self.archive, 'history_scope_metrics_path', None) is not None:
             self.archive.set_history_scope_context(authority.memory.request_id,
                 binding.namespace, binding.generation)

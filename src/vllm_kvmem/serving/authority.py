@@ -872,6 +872,9 @@ class RequestAuthority:
         _c2 = _time.perf_counter()
         self.memory.attach_completion(_Ready())
         assert self.memory.commit_append(count)
+        tool_results = getattr(self, 'tool_result_history', None)
+        if tool_results is not None:
+            tool_results.advance(self.history_end)
         thinking = getattr(self, 'thinking_history', None)
         if thinking is not None:
             thinking.note_append(self.history_end-count, count, rows)
@@ -1371,6 +1374,9 @@ class RequestAuthority:
             # leaves rejected or deferred rewinds untouched.
             redundancy.invalidate()
         spans = self.memory.begin_rewind(checkpoint)
+        tool_results = getattr(self, 'tool_result_history', None)
+        if tool_results is not None:
+            tool_results.rewind(checkpoint.position)
         thinking = getattr(self, 'thinking_history', None)
         if thinking is not None:
             thinking.rewind(checkpoint.position)

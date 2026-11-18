@@ -29,6 +29,7 @@ setup(
         depends=["csrc/private_record_pack.hpp", "csrc/graph_propagation.hpp", "csrc/restore_frame.hpp",
                  "csrc/query_key_fps_cpu.hpp", "csrc/historical_kv_policy.hpp",
                  "csrc/historical_policy_factory.hpp", "csrc/historical_manager.hpp",
+                 "csrc/historical_tool_result_age.hpp",
                  "csrc/historical_redundancy.hpp", "csrc/historical_thinking.hpp",
                  "csrc/thinking_bindings.hpp", "csrc/parallel_rows.hpp", "csrc/session_spill.hpp",
                  "csrc/direct_record_reader.hpp", "csrc/layer_major_arena.hpp"],

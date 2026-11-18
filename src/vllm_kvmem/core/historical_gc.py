@@ -21,7 +21,9 @@ REDUNDANCY_Q_MAX_SLOTS = 4
 
 # Public schemas mirror the native factory. No Python policy callbacks execute
 # on the worker; adding a policy requires registering its native constructor.
-_POLICY_DEFAULTS = {'lru': {'keep_mandatory': True}, 'redundancy': {
+_POLICY_DEFAULTS = {'lru': {'keep_mandatory': True},
+    'tool_result_age': {'keep_mandatory': True, 'tool_result_age_steps': 12},
+    'redundancy': {
     'keep_mandatory': True, 'importance_weight': 0.1,
     'representative_similarity': 0.9, 'reference_blocks': 32,
     'candidate_blocks': 128, 'pair_comparisons': 512,
@@ -220,7 +222,7 @@ class HistoricalGcSettings:
         # Strategy layer: the eviction policy is an evictor in the strategy registry.
         from ..strategy import EVICTOR, names
         if not isinstance(self.policy, str) or self.policy not in names(EVICTOR) or self.policy not in _POLICY_DEFAULTS:
-            raise ValueError(f'Unknown historical_gc.policy: {self.policy!r} (supported: lru, redundancy)')
+            raise ValueError(f'Unknown historical_gc.policy: {self.policy!r} (supported: lru, redundancy, tool_result_age)')
         if not isinstance(self.policy_params, dict):
             raise ValueError('historical_gc.policy_params must be an object')
         defaults = _POLICY_DEFAULTS[self.policy]
@@ -245,6 +247,9 @@ class HistoricalGcSettings:
                 lower = -1 if key == 'representative_similarity' else 0
                 if type(value) not in (int, float) or not lower <= value <= 1 or not math.isfinite(value):
                     raise ValueError(f'historical_gc.policy_params.{key} must be finite and in [{lower},1]')
+            elif key == 'tool_result_age_steps':
+                if type(value) is not int or not 1 <= value <= 1_000_000:
+                    raise ValueError(f'historical_gc.policy_params.{key} must be an integer in [1,1000000]')
             else:
                 limit = (REDUNDANCY_Q_MAX_SLOT_BYTES if key == 'query_capture_bytes' else
                          2**40 if key.endswith('_bytes') else 65536)
@@ -252,8 +257,8 @@ class HistoricalGcSettings:
                     raise ValueError(f'historical_gc.policy_params.{key} must be an integer in [1,{limit}]')
         # Own the configuration and expand defaults without changing the input.
         object.__setattr__(self, 'policy_params', {**defaults, **self.policy_params})
-        if self.policy == 'redundancy' and not self.policy_params['keep_mandatory']:
-            raise ValueError('historical_gc redundancy requires keep_mandatory=true')
+        if self.policy != 'lru' and not self.policy_params['keep_mandatory']:
+            raise ValueError(f'historical_gc {self.policy} requires keep_mandatory=true')
         if (self.policy == 'redundancy' and self.policy_params['lru_fallback'] and
                 self.policy_params['allow_lossy_fallback']):
             raise ValueError('Choose lru_fallback or allow_lossy_fallback, not both')

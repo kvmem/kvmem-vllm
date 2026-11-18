@@ -926,6 +926,42 @@ static void thinking_age_retires_through_the_manager_and_respects_the_window() {
     }
 }
 
+static void expired_tools_retry_after_backing_and_window_protection_change() {
+    Fixture fixture(HistoricalGcMode::Delete, false, {}, 1, false, {}, "tool_result_age");
+    fixture.append(HistoricalSealed | HistoricalGpu | HistoricalCurrentWindow);
+    fixture.append();  // Recent range protects this expired page for now.
+    auto &scope = *fixture.scope;
+    scope.history_changed(8, 4);
+    scope.set_expired_tool_ranges({{0, 8}});
+    fixture.step(8);
+    check(scope.stats().decisions == 0, "protected tools were proposed for retirement");
+
+    scope.history_changed(16, 8);
+    fixture.step(8);
+    check(scope.stats().tool_result_age_retired == 1 && !fixture.repo->try_pin(fixture.handles[1]),
+          "a tool page did not retry after leaving the recent band");
+
+    check(scope.update(fixture.gpu[0], HistoricalSealed | HistoricalGpu), "window release failed");
+    fixture.step(8);
+    check(scope.stats().tool_result_age_retired == 2 && !fixture.repo->try_pin(fixture.handles[0]),
+          "an expired tool page did not retry after exiting the current frame");
+
+    fixture.append();  // No exact tool range covers this page.
+    scope.request_capacity(8, 0);
+    fixture.step(8);
+    check(bool(fixture.repo->try_pin(fixture.handles[2])) && scope.stats().retired == 2,
+          "capacity pressure must not retire a page outside the expired tool ranges");
+
+    Fixture late(HistoricalGcMode::Delete, false, {}, 1, false, {}, "tool_result_age");
+    late.scope->history_changed(12, 12);
+    late.scope->set_expired_tool_ranges({{0, 4}});
+    late.step(8);
+    late.append();  // Backing published after the expiration scan.
+    late.step(8);
+    check(late.scope->stats().tool_result_age_retired == 1 && !late.repo->try_pin(late.handles[0]),
+          "late backing did not re-arm the tool age rule");
+}
+
 int main() {
     try {
         lru_retirement_and_cpu_reclamation_do_not_wait_for_gpu();
@@ -961,6 +997,7 @@ int main() {
         lru_fallback_does_not_require_query_or_feature_guards();
         builtin_commit_rechecks_pressure_and_recent_range();
         thinking_age_retires_through_the_manager_and_respects_the_window();
+        expired_tools_retry_after_backing_and_window_protection_change();
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

@@ -25,7 +25,7 @@ ownership、容量预约和共享 worker。对象中的 `mode` 支持：
 | 模式 | 行为 |
 | --- | --- |
 | off | 不运行删除策略；保留新 ownership 和正常退出释放，作为对照 |
-| shadow | 计算并统计 LRU 意图，不退休历史块 |
+| shadow | 计算并统计策略意图，不退休历史块 |
 | delete | 提交不可逆退休并在后台安全释放 |
 
 ```json
@@ -47,7 +47,7 @@ ownership、容量预约和共享 worker。对象中的 `mode` 支持：
 示例中的较高水位用于在短历史中实际触发 GC，生产环境应结合保留需求调整。
 
 `policy` 选择删除策略，`policy_params` 只传递该策略的参数；`mode` 独立控制是否
-执行删除。当前注册的策略为 `lru`，参数 `keep_mandatory` 默认为 `true`，保留
+执行删除。`lru` 的 `keep_mandatory` 默认为 `true`，保留
 sink/recent 和 P/M frame 等 mandatory 块；设为 `false` 允许这些块参与 LRU 删除，
 可能使对应 checkpoint 失效。省略新增字段与原有 LRU 行为一致。未知策略、未知
 参数和错误参数类型在启动时拒绝，`off`/`shadow` 也执行配置校验。
@@ -62,6 +62,34 @@ sink/recent 和 P/M frame 等 mandatory 块；设为 `false` 允许这些块参�
 coordination 和 owned sessions。与旧 `repository_gc`、block graph 的组合会在启动时
 拒绝。支持异步 refresh/restore 和原生 MTP；首版未验收 CUDA graph serving。
 请求须携带稳定的 `session_id` 与租户隔离的 `cache_salt`。
+
+## 主动回收旧工具返回
+
+`tool_result_age` 按会话保留最近 N 条完整工具返回。下面的配置先以 `shadow` 记录回收候选。
+
+```json
+"historical_gc": {
+  "mode": "shadow",
+  "policy": "tool_result_age",
+  "policy_params": {"tool_result_age_steps": 12}
+}
+```
+
+`tool_result_age_steps` 默认 12，计数单位是工具返回消息。第 13 条的最后一个
+token 被接受后，第 1 条里的合格页进入后台回收，无需达到容量水位。来源是请求
+计划的 `kvmem_message_spans` 或 `kvmem_locality_spans` 中完整的 `tool` 区间。
+复用前缀的消息边界沿用会话校验，回退会重新计算完成条数。
+
+只有完整落在同一条到期工具返回里的封存页可以退休。跨消息页、角色不明、
+thinking、工具调用以及其它助手内容保留。显式必留区间、sink/recent、当前 GPU
+窗口和 P/M 检查点继续受保护。保护解除或归档完成后，后台会再次检查到期页。
+已获准的读操作随现有引用退出后释放字节，退休的页永久退出后续历史召回。
+在用的 GPU 页随正常换窗或请求结束归还。这条归档回收策略借用了 [AKV 的滚动保留规则](https://arxiv.org/pdf/2610.28577v1#page=8)。
+
+单卡可用 `shadow` 查看 `shadow_decisions`，切换到 `delete` 后用
+`tool_result_age_retired` 和 `cpu_released` 分别核对提交和实际释放。
+Tensor parallel 走已有的 rank 同步提交。容量吃紧时仍只删除合格的旧工具页，
+其余容量缺口由现有准入机制处理。
 
 ## 资源与并发契约
 

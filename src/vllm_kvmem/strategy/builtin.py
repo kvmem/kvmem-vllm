@@ -60,6 +60,8 @@ register(Strategy(EVICTOR, 'lru', _native, native=True, paths=BOTH,
                   summary='Historical GC, least recently used (historical_gc.policy)'))
 register(Strategy(EVICTOR, 'redundancy', _native, native=True, paths=BOTH,
                   summary='Historical GC by redundancy, optional thinking-only scope and LRU fallback'))
+register(Strategy(EVICTOR, 'tool_result_age', _native, native=True, paths=BOTH,
+                  summary='Proactive historical GC of complete older tool replies'))
 
 # The older profile options name the same global strategies.
 QUERY_SCORE_MODES = {'mean_k': 'meank', 'key_fps_4': 'key_fps', 'overlap_16_8': 'overlap'}

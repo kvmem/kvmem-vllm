@@ -16,6 +16,18 @@ namespace {
 using Repo = qw3::KvMemRepository;
 using Handle = qw3::KvMemBlockHandle;
 using Payload = HistoricalPayloadArena;
+using ToolRanges = std::vector<std::pair<uint64_t, uint64_t>>;
+
+auto first_range_after(const ToolRanges &ranges, uint64_t position) {
+    return std::upper_bound(ranges.begin(), ranges.end(), position,
+        [](uint64_t token, const auto &range) { return token < range.second; });
+}
+
+bool contains_tool_record(const ToolRanges &ranges, const Repo::Record &record) {
+    const auto found = first_range_after(ranges, record.token_begin);
+    return found != ranges.end() && found->first <= record.token_begin &&
+           record.token_end() <= found->second;
+}
 
 #define HISTORY_STATS(X) \
     X(published) X(ticks) X(examined) X(decisions) X(retired) X(cpu_released) \
@@ -23,7 +35,8 @@ using Payload = HistoricalPayloadArena;
     X(policy_failures) X(shadow_decisions) X(admission_attempts) X(admission_retries) \
     X(redundancy_retired) X(lossy_retired) X(rejected_ineligible) X(cancelled_decisions) \
     X(lru_fallback_retired) X(lru_representative_retired) X(thinking_classified) X(thinking_pure) \
-    X(shared_marked) X(shared_released) X(thinking_age_retired) X(thinking_age_ineligible) X(thinking_age_protected) X(thinking_age_passes) X(thinking_turns)
+    X(shared_marked) X(shared_released) X(thinking_age_retired) X(thinking_age_ineligible) X(thinking_age_protected) X(thinking_age_passes) X(thinking_turns) \
+    X(tool_result_age_retired)
 
 struct AtomicStats {
 #define FIELD(name) std::atomic<uint64_t> name{0};
@@ -125,7 +138,7 @@ bool sample(const PublishedBlock &source, uint32_t slot, BlockView &out) {
 bool feature_independent(HistoricalDeleteReason reason) {
     return reason == HistoricalDeleteReason::Lru || reason == HistoricalDeleteReason::LruFallback ||
            reason == HistoricalDeleteReason::LruRepresentativeFallback ||
-           reason == HistoricalDeleteReason::ThinkingAge;
+           reason == HistoricalDeleteReason::ThinkingAge || reason == HistoricalDeleteReason::ToolResultAge;
 }
 
 bool begin_publish(PublishedBlock &block, uint64_t &version) {
@@ -180,6 +193,7 @@ struct HistoricalScopeState {
                          HistoricalGcWorker::Config c, uint64_t epoch,
                          std::unique_ptr<HistoricalKvPolicy> p, std::shared_ptr<HistoricalScopeStorage> buffers)
         : repository(std::move(r)), arena(std::move(a)), config(c), incarnation(epoch),
+          tool_age_enabled(c.policy == "tool_result_age"),
           storage(std::move(buffers)), records(storage->records.get()), jobs(storage->jobs),
           completion_words(storage->completion_words), completion_bits(storage->completion_bits.get()),
           shadow(storage->shadow), external_slots(storage->external_slots),
@@ -194,6 +208,12 @@ struct HistoricalScopeState {
     std::shared_ptr<Payload> arena;
     const HistoricalGcWorker::Config config;
     const uint64_t incarnation;
+    const bool tool_age_enabled;
+    // Updates to eligibility serialize with the local retirement commit.
+    // Archive publishers and frame releases read an immutable copy.
+    std::mutex tool_ranges_gate;
+    std::shared_ptr<const ToolRanges> expired_tools;
+    std::atomic<uint64_t> tool_result_revision{0};
     std::shared_ptr<HistoricalScopeStorage> storage;
     PublishedBlock *records;
     std::vector<PendingBlock> &jobs;
@@ -233,6 +253,19 @@ struct HistoricalScopeState {
     uint64_t batch_serial = 0, proposal_serial = UINT64_MAX;
     bool external_committed = false;
 
+    std::shared_ptr<const ToolRanges> tool_ranges() const {
+        return tool_age_enabled ? std::atomic_load_explicit(&expired_tools, std::memory_order_acquire) : nullptr;
+    }
+
+    bool expired_tool_record(const Repo::Record &record) const {
+        const auto ranges = tool_ranges();
+        return ranges && contains_tool_record(*ranges, record);
+    }
+
+    void recheck_tool_results() {
+        tool_result_revision.fetch_add(1, std::memory_order_release);
+    }
+
     void signal_completion(uint32_t slot) {
         completion_bits[slot / 64].fetch_or(uint64_t{1} << (slot % 64), std::memory_order_release);
     }
@@ -266,6 +299,14 @@ struct HistoricalScopeState {
             destination.engine_flags.store(flags, std::memory_order_relaxed);
             destination.engine_generation.store(record.handle.generation, std::memory_order_relaxed);
             destination.engine_version.store(version + 2, std::memory_order_release);
+            if (tool_age_enabled) {
+                auto prior_flags = old_flags;
+                if (!same && destination.generation.load(std::memory_order_acquire) == record.handle.generation)
+                    prior_flags = destination.flags.load(std::memory_order_relaxed);
+                if ((prior_flags & ~flags & (HistoricalCurrentWindow | HistoricalMandatory)) &&
+                        expired_tool_record(record))
+                    recheck_tool_results();
+            }
             return true;
         }
         uint64_t version;
@@ -273,7 +314,11 @@ struct HistoricalScopeState {
         struct PublishExit {
             PublishedBlock &block;
             uint64_t version;
-            ~PublishExit() { block.version.store(version + 2, std::memory_order_release); }
+            std::atomic<uint64_t> *recheck_tools = nullptr;
+            ~PublishExit() {
+                block.version.store(version + 2, std::memory_order_release);
+                if (recheck_tools) recheck_tools->fetch_add(1, std::memory_order_release);
+            }
         } unlock{destination, version};
         const bool same = destination.generation.load(std::memory_order_relaxed) == record.handle.generation;
         const auto previous_payload = same ? destination.payload_generation.load(std::memory_order_relaxed) : 0;
@@ -302,7 +347,10 @@ struct HistoricalScopeState {
         destination.logical_id.store(record.logical_id, std::memory_order_relaxed);
         destination.last_use.store(std::max(last, use), std::memory_order_relaxed);
         destination.flags.store(flags, std::memory_order_relaxed);
-        if (cpu && !previous_payload) stats.published.fetch_add(1, std::memory_order_relaxed);
+        if (cpu && !previous_payload) {
+            stats.published.fetch_add(1, std::memory_order_relaxed);
+            if (expired_tool_record(record)) unlock.recheck_tools = &tool_result_revision;
+        }
         return true;
     }
 
@@ -495,6 +543,7 @@ struct HistoricalScopeState {
         result.requested_ready_slots = requested_ready.load(std::memory_order_acquire);
         result.thinking_turns = thinking_turns.load(std::memory_order_acquire);
         result.thinking_pure = stats.thinking_pure.load(std::memory_order_relaxed);
+        result.tool_result_revision = tool_result_revision.load(std::memory_order_acquire);
         const auto shared_released = stats.shared_released.load(std::memory_order_relaxed);
         result.scope_cpu_bytes = (stats.published.load(std::memory_order_relaxed) -
                                   stats.cpu_released.load(std::memory_order_relaxed) - shared_released) *
@@ -557,6 +606,11 @@ struct HistoricalScopeState {
         // The nonblocking source guard below must verify the actual version
         // before retirement. It distinguishes contention from missing keys.
         current.meta.feature_version = intent.feature_version;
+        std::unique_lock<std::mutex> tool_guard(tool_ranges_gate, std::defer_lock);
+        if (intent.reason == HistoricalDeleteReason::ToolResultAge) {
+            tool_guard.lock();
+            current.meta.expired_tool_result = expired_tool_record(live.record());
+        }
         if (!policy->permits_intent(current.meta, intent)) return Code::Ineligible;
         Repo::Lease witness;
         if (redundancy) {
@@ -621,6 +675,8 @@ struct HistoricalScopeState {
                         stats.redundancy_retired.fetch_add(1, std::memory_order_relaxed);
                     if (intent.reason == HistoricalDeleteReason::ThinkingAge)
                         stats.thinking_age_retired.fetch_add(1, std::memory_order_relaxed);
+                    if (intent.reason == HistoricalDeleteReason::ToolResultAge)
+                        stats.tool_result_age_retired.fetch_add(1, std::memory_order_relaxed);
                     if (intent.reason == HistoricalDeleteReason::LossyPressure)
                         stats.lossy_retired.fetch_add(1, std::memory_order_relaxed);
                     if (intent.reason == HistoricalDeleteReason::LruFallback ||
@@ -700,6 +756,7 @@ struct HistoricalScopeState {
                 snapshot_ready = policy_round_done = false;
                 snapshot_cursor = 0;
                 snapshot.blocks.clear();
+                snapshot.tool_result_revision = current_pressure.tool_result_revision;
                 ++snapshot.round;
             }
             if (!snapshot_ready) {
@@ -710,8 +767,12 @@ struct HistoricalScopeState {
                     if (!lease) continue;
                     if (shadow[slot] == lease.handle().generation) continue;
                     BlockView view;
-                    if (!sample(records[slot], slot, view) || view.meta.handle != lease.handle()) continue;
+                    if (!sample(records[slot], slot, view) || view.meta.handle != lease.handle()) {
+                        if (expired_tool_record(lease.record())) recheck_tool_results();
+                        continue;
+                    }
                     view.meta.live = true;
+                    view.meta.expired_tool_result = expired_tool_record(lease.record());
                     const auto recent = recent_begin.load(std::memory_order_acquire);
                     const auto end = history_end.load(std::memory_order_acquire);
                     if (end && lease.record().token_begin < end &&
@@ -790,6 +851,7 @@ struct HistoricalScopeState {
         const auto end = history_end.load(std::memory_order_acquire);
         if (end && live.record().token_begin < end && live.record().token_end() > recent)
             current.meta.mandatory = true;
+        current.meta.expired_tool_result = expired_tool_record(live.record());
         entry.live = std::move(live);
         return Code::Committed;
     }
@@ -844,14 +906,14 @@ struct HistoricalScopeState {
         return Code::Committed;
     }
 
-    // Followers never run the policy. They refuse only what this rank must
-    // keep: unsealed (I/O still publishing), current window, recent, held or
-    // otherwise mandatory generations.
+    // Followers never rank candidates. They veto if the record is protected
+    // locally or its tool-expiration metadata has not been published here.
     HistoricalCommitCode external_follower(ExternalEntry &entry) {
         BlockView current;
         const auto code = external_check(entry, current);
         if (code != HistoricalCommitCode::Committed) return code;
         if (!current.meta.sealed || current.meta.mandatory) return HistoricalCommitCode::Ineligible;
+        if (tool_age_enabled && !current.meta.expired_tool_result) return HistoricalCommitCode::Ineligible;
         return code;
     }
 
@@ -955,6 +1017,8 @@ struct HistoricalScopeState {
                     stats.redundancy_retired.fetch_add(1, std::memory_order_relaxed);
                 if (intent.reason == HistoricalDeleteReason::ThinkingAge)
                     stats.thinking_age_retired.fetch_add(1, std::memory_order_relaxed);
+                if (intent.reason == HistoricalDeleteReason::ToolResultAge)
+                    stats.tool_result_age_retired.fetch_add(1, std::memory_order_relaxed);
                 if (intent.reason == HistoricalDeleteReason::LossyPressure)
                     stats.lossy_retired.fetch_add(1, std::memory_order_relaxed);
                 if (intent.reason == HistoricalDeleteReason::LruFallback ||
@@ -969,6 +1033,9 @@ struct HistoricalScopeState {
                 stats.rejected_ineligible.fetch_add(1, std::memory_order_relaxed);
                 if (intent.reason == HistoricalDeleteReason::ThinkingAge)
                     stats.thinking_age_ineligible.fetch_add(1, std::memory_order_relaxed);
+                if (intent.reason == HistoricalDeleteReason::ToolResultAge &&
+                        entry && (entry->local == Code::Committed || entry->local == Code::Retry))
+                    recheck_tool_results();  // Transient local contention or a follower's veto.
             }
         }
         clear_batch();
@@ -1167,11 +1234,16 @@ HistoricalGcScope::~HistoricalGcScope() { close(); }
 HistoricalFrameHold::HistoricalFrameHold(std::shared_ptr<HistoricalScopeState> state, bool current)
     : state_(std::move(state)), current_(current) {}
 HistoricalFrameHold::~HistoricalFrameHold() {
+    const auto ranges = state_->tool_ranges();
+    bool recheck_tools = false;
     for (const auto &lease : leases_) {
         if (current_)
             state_->records[lease.handle().slot].current_holds.fetch_sub(1, std::memory_order_release);
-        state_->records[lease.handle().slot].policy_holds.fetch_sub(1, std::memory_order_release);
+        const auto previous = state_->records[lease.handle().slot].policy_holds.fetch_sub(1, std::memory_order_release);
+        if (previous == 1 && ranges && !recheck_tools)
+            recheck_tools = contains_tool_record(*ranges, lease.record());
     }
+    if (recheck_tools) state_->recheck_tool_results();
 }
 
 std::shared_ptr<HistoricalFrameHold> HistoricalGcScope::protect(const std::vector<Handle> &handles) {
@@ -1282,6 +1354,24 @@ void HistoricalGcScope::publish_turns(uint64_t completed) {
     state_->thinking_turns.store(completed, std::memory_order_release);
     state_->stats.thinking_turns.store(completed, std::memory_order_relaxed);
 }
+void HistoricalGcScope::set_expired_tool_ranges(ToolRanges ranges) {
+    if (!state_ || !state_->tool_age_enabled)
+        throw std::invalid_argument("Expired tool ranges require an owned tool_result_age scope");
+    uint64_t last_end = 0;
+    const auto block_tokens = state_->repository->block_tokens();
+    for (const auto &[begin, end] : ranges) {
+        if (begin < last_end || begin >= end || begin % block_tokens || end % block_tokens)
+            throw std::invalid_argument("Expired tool ranges must be ordered, disjoint whole pages");
+        last_end = end;
+    }
+    auto next = ranges.empty() ? nullptr : std::make_shared<const ToolRanges>(std::move(ranges));
+    {
+        std::lock_guard<std::mutex> guard(state_->tool_ranges_gate);
+        std::atomic_store_explicit(&state_->expired_tools, std::move(next), std::memory_order_release);
+        state_->recheck_tool_results();
+    }
+    owner_->wake.notify_one();
+}
 uint64_t HistoricalGcScope::begin_question(uint64_t expected_tokens) {
     if (!state_ || state_->closing.load(std::memory_order_acquire) || !state_->features) return 0;
     return state_->features->begin_question(expected_tokens);
@@ -1319,8 +1409,19 @@ void HistoricalGcScope::observe(const Repo::Lease &lease, bool sealed, bool gpu,
 }
 void HistoricalGcScope::history_changed(uint64_t end, uint64_t recent) {
     if (!state_) return;
+    const auto previous = state_->tool_age_enabled ? state_->recent_begin.load(std::memory_order_relaxed) : recent;
     state_->recent_begin.store(recent, std::memory_order_release);
     state_->history_end.store(end, std::memory_order_release);
+    if (previous >= recent) return;
+    const auto block = state_->repository->block_tokens();
+    if (previous / block < recent / block) {
+        const auto ranges = state_->tool_ranges();
+        if (ranges) {
+            const auto found = first_range_after(*ranges, previous / block * block);
+            if (found != ranges->end() && found->first < recent / block * block)
+                state_->recheck_tool_results();
+        }
+    }
 }
 void HistoricalGcScope::begin_step() {
     if (state_) state_->use_stamp.fetch_add(1, std::memory_order_release);

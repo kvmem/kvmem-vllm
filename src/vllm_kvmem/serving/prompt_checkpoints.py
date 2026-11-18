@@ -644,6 +644,9 @@ class PromptCheckpointPool:
                     return None
                 if not authority.archive.wait_for_idle(remaining):
                     raise TimeoutError('P checkpoint archive did not drain')
+        tool_results = getattr(checkpoint.authority, 'tool_result_history', None)
+        if tool_results is not None and metadata_binding is not None:
+            tool_results.bind(metadata_binding, checkpoint.position)
         graph = selection_metadata(checkpoint.authority)
         if graph is not None:
             if checkpoint.graph_history is None:

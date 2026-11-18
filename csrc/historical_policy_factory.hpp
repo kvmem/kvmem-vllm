@@ -4,6 +4,7 @@
 #include "historical_kv_policy.hpp"
 #include "historical_redundancy.hpp"
 #include "historical_thinking_age.hpp"
+#include "historical_tool_result_age.hpp"
 
 #include <map>
 #include <memory>
@@ -45,7 +46,22 @@ inline std::pair<uint32_t, HistoricalPolicyParameters> split_thinking_age(
     return {value, rest};
 }
 [[noreturn]] inline void unknown(const std::string &name) {
-    throw std::invalid_argument("Unknown historical_gc.policy: " + name + " (supported: lru, redundancy)");
+    throw std::invalid_argument("Unknown historical_gc.policy: " + name + " (supported: lru, redundancy, tool_result_age)");
+}
+inline void validate_tool_result_age(const HistoricalPolicyParameters &params) {
+    for (const auto &[key, value] : params) {
+        if (key == "tool_result_age_steps") {
+            const auto *steps = std::get_if<int64_t>(&value);
+            if (!steps || *steps < 1 || *steps > 1000000)
+                throw std::invalid_argument("historical_gc.policy_params.tool_result_age_steps must be an integer in [1, 1000000]");
+        } else if (key == "keep_mandatory") {
+            const auto *keep = std::get_if<bool>(&value);
+            if (!keep || !*keep)
+                throw std::invalid_argument("historical_gc tool_result_age requires keep_mandatory=true");
+        } else {
+            throw std::invalid_argument("Unknown historical_gc.policy_params.tool_result_age parameter: " + key);
+        }
+    }
 }
 inline HistoricalRedundancyConfig redundancy_config(const HistoricalPolicyParameters &params) {
     HistoricalRedundancyConfig config;
@@ -98,6 +114,10 @@ inline HistoricalRedundancyConfig redundancy_config(const HistoricalPolicyParame
 
 inline void validate_historical_kv_policy(const std::string &name,
                                           const HistoricalPolicyParameters &all_params) {
+    if (name == "tool_result_age") {
+        historical_policy_detail::validate_tool_result_age(all_params);
+        return;
+    }
     const auto params = historical_policy_detail::split_thinking_age(all_params).second;
     if (name == "lru") {
         historical_policy_detail::lru_keep_mandatory(params, true);
@@ -134,6 +154,10 @@ inline std::unique_ptr<HistoricalKvPolicy> make_pressure_policy(
 inline std::unique_ptr<HistoricalKvPolicy> make_historical_kv_policy(
         const std::string &name, const HistoricalPolicyParameters &params,
         size_t capacity, bool keep_mandatory = true) {
+    if (name == "tool_result_age") {
+        historical_policy_detail::validate_tool_result_age(params);
+        return std::make_unique<HistoricalToolResultAgePolicy>();
+    }
     const auto [steps, rest] = historical_policy_detail::split_thinking_age(params);
     auto policy = historical_policy_detail::make_pressure_policy(name, rest, capacity, keep_mandatory);
     if (!steps) return policy;
@@ -142,6 +166,10 @@ inline std::unique_ptr<HistoricalKvPolicy> make_historical_kv_policy(
 
 inline std::shared_ptr<HistoricalFeatureSource> make_historical_feature_source(
         const std::string &name,const HistoricalPolicyParameters &all_params,size_t capacity) {
+    if (name == "tool_result_age") {
+        historical_policy_detail::validate_tool_result_age(all_params);
+        return {};
+    }
     const auto params = historical_policy_detail::split_thinking_age(all_params).second;
     if(name=="lru") {historical_policy_detail::lru_keep_mandatory(params,true);return {};}
     if(name=="redundancy") {

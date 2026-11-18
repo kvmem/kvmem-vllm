@@ -45,6 +45,7 @@ struct HistoricalGcStats {
     uint64_t thinking_age_retired = 0, thinking_age_ineligible = 0, thinking_age_protected = 0;
     // Completed age passes, and the session's last published completed turns (a gauge).
     uint64_t thinking_age_passes = 0, thinking_turns = 0;
+    uint64_t tool_result_age_retired = 0;
 };
 
 struct HistoricalStorageStats {
@@ -112,6 +113,8 @@ public:
                           uint32_t turn = 0);
     // Assistant messages complete in this session's accepted history.
     void publish_turns(uint64_t completed);
+    // Whole-page ranges from complete, expired tool replies in accepted history.
+    void set_expired_tool_ranges(std::vector<std::pair<uint64_t, uint64_t>> ranges);
     uint64_t begin_question(uint64_t expected_tokens);
     bool append_question(uint64_t epoch, uint64_t offset, const float *, size_t elements, uint32_t tokens);
     bool observe_query(uint64_t epoch, const float *, size_t elements, uint32_t tokens);

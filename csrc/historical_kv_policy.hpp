@@ -33,12 +33,14 @@ struct HistoricalBlockMeta {
     // is shared with other sessions or a prefix pool. Retiring it drops only
     // this session's reference and frees no CPU bytes (cpu_bytes is 0).
     bool shared = false;
+    bool expired_tool_result = false;
 };
 
 struct HistoricalSnapshot {
     uint64_t incarnation = 0, round = 0;
     // Immutable while a policy round is in progress; owned by the manager.
     std::vector<HistoricalBlockMeta> blocks;
+    uint64_t tool_result_revision = 0;
 };
 
 struct HistoricalPressure {
@@ -55,6 +57,7 @@ struct HistoricalPressure {
     // Shared prefixes: the part of scope_cpu_bytes held in shared payloads. The
     // scope's byte budget applies to its private bytes only.
     uint64_t scope_shared_bytes = 0;
+    uint64_t tool_result_revision = 0;
     uint64_t scope_private_bytes() const {
         return scope_cpu_bytes > scope_shared_bytes ? scope_cpu_bytes - scope_shared_bytes : 0;
     }
@@ -64,7 +67,9 @@ struct HistoricalWorkBudget {
     size_t scan_blocks = 256, delete_blocks = 64;
 };
 
-enum class HistoricalDeleteReason { Lru, Redundancy, LossyPressure, LruFallback, LruRepresentativeFallback, ThinkingAge };
+enum class HistoricalDeleteReason {
+    Lru, Redundancy, LossyPressure, LruFallback, LruRepresentativeFallback, ThinkingAge, ToolResultAge
+};
 enum class HistoricalCommitCode { Committed, AlreadyRetired, Shadow, Stale, Ineligible, Cancelled, Retry };
 
 struct HistoricalDeleteIntent {
