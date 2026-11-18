@@ -10,7 +10,7 @@ import json
 import threading
 import time
 
-from benchmark import metrics, request_one, save
+from benchmark import metrics, release_session, request_one, save
 from concurrency_workload import window
 
 
@@ -25,7 +25,8 @@ def run(root, args, build):
         before = metrics()
         begin = time.perf_counter()
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = [pool.submit(request_one, directory/f'c{i+1}', ids, span, args.pure_decode, barrier)
+            futures = [pool.submit(request_one, directory/f'c{i+1}', ids, span, args.pure_decode, barrier,
+                                   use_kvmem=not args.native)
                        for i in range(concurrency)]
             rows = [f.result() for f in futures]
         seconds = time.perf_counter() - begin
@@ -41,3 +42,6 @@ def run(root, args, build):
                   'after the last first token and before the first finish (no prefill inside).')
         save(directory/'summary.json', result)
         print(json.dumps(result), flush=True)
+        if not args.native:
+            for i, row in enumerate(rows, start=1):
+                release_session(row, directory/f'c{i}')

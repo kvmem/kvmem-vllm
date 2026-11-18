@@ -90,17 +90,25 @@ def capture_model(self, *args, **kwargs):
         original_replay = torch.cuda.CUDAGraph.replay
         draft_ids = {id(graph) for graph in draft.graphs.values()}
         counts = dict(target_replays=0,draft_replays=0)
-        replay_path=path.with_name(f"graph-replays-rank{rank}.json")
+        import atexit
+        from vllm_kvmem.serving.report_writer import LatestReportWriter
+        # A slow filesystem must not delay the next CUDA graph launch.
+        writer = LatestReportWriter(path.parent)
+        replay_name = f"graph-replays-rank{rank}"
         last_publish = [0.0]
+
+        def finish_counts():
+            writer.submit(replay_name, dict(counts, observed_at=time.monotonic()))
+            writer.close()
+        atexit.register(finish_counts)
+
         def replay(graph):
             result=original_replay(graph)
             key="draft_replays" if id(graph) in draft_ids else "target_replays"
             counts[key]+=1
             now = time.monotonic()
             if now - last_publish[0] >= 1.0:
-                temp = replay_path.with_suffix(".tmp")
-                temp.write_text(json.dumps(dict(counts, observed_at=now),indent=2)+"\n")
-                temp.replace(replay_path)
+                writer.submit(replay_name, dict(counts, observed_at=now))
                 last_publish[0] = now
             return result
         torch.cuda.CUDAGraph.replay=replay
