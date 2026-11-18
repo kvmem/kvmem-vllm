@@ -544,16 +544,28 @@ class KVMemScheduler(Scheduler):
         # New query shapes publish immediately; all cumulative counts remain
         # exact in memory and are flushed at lifecycle changes and shutdown.
         identity = tuple((stage, tuple(histogram)) for stage, histogram in self._scheduled_queries.items())
-        if not self._snapshot_cadence('queries').due(identity, force=force):
+        cadence = self._snapshot_cadence('queries')
+        new_shape = identity != cadence.last_identity
+        if not cadence.due(identity, force=force):
             return
+        from .report_writer import LatestReportWriter, write_report
         path = Path(_settings.require('KVMEM_RUNNER_PROBE_DIR'))
-        temporary = path / 'scheduled_queries.tmp'
-        temporary.write_text(json.dumps({"queries": self._scheduled_queries,
+        report = {"queries": {stage: counts.copy() for stage, counts in self._scheduled_queries.items()},
             "prefill_cadence": self.prefill_cadence,
             "archive_capacity_deferrals": self.archive_admission.deferred if getattr(self, 'archive_admission', None) else 0,
-            "throttle_requests": self._cadence_requested,
-            **({"decode_burst": self._burst_stats} if getattr(self, 'prefill_decode_burst', False) else {})}))
-        temporary.replace(path / 'scheduled_queries.json')
+            "throttle_requests": self._cadence_requested}
+        if getattr(self, 'prefill_decode_burst', False):
+            report["decode_burst"] = self._burst_stats.copy()
+        writer = getattr(self, '_query_report_writer', None)
+        synchronous = force or new_shape or cadence.interval == 0
+        if synchronous and writer is None:
+            write_report(path, 'scheduled_queries', report, indent=None)
+            return
+        if writer is None:
+            self._query_report_writer = writer = LatestReportWriter(path)
+        writer.submit('scheduled_queries', report)
+        if synchronous:
+            writer.flush()
 
     def update_from_output(self, *args, **kwargs):
         pool = getattr(self.connector, 'systemone_pool', None)
@@ -600,8 +612,14 @@ class KVMemScheduler(Scheduler):
         try:
             return super().shutdown()
         finally:
-            self._write_lifecycle_snapshot(force=True)
-            self._write_scheduled_queries(force=True)
+            try:
+                self._write_lifecycle_snapshot(force=True)
+                self._write_scheduled_queries(force=True)
+            finally:
+                writer = getattr(self, '_query_report_writer', None)
+                if writer is not None:
+                    writer.close()
+                    self._query_report_writer = None
 
     def _free_request(self, request, delay_free_blocks=False):
         controller = getattr(self, 'swap_controller', None)
