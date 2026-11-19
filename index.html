@@ -77,8 +77,8 @@ p { margin: 0; }
 
 /* Inputs */
 .inputs { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 18px; display: grid; gap: 14px; }
-.fields { display: grid; grid-template-columns: 1.5fr 1.3fr 0.9fr 1.2fr 0.9fr 1fr; gap: 14px; align-items: end; }
-@media (max-width: 1000px) { .fields { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.fields { display: grid; grid-template-columns: 1.4fr 1.5fr 0.9fr 1.35fr 0.8fr 1fr 1.15fr; gap: 14px; align-items: end; }
+@media (max-width: 1100px) { .fields { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (max-width: 560px) { .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); } .f-wide { grid-column: 1 / -1; } }
 .field { display: grid; gap: 6px; min-width: 0; }
 .field > label, .field > .label { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 500; }
@@ -187,6 +187,7 @@ tbody tr:last-child td { border-bottom: 0; }
       </div>
       <div class="field"><label for="ssd">NVMe</label><select id="ssd"></select></div>
       <div class="field"><label for="ctx">Tokens per request</label><select id="ctx"></select></div>
+      <div class="field"><label for="win">KVMem window</label><select id="win"></select></div>
     </div>
     <div class="fit" id="fit"></div>
   </section>
@@ -224,6 +225,14 @@ const GPUS = [
 ];
 const SSD_OPTIONS = [2000, 4000, 8000, 16000];
 const CTX_OPTIONS = [32768, 65536, 131072, 262144, 524288, 1048576];
+const WINDOWS = [
+  { id: 'k32', K: 32768, G: 16384 },
+  { id: 'k36', K: 36864, G: 16384 },
+  { id: 'k64', K: 65536, G: 32768 },
+  { id: 'k128', K: 131072, G: 32768 },
+];
+const MAX_SEQS = 256;             // max_num_seqs per replica
+const KVMEM_HEADROOM = 1 * GiB;   // per GPU, kept outside KVMem's pool for final-Query scoring
 
 // ---------------- models ----------------
 // Qwen models use vLLM's hybrid page geometry (checked against server captures);
@@ -231,24 +240,24 @@ const CTX_OPTIONS = [32768, 65536, 131072, 262144, 524288, 1048576];
 const MODELS = {
   q27: {
     label: 'Qwen3.8-27B', desc: 'Dense, 16 attention + 48 GDN layers, MTP 4',
-    kind: 'pages', weightsGiB: 20.0, hostGiB: 0, overhead: 2, native: 262144, K: 36864, G: 16384,
+    kind: 'pages', weightsGiB: 20.0, hostGiB: 0, ovBase: 1.0, ovAct: 3.4, native: 262144, K: 36864, G: 16384,
     attn: 16, mtp: 1, gdn: 48, extraRec: 0, kvHeads: 4, headDim: 256, qheads: 24,
     lin: { kh: 16, kd: 128, vh: 48, vd: 128, conv: 4 }, layout: 'shared', qsa: null,
-    s: 4, tau: 3.5, archiveBpt: 34816, three: 'nvme',
+    s: 4, tau: 3.5, archiveBpt: 34816, three: 'nvme', hostPerReq: 0.0009,
     tp: { Wfix: 16.4 * GiB, Wexp: 0, Wdraft: 1.46 * GiB, active: 26e9, layers: 64, hidden: 5120 },
   },
   fn: {
     label: 'Qwen3.8 Flash Next', desc: 'MoE, 512 experts (10 active), 12 QSA + 36 GDN layers, MTP 3',
-    kind: 'pages', weightsGiB: 69.72, hostGiB: 25.4, overhead: 3, native: 262144, K: 131072, G: 32768,
+    kind: 'pages', weightsGiB: 69.72, hostGiB: 25.4, ovBase: 1.0, ovAct: 2.0, native: 262144, K: 131072, G: 32768,
     attn: 12, mtp: 1, gdn: 36, extraRec: 1, kvHeads: 2, headDim: 256, qheads: 24,
     lin: { kh: 16, kd: 128, vh: 48, vd: 128, conv: 4 }, layout: 'perlayer', qsa: { compress: 4, indexDim: 128, indexBytes: 2 },
-    s: 3, tau: 2.55, archiveBpt: 26624, three: 'stream',
+    s: 3, tau: 2.55, archiveBpt: 26624, three: 'stream', hostPerReq: 0,
     tp: { Wfix: 5.3 * GiB, Wexp: 61.26 * GiB, E: 512, k: 10, Wdraft: 0.48 * GiB, active: 3.5e9, layers: 48, hidden: 2560 },
   },
   ds4: {
     label: 'DeepSeek V4.1 Flash', desc: 'MoE, 256 experts (6 active), 43 layers of compressed sparse attention, MTP 1',
-    kind: 'bytes', weightsGiB: 153, hostGiB: 0, overhead: 3, native: 1048576, K: 131072, G: 32768,
-    s: 1, tau: 1.8, archiveBpt: 3807, gpuBpt: 2423, fixedReq: 10e6, three: 'stream',
+    kind: 'bytes', weightsGiB: 153, hostGiB: 0, ovBase: 1.0, ovAct: 3.0, native: 1048576, K: 131072, G: 32768,
+    s: 1, tau: 1.8, archiveBpt: 3807, gpuBpt: 2423, fixedReq: 10e6, three: 'stream', hostPerReq: 0,
     // compressed entries: 21 layers at 4x with a 128-dim indexer, 20 layers at 128x, 128-token sliding window
     r4: 21, r128: 20, entryGpu: 320, entryCpu: 576, indexKey: 132, topk: 512,
     tp: { Wfix: 3.8 * GB, Wexp: 155.8 * GB, E: 256, k: 6, Wdraft: 0.4 * GB, WdraftExp: 3.6 * GB, active: 13.3e9, layers: 43, hidden: 4096 },
@@ -312,7 +321,7 @@ function costs(m, tp, L, kvBytes) {
 }
 
 // ---------------- decode step time ----------------
-function stepTime(m, gp, tp, B, kvReadReq, stateReq, attnFlopsReq) {
+function stepTime(m, gp, tp, B, kvReadReq, stateReq, attnFlopsReq, hostPerReq) {
   if (B <= 0) return null;
   const t = m.tp, s = m.s, T = B * (1 + s);
   const f = t.Wexp ? 1 - Math.pow(1 - t.k / t.E, T) : 0;
@@ -324,7 +333,7 @@ function stepTime(m, gp, tp, B, kvReadReq, stateReq, attnFlopsReq) {
   const tCmp = (2 * t.active * T + B * attnFlopsReq) / tp / (gp.peak * 1e12 * 0.5);
   const nAR = 2 * t.layers + 2 * s;
   const tComm = tp > 1 ? nAR * gp.alpha * 1e-6 + nAR * T * t.hidden * 2 * (2 * (tp - 1) / tp) / (gp.link * GB) : 0;
-  return { t: 0.006 + Math.max(tMem, tCmp) + tComm, tMem, tCmp, tComm, mem };
+  return { t: 0.006 + (hostPerReq || 0) * B + Math.max(tMem, tCmp) + tComm, tMem, tCmp, tComm, mem };
 }
 function decodeTraffic(m, mode, L, W, kvBytes) {
   // bytes of KV and recurrent state one request reads/writes per decode step, plus attention FLOPs
@@ -345,19 +354,22 @@ function decodeTraffic(m, mode, L, W, kvBytes) {
 }
 
 // ---------------- estimate ----------------
+// runtime memory outside the KV pool: CUDA graphs and buffers plus activations that split with TP
+const overheadAt = (m, t) => m.ovBase + m.ovAct / t;
 function fitTP(m, gp, gpus) {
   const opts = [1, 2, 4, 8, 16].filter(t => t <= gpus);
-  const pool = t => gp.gib * 0.9 - m.weightsGiB / t - m.overhead;
+  const pool = t => gp.gib * 0.9 - m.weightsGiB / t - overheadAt(m, t);
   for (const t of opts) if (pool(t) >= 8) return { tp: t, pool: pool(t) };
   let best = null;
-  for (const t of opts) if (pool(t) > 1 && (!best || pool(t) > best.pool)) best = { tp: t, pool: pool(t) };
+  for (const t of opts) if (pool(t) >= 3 && (!best || pool(t) > best.pool)) best = { tp: t, pool: pool(t) };
   if (best) return best;
   let need = null;
-  for (const t of [1, 2, 4, 8, 16, 32, 64]) if (pool(t) > 1) { need = t; break; }
+  for (const t of [1, 2, 4, 8, 16, 32, 64]) if (pool(t) >= 3) { need = t; break; }
   return { tp: 0, pool: 0, need };
 }
 function estimate(st) {
-  const m = MODELS[st.model], gp = GPUS.find(g => g.id === st.gpu);
+  const win = WINDOWS.find(x => x.id === st.win) || WINDOWS[0];
+  const m = Object.assign({}, MODELS[st.model], { K: win.K, G: win.G }), gp = GPUS.find(g => g.id === st.gpu);
   const kvBytes = 0.5625;                      // NVFP4 KV on the GPU
   const fit = fitTP(m, gp, st.gpus);
   const L = st.ctx;
@@ -369,17 +381,21 @@ function estimate(st) {
   const c = costs(m, tp, L, kvBytes);
   const poolBytes = fit.pool * GiB;
   const usableUnits = Math.max(0, Math.floor(poolBytes / c.unit) - (m.kind === 'pages' ? 1 : 0)) * c.unit;
+  const usableK = Math.max(0, Math.floor((poolBytes - KVMEM_HEADROOM) / c.unit) - (m.kind === 'pages' ? 1 : 0)) * c.unit;
   const hostModel = m.hostGiB * GiB * replicas;
   const ramUsable = Math.max(0, ramTotal - Math.max(16 * GiB, 0.15 * ramTotal) - hostModel);
   const pinnedCap = Math.min(ramUsable, 0.5 * ramTotal);
   Object.assign(out, { tp, replicas, c, poolBytes: usableUnits, hostModel, ramUsable });
 
-  const mk = (key, n, perGpu, reserve, bounds, cpuUsed, ssdUsed, cpuWhat, ssdWhat) => {
+  const mk = (key, n0, perGpu, reserve, bounds, cpuUsed0, ssdUsed0, cpuWhat, ssdWhat) => {
+    const cap = MAX_SEQS * replicas, n = Math.min(n0, cap), capped = n0 > cap;
+    const scale = n0 > 0 ? n / n0 : 0;
+    const cpuUsed = hostModel + (cpuUsed0 - hostModel) * (cpuWhat === 'staging' ? 1 : scale), ssdUsed = ssdUsed0 * scale;
     const perRep = replicas ? n / replicas : 0;
     const traffic = decodeTraffic(m, key, L, c.W, kvBytes);
-    const st2 = stepTime(m, gp, tp, perRep, traffic.kv, traffic.state, traffic.flops);
+    const st2 = stepTime(m, gp, tp, perRep, traffic.kv, traffic.state, traffic.flops, key === 'v' ? 0 : m.hostPerReq);
     const tput = st2 ? replicas * perRep * m.tau / st2.t : 0;
-    return { n, perGpu, reserve, bounds, cpuUsed, ssdUsed, cpuWhat, ssdWhat, tput, step: st2 };
+    return { n, capped, perGpu, reserve, bounds, cpuUsed, ssdUsed, cpuWhat, ssdWhat, tput, step: st2 };
   };
   // vLLM: whole context on the GPU
   {
@@ -389,7 +405,7 @@ function estimate(st) {
   }
   // KVMem 2-layer: K + G window on the GPU, full history in RAM
   {
-    const gpuN = replicas * Math.floor(usableUnits / c.two);
+    const gpuN = replicas * Math.floor(usableK / c.two);
     const cpuN = Math.floor(ramUsable / c.hist);
     const n = Math.min(gpuN, cpuN);
     out.modes.two = mk('two', n, c.two, 0, { gpu: gpuN, cpu: cpuN }, hostModel + n * c.hist, 0, 'history', null);
@@ -397,7 +413,7 @@ function estimate(st) {
   // KVMem 3-layer
   {
     let gpuS = 0;
-    while (gpuS < 4096 && (gpuS + 1) * c.three + c.reserve3(gpuS + 1) <= usableUnits) gpuS++;
+    while (gpuS < 4096 && (gpuS + 1) * c.three + c.reserve3(gpuS + 1) <= usableK) gpuS++;
     const gpuN = replicas * gpuS;
     const ssdN = Math.floor(ssdTotal / c.hist);
     let cpuN, cpuUsedFn, cpuWhat;
@@ -429,7 +445,7 @@ function fmtRate(r) { return r >= 10000 ? Math.round(r / 100) * 100 : r >= 1000 
 function ratio(a, b) { if (!b) return a > 0 ? 'vLLM cannot' : ''; const r = a / b; return (r >= 10 ? r.toFixed(0) : r.toFixed(1)) + '× vLLM'; }
 
 // ---------------- state ----------------
-const DEFAULT = { model: 'q27', gpu: 'pro6000', gpus: 8, ramPerGpu: 192, ssd: 8000, ctx: 262144 };
+const DEFAULT = { model: 'q27', gpu: 'pro6000', gpus: 8, ramPerGpu: 192, ssd: 8000, ctx: 262144, win: 'k32' };
 let state = Object.assign({}, DEFAULT);
 const STORE = 'kvmem-capacity-v3';
 try {
@@ -457,17 +473,19 @@ function build() {
   fill('gpu', GPUS.map(g => [g.id, g.label]));
   fill('ssd', SSD_OPTIONS.map(v => [v, (v / 1000) + ' TB']));
   fill('ctx', CTX_OPTIONS.map(v => [v, fmtTok(v) + ' tokens']));
+  fill('win', WINDOWS.map(w => [w.id, 'K ' + fmtTok(w.K) + ' + G ' + fmtTok(w.G)]));
   const set = (k, v) => { state[k] = v; update(); };
   $('model').addEventListener('change', () => set('model', $('model').value));
   $('gpu').addEventListener('change', () => set('gpu', $('gpu').value));
   $('ssd').addEventListener('change', () => set('ssd', +$('ssd').value));
   $('ctx').addEventListener('change', () => set('ctx', +$('ctx').value));
+  $('win').addEventListener('change', () => set('win', $('win').value));
   $('gpus-dec').addEventListener('click', () => set('gpus', Math.max(1, state.gpus - 1)));
   $('gpus-inc').addEventListener('click', () => set('gpus', Math.min(16, state.gpus + 1)));
   document.querySelectorAll('input[name="ram"]').forEach(r => r.addEventListener('change', () => set('ramPerGpu', +r.value)));
 }
 function writeControls() {
-  $('model').value = state.model; $('gpu').value = state.gpu; $('ssd').value = String(state.ssd); $('ctx').value = String(state.ctx);
+  $('model').value = state.model; $('gpu').value = state.gpu; $('ssd').value = String(state.ssd); $('ctx').value = String(state.ctx); $('win').value = state.win;
   $('gpus').textContent = String(state.gpus); $('gpus-dec').disabled = state.gpus <= 1; $('gpus-inc').disabled = state.gpus >= 16;
   const r = $('ram-' + state.ramPerGpu); if (r) r.checked = true;
 }
@@ -548,6 +566,7 @@ function renderGrid(e) {
     c.appendChild(el('div', { class: 'big-n', text: ok ? fmtInt(r.n) : '—' }));
     if (ok && md.key !== 'v') c.appendChild(el('span', { class: 'x' + (r.n > R.v.n ? ' up' : ''), text: ratio(r.n, R.v.n) }));
     if (ok && md.key === 'v' && r.bounds.native) c.appendChild(el('span', { class: 'x', text: 'beyond native context' }));
+    if (ok && r.capped) c.appendChild(el('span', { class: 'x', text: 'capped at ' + MAX_SEQS + ' per replica (max_num_seqs)' }));
     add(c);
   });
   // throughput
@@ -571,14 +590,14 @@ function renderGrid(e) {
     if (!ok) { c.appendChild(el('p', { class: 'idle', text: 'Model does not fit' })); add(c); return; }
     const r = R[md.key];
     const perRep = r.n / e.replicas;
-    const fixed = m.weightsGiB * GiB / e.tp + m.overhead * GiB + gpuTotal * 0.1;
+    const fixed = m.weightsGiB * GiB / e.tp + overheadAt(m, e.tp) * GiB + gpuTotal * 0.1 + (md.key === 'v' ? 0 : KVMEM_HEADROOM);
     const used = perRep * r.perGpu;
     c.appendChild(bar([
-      { v: fixed, cls: 'fixed', tip: 'Weights ' + fmtGiB(m.weightsGiB * GiB / e.tp) + ', activations ' + m.overhead + ' GiB, 10% kept free' },
+      { v: fixed, cls: 'fixed', tip: 'Weights ' + fmtGiB(m.weightsGiB * GiB / e.tp) + ', runtime ' + overheadAt(m, e.tp).toFixed(1) + ' GiB, 10% kept free' + (md.key === 'v' ? '' : ', 1 GiB KVMem headroom') },
       { v: r.reserve, cls: 'res-h', tip: 'Shared reserve: selector keys, staging and maps, ' + fmtB(r.reserve) },
       { v: used, color: md.color, tip: fmtInt(perRep) + ' requests × ' + fmtGiB(r.perGpu) + ' = ' + fmtGiB(used) },
     ], gpuTotal));
-    const isLimit = r.n > 0 && r.n === r.bounds.gpu;
+    const isLimit = r.n > 0 && !r.capped && r.n === r.bounds.gpu;
     const what = md.key === 'v' ? fmtTok(state.ctx) + ' of KV' : md.key === 'two' || !stream ? fmtTok(e.c.W) + ' window' : 'attended pages';
     c.appendChild(el('div', { class: 'cap' }, [
       el('span', { class: 'what' }, [fmtGiB(r.perGpu) + ' per request (' + what + (e.c.stateBytes > 1e8 ? ', of which ' + fmtGiB(e.c.stateBytes) + ' GDN state' : '') + ')'].concat(isLimit ? [el('span', { class: 'limit', text: 'limit' })] : [])),
@@ -640,13 +659,13 @@ function renderMethod(e) {
   const box = $('method'); if (box.dataset.done) return; box.dataset.done = '1';
   const items = [
     ['Models. ', 'All three use NVFP4 weights (27B 20.0 GiB and Flash Next 69.7 GiB on the GPU, as loaded by vLLM; DeepSeek V4.1 Flash about 153 GiB, from its 284B parameters) and an NVFP4 KV cache on the GPU. KVMem keeps its CPU and NVMe copy of the history in FP8: 34,816 B per token for 27B, 26,624 for Flash Next and about 3,800 for DeepSeek V4 Flash. Flash Next also keeps its 25 GiB per-layer embedding table in host RAM.'],
-    ['Fit and parallelism. ', 'The smallest tensor-parallel size that leaves at least 8 GiB of KV pool per GPU; the rest of the GPUs run more replicas. KV pool = 0.9 × GPU memory − weights ÷ TP − activations (2–3 GiB).'],
+    ['Fit and parallelism. ', 'The smallest tensor-parallel size that leaves at least 8 GiB of KV pool per GPU; the rest of the GPUs run more replicas. KV pool = 0.9 × GPU memory − weights ÷ TP − runtime memory (CUDA graphs, buffers and activations: 1 GiB + 3.4 GiB ÷ TP for 27B, measured at 4.4 GiB on one RTX PRO 6000; 1 GiB + 2 GiB ÷ TP for Flash Next). KVMem keeps another 1 GiB per GPU outside its pool for final-Query scoring.'],
     ['vLLM. ', 'Each request keeps its whole context on the GPU, plus its recurrent (GDN) state with one copy per MTP draft token. Qwen page sizes follow vLLM\'s hybrid allocator and match server captures exactly.'],
     ['KVMem 2-layer. ', 'Each request keeps a window of K + G tokens on the GPU (27B: 36,864 + 16,384; Flash Next and DeepSeek: 131,072 + 32,768) and its full history in CPU RAM. Usable RAM is total RAM minus max(16 GiB, 15%).'],
     ['KVMem 3-layer. ', 'For sparse-attention models (Flash Next QSA, DeepSeek) the GPU keeps only the selector keys of the window and the pages attention reads (3 hot pages and 1 ring page per layer for QSA), the window sits in pinned CPU RAM (at most half of RAM) and the history on NVMe. For 27B, whose attention reads the whole window, the window stays on the GPU and the history moves from RAM to NVMe, so RAM no longer limits it.'],
-    ['Throughput. ', 'Decode step time = 6 ms of host work + max(memory traffic ÷ (75% of HBM bandwidth), compute ÷ 50% of peak) + tensor-parallel all-reduces over the GPU link (2 per layer, latency plus ring volume). Memory traffic per step: the dense weights, the share of MoE experts the batch touches (1 − (1 − k/E)^tokens), the MTP draft layers, each request\'s KV reads and its recurrent-state reads and writes. Tokens per step per request: 3.5 for 27B with MTP 4 and 2.55 for Flash Next with MTP 3 (measured), 1.8 for DeepSeek with MTP 1 (assumed). At full batch this lands within about 12% of the measured runs below.'],
-    ['Caveats. ', 'H100 and RTX 4090 have no FP4 tensor cores, so NVFP4 weights run through weight-only kernels, and NVFP4 KV has only been measured on Blackwell; their throughput is less certain. Flash Next was measured at TP 1 only. KVMem does not support DeepSeek V4 yet; its figures apply the same window and tier design to the V4 Flash architecture. Contexts beyond a model\'s native length assume the window still answers well, which was not measured.'],
-    ['Not modeled. ', 'Prefill and time to first token, KVMem\'s window refreshes (about 2% of decode time at K128K), PCIe traffic for 3-layer page misses (about 2%), max_num_seqs, and how the window affects answer quality.'],
+    ['Throughput. ', 'Decode step time = 6 ms of host work (plus 0.9 ms per decoding request for KVMem on 27B, fitted to a 22-request run; the optimized Flash Next host path needs none; DeepSeek has no KVMem implementation to measure, so it gets none) + max(memory traffic ÷ (75% of HBM bandwidth), compute ÷ 50% of peak) + tensor-parallel all-reduces over the GPU link (2 per layer, latency plus ring volume). Memory traffic per step: the dense weights, the share of MoE experts the batch touches (1 − (1 − k/E)^tokens), the MTP draft layers, each request\'s KV reads and its recurrent-state reads and writes. Tokens per step per request: 3.5 for 27B with MTP 4 and 2.55 for Flash Next with MTP 3 (measured), 1.8 for DeepSeek with MTP 1 (assumed). Against the measured runs below it lands within about 20%, mostly on the low side.'],
+    ['Caveats. ', 'H100 and RTX 4090 have no FP4 tensor cores, so NVFP4 weights run through weight-only kernels, and NVFP4 KV has only been measured on Blackwell; their throughput is less certain. Flash Next was measured at TP 1 only. KVMem does not support DeepSeek V4 yet; its figures apply the same window and tier design to the V4 Flash architecture. Contexts beyond a model\'s native length assume the window still answers well, which was not measured. With NVFP4 KV, the current KVMem crashed once about 20 requests decoded at once (archive read queue full during a window refresh); a fix is pending.'],
+    ['Not modeled. ', 'Requests above 256 per replica (the page caps max_num_seqs there), prefill and time to first token, KVMem\'s window refreshes (about 2% of decode time at K128K), PCIe traffic for 3-layer page misses (about 2%), max_num_seqs, and how the window affects answer quality.'],
   ];
   const ul = el('ul');
   items.forEach(([b, t]) => ul.appendChild(el('li', null, [el('b', { text: b }), t])));
@@ -668,9 +687,10 @@ function renderCalib() {
   // throughput checks with each run's own settings
   const run = (m, gpId, tp, B, mode, L, W, kvB, tau) => {
     const tr = decodeTraffic(m, mode, L, W, kvB);
-    const st = stepTime(m, GPUS.find(g => g.id === gpId), tp, B, tr.kv, tr.state, tr.flops);
+    const st = stepTime(m, GPUS.find(g => g.id === gpId), tp, B, tr.kv, tr.state, tr.flops, mode === 'v' ? 0 : m.hostPerReq);
     return Math.round(B * tau / st.t);
   };
+  const stepMs = (m, B) => { const tr = decodeTraffic(m, 'two', 262144, 38912, 0.5625); return stepTime(m, GPUS.find(g => g.id === 'pro6000'), 1, B, tr.kv, tr.state, tr.flops, m.hostPerReq).t * 1000 | 0; };
   const rows = [
     ['2× RTX 4090, 27B GPTQ-Int4, TP 2, FP8 KV, 256K', 'vLLM requests at once (428-page pool)', v1, 2],
     ['', 'KVMem 2-layer requests at once (387-page pool)', k1, 8],
@@ -678,6 +698,12 @@ function renderCalib() {
     ['', 'KVMem decode, 8 requests', run(q, 'rtx4090', 2, 8, 'two', 262144, 53248, 1, 3.5) + ' tok/s', '608 tok/s'],
     ['RTX PRO 6000, 27B NVFP4, 256K, 4 requests', 'KVMem decode, FP8 KV', run(q, 'pro6000', 1, 4, 'two', 262144, 53248, 1, 3.64) + ' tok/s', '514 tok/s'],
     ['', 'KVMem decode, NVFP4 KV', run(q, 'pro6000', 1, 4, 'two', 262144, 53248, 0.5625, 3.84) + ' tok/s', '553 tok/s'],
+    ['RTX PRO 6000, 27B NVFP4, NVFP4 KV, K36K/G16K, 41K + 12K tokens', 'GPU pages in the KV pool', Math.floor((95.59 * 0.9 - 20.0 - overheadAt(q, 1)) * GiB / geometry(q, 1, 0.5625).pageBytes), '1,182'],
+    ['', 'KVMem requests at once on that pool', Math.floor(1182 / (windowPages(geometry(q, 1, 0.5625), 53248) + geometry(q, 1, 0.5625).recPages)), '34 (by pages)'],
+    ['', 'Decode step, 8 requests', stepMs(q, 8) + ' ms', '39.4 ms'],
+    ['', 'Decode step, 22 requests', stepMs(q, 22) + ' ms', '69.9 ms'],
+    ['', 'Tokens per step per request (MTP 4)', '3.5', '3.81'],
+    ['RTX PRO 6000, 27B NVFP4, FP8 KV, K36K/G4K, 100K', 'KVMem decode, 8 requests', run(q, 'pro6000', 1, 8, 'two', 102400, 38912, 1, 3.3) + ' tok/s', '611 tok/s'],
     ['RTX PRO 6000, Flash Next NVFP4, FP8 KV, 184K', 'Resident window requests at once (4,361-page pool)', res2, 5],
     ['', '3-layer requests by GPU pages', S, '17 (run capped at 16)'],
     ['', '3-layer decode, 16 requests', run(f, 'pro6000', 1, 16, 'three', 196608, 163840, 1, 2.55) + ' tok/s', '753 tok/s'],
