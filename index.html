@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Estimate how many requests vLLM and KVMem's 2-layer and 3-layer modes run at once on a GPU server, and the decode throughput that allows.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect x=%224%22 y=%225%22 width=%2224%22 height=%226%22 rx=%222%22 fill=%22%230b6a66%22/%3E%3Crect x=%224%22 y=%2213%22 width=%2224%22 height=%226%22 rx=%222%22 fill=%22%23eb6834%22/%3E%3Crect x=%224%22 y=%2221%22 width=%2224%22 height=%226%22 rx=%222%22 fill=%22%231baf7a%22/%3E%3C/svg%3E">
+<title>KVMem Capacity Estimator</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+/* Layout: one input row, then a grid with the three memory tiers as rows and the three serving modes as columns. */
+:root {
+  --bg: #edf0f1;
+  --panel: #fbfcfc;
+  --sunk: #e3e8ea;
+  --ink: #0d1417;
+  --ink-2: #46535a;
+  --muted: #74828a;
+  --line: #d6dde0;
+  --line-2: #bcc6cb;
+  --accent: #0b6a66;
+  --accent-soft: #d4eae8;
+  --s1: #2a78d6;           /* vLLM */
+  --s2: #eb6834;           /* KVMem 2-layer */
+  --s3: #1baf7a;           /* KVMem 3-layer */
+  --fixed: #8d999f;        /* weights and runtime */
+  --warn-bg: #fff3d6;
+  --warn-ink: #6b4a00;
+  --bad-bg: #fde4e2;
+  --bad-ink: #8a1f1a;
+  --tip-bg: #0d1417;
+  --tip-ink: #f2f6f7;
+  --font-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --r: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0b1012; --panel: #131a1d; --sunk: #0f1517; --ink: #e8eff1; --ink-2: #b1bdc2; --muted: #7d8b91;
+    --line: #232e33; --line-2: #34434a; --accent: #4fbdb4; --accent-soft: #123430;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --fixed: #56646b;
+    --warn-bg: #3a2d0c; --warn-ink: #f3d58b; --bad-bg: #3d1614; --bad-ink: #f5b7b1;
+    --tip-bg: #e8eff1; --tip-ink: #0d1417;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0b1012; --panel: #131a1d; --sunk: #0f1517; --ink: #e8eff1; --ink-2: #b1bdc2; --muted: #7d8b91;
+  --line: #232e33; --line-2: #34434a; --accent: #4fbdb4; --accent-soft: #123430;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --fixed: #56646b;
+  --warn-bg: #3a2d0c; --warn-ink: #f3d58b; --bad-bg: #3d1614; --bad-ink: #f5b7b1;
+  --tip-bg: #e8eff1; --tip-ink: #0d1417;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+[hidden] { display: none !important; }
+body {
+  margin: 0;
+  background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 56px;
+}
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 18px; }
+h1, h2 { font-family: var(--font-display); font-weight: 600; text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: clamp(28px, 4.2vw, 40px); line-height: 1.1; }
+h2 { font-size: 18px; }
+p { margin: 0; }
+.label { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 500; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.top { display: grid; gap: 10px; }
+.top .lede { color: var(--ink-2); max-width: 70ch; }
+
+/* Inputs */
+.inputs { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 18px; display: grid; gap: 14px; }
+.fields { display: grid; grid-template-columns: 1.5fr 1.3fr 0.9fr 1.2fr 0.9fr 1fr; gap: 14px; align-items: end; }
+@media (max-width: 1000px) { .fields { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); } .f-wide { grid-column: 1 / -1; } }
+.field { display: grid; gap: 6px; min-width: 0; }
+.field > label, .field > .label { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 500; }
+select {
+  width: 100%; font: inherit; font-size: 14px; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 10px; min-width: 0; height: 40px;
+}
+select:hover { border-color: var(--ink-2); }
+.seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--sunk); border-radius: 8px; padding: 3px; gap: 3px; height: 40px; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label { display: flex; align-items: center; justify-content: center; font-size: 13.5px; border-radius: 6px; cursor: pointer; color: var(--ink-2); font-family: var(--font-mono); }
+.seg input:checked + label { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,0.12); font-weight: 500; }
+.seg input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: 1px; }
+.stepper { display: grid; grid-template-columns: 34px minmax(0,1fr) 34px; gap: 4px; height: 40px; }
+.stepper button { font: inherit; font-size: 17px; line-height: 1; border: 1px solid var(--line-2); background: var(--panel); color: var(--ink); border-radius: 8px; cursor: pointer; }
+.stepper button:hover { border-color: var(--ink-2); }
+.stepper button:disabled { opacity: 0.4; cursor: default; }
+.stepper output { display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 15px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg); }
+.fit { font-size: 13.5px; color: var(--ink-2); border-top: 1px solid var(--line); padding-top: 12px; display: grid; gap: 8px; }
+.fit b { font-weight: 500; color: var(--ink); font-family: var(--font-mono); font-size: 13px; }
+.fit .ok::before { content: "✓ "; color: var(--accent); font-weight: 600; }
+.note { font-size: 13px; border-radius: 6px; padding: 7px 10px; background: var(--warn-bg); color: var(--warn-ink); }
+.note.bad { background: var(--bad-bg); color: var(--bad-ink); }
+
+/* Verdict */
+.verdict .big { font-family: var(--font-display); font-weight: 600; font-size: clamp(22px, 3.2vw, 32px); line-height: 1.18; text-wrap: balance; }
+.verdict .big em { font-style: normal; color: var(--accent); }
+
+/* Tier grid */
+.board { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); overflow-x: auto; }
+.grid { display: grid; grid-template-columns: 190px repeat(3, minmax(0, 1fr)); min-width: 760px; }
+.grid > div { padding: 14px 16px; border-bottom: 1px solid var(--line); min-width: 0; }
+.grid > div:not(.rowhead) { border-left: 1px solid var(--line); }
+.grid .last { border-bottom: 0; }
+.rowhead { display: grid; gap: 3px; align-content: start; }
+.rowhead .t { font-family: var(--font-display); font-weight: 600; font-size: 15px; }
+.rowhead .spec { font-size: 12px; color: var(--muted); line-height: 1.4; }
+.colhead { display: grid; gap: 4px; align-content: start; }
+.colhead .name { display: flex; align-items: center; gap: 8px; font-family: var(--font-display); font-weight: 600; font-size: 16px; }
+.colhead .desc { font-size: 12.5px; color: var(--muted); }
+.key { width: 18px; height: 3px; border-radius: 2px; flex: none; display: inline-block; }
+.big-n { font-family: var(--font-display); font-weight: 600; font-size: 40px; line-height: 1.05; font-variant-numeric: tabular-nums; }
+.mid-n { font-family: var(--font-display); font-weight: 600; font-size: 26px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.unit { font-size: 13px; color: var(--muted); font-family: var(--font-body); font-weight: 400; margin-left: 4px; }
+.x { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-2); }
+.x.up { color: var(--accent); font-weight: 500; }
+.res { display: grid; gap: 3px; align-content: start; }
+.cell { display: grid; gap: 7px; align-content: start; }
+.bar { display: flex; height: 18px; border-radius: 5px; overflow: hidden; background: var(--sunk); gap: 2px; }
+.bar > i { display: block; height: 100%; flex: none; }
+.bar .fixed { background: var(--fixed); }
+.bar .res-h { background: repeating-linear-gradient(135deg, var(--line-2) 0 2px, transparent 2px 6px); }
+.cap { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 12.5px; }
+.cap .what { color: var(--ink-2); }
+.cap .amt { font-family: var(--font-mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.limit { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600; color: var(--ink); background: var(--sunk); border: 1px solid var(--line-2); border-radius: 4px; padding: 0 6px; margin-left: 6px; vertical-align: 1px; }
+.idle { font-size: 12.5px; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12.5px; color: var(--ink-2); padding: 0 2px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 12px; height: 10px; border-radius: 2px; display: inline-block; }
+
+/* Details */
+details.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 16px 18px; }
+details.card > summary { cursor: pointer; font-family: var(--font-display); font-weight: 600; font-size: 16px; }
+details.card[open] > summary { margin-bottom: 12px; }
+.method { display: grid; gap: 8px; color: var(--ink-2); font-size: 13.5px; }
+.method ul { margin: 0; padding-left: 18px; display: grid; gap: 7px; }
+.method code { font-family: var(--font-mono); font-size: 12.5px; background: var(--sunk); padding: 1px 5px; border-radius: 4px; color: var(--ink); }
+.table-scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 500; color: var(--muted); font-size: 12px; }
+td.r, th.r { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td .sub { display: block; color: var(--muted); font-size: 12px; }
+tbody tr:last-child td { border-bottom: 0; }
+.tip { position: absolute; pointer-events: none; background: var(--tip-bg); color: var(--tip-ink); border-radius: 8px; padding: 7px 10px; font-size: 12px; line-height: 1.45; max-width: 280px; box-shadow: 0 6px 18px rgba(0,0,0,0.18); z-index: 5; }
+.foot { color: var(--muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <p class="label"><a href="https://github.com/kvmem/kvmem-vllm" style="color:inherit">KVMem on GitHub</a> · NVFP4 weights and NVFP4 KV cache</p>
+    <h1>KVMem Capacity Estimator</h1>
+    <p class="lede">Choose a model and a server. The page shows how vLLM and KVMem use GPU memory, CPU RAM and NVMe, how many requests each can run at once, and an estimate of the decode throughput that allows.</p>
+  </header>
+
+  <section class="inputs" aria-label="Model and server">
+    <div class="fields">
+      <div class="field f-wide"><label for="model">Model</label><select id="model"></select></div>
+      <div class="field f-wide"><label for="gpu">GPU</label><select id="gpu"></select></div>
+      <div class="field">
+        <span class="label" id="gpus-label">GPUs</span>
+        <div class="stepper" role="group" aria-labelledby="gpus-label">
+          <button type="button" id="gpus-dec" aria-label="Fewer GPUs">−</button><output id="gpus" aria-live="polite"></output><button type="button" id="gpus-inc" aria-label="More GPUs">+</button>
+        </div>
+      </div>
+      <div class="field">
+        <span class="label" id="ram-label">CPU RAM per GPU</span>
+        <div class="seg" role="radiogroup" aria-labelledby="ram-label">
+          <input type="radio" name="ram" id="ram-64" value="64"><label for="ram-64">64 GB</label>
+          <input type="radio" name="ram" id="ram-128" value="128"><label for="ram-128">128</label>
+          <input type="radio" name="ram" id="ram-192" value="192"><label for="ram-192">192</label>
+          <input type="radio" name="ram" id="ram-256" value="256"><label for="ram-256">256</label>
+        </div>
+      </div>
+      <div class="field"><label for="ssd">NVMe</label><select id="ssd"></select></div>
+      <div class="field"><label for="ctx">Tokens per request</label><select id="ctx"></select></div>
+    </div>
+    <div class="fit" id="fit"></div>
+  </section>
+
+  <div class="verdict"><p class="big" id="verdict"></p></div>
+
+  <section class="board" aria-label="Memory tiers by serving mode">
+    <div class="grid" id="grid"></div>
+  </section>
+  <div class="legend" id="legend"></div>
+
+  <details class="card">
+    <summary>How the estimate works</summary>
+    <div class="method" id="method"></div>
+  </details>
+  <details class="card">
+    <summary>Checked against measured runs</summary>
+    <div class="table-scroll"><table id="calib"></table></div>
+    <p class="foot" style="margin-top:10px">Concurrency rows use the KV pool each server actually allocated. Throughput rows run the same step-time model with each run's configuration (FP8 or NVFP4 KV, measured MTP acceptance).</p>
+  </details>
+</div>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+(function () {
+'use strict';
+const GiB = 1073741824, GB = 1e9;
+
+// ---------------- hardware ----------------
+const GPUS = [
+  { id: 'h100', label: 'H100 SXM · 80 GB', short: 'H100', gib: 79.65, bw: 3350, peak: 989, link: 450, alpha: 8, linkName: 'NVLink 4', fp4: false },
+  { id: 'pro6000', label: 'RTX PRO 6000 Blackwell · 96 GB', short: 'RTX PRO 6000', gib: 95.59, bw: 1792, peak: 1800, link: 50, alpha: 15, linkName: 'PCIe 5.0 peer-to-peer', fp4: true },
+  { id: 'rtx5090', label: 'RTX 5090 · 32 GB', short: 'RTX 5090', gib: 31.84, bw: 1792, peak: 1000, link: 25, alpha: 25, linkName: 'PCIe 5.0 through host', fp4: true },
+  { id: 'rtx4090', label: 'RTX 4090 · 24 GB', short: 'RTX 4090', gib: 23.99, bw: 1008, peak: 165, link: 12, alpha: 30, linkName: 'PCIe 4.0 through host', fp4: false },
+];
+const SSD_OPTIONS = [2000, 4000, 8000, 16000];
+const CTX_OPTIONS = [32768, 65536, 131072, 262144, 524288, 1048576];
+
+// ---------------- models ----------------
+// Qwen models use vLLM's hybrid page geometry (checked against server captures);
+// DeepSeek V4 Flash uses bytes per token from its compressed-attention layout.
+const MODELS = {
+  q27: {
+    label: 'Qwen3.8-27B', desc: 'Dense, 16 attention + 48 GDN layers, MTP 4',
+    kind: 'pages', weightsGiB: 20.0, hostGiB: 0, overhead: 2, native: 262144, K: 36864, G: 16384,
+    attn: 16, mtp: 1, gdn: 48, extraRec: 0, kvHeads: 4, headDim: 256, qheads: 24,
+    lin: { kh: 16, kd: 128, vh: 48, vd: 128, conv: 4 }, layout: 'shared', qsa: null,
+    s: 4, tau: 3.5, archiveBpt: 34816, three: 'nvme',
+    tp: { Wfix: 16.4 * GiB, Wexp: 0, Wdraft: 1.46 * GiB, active: 26e9, layers: 64, hidden: 5120 },
+  },
+  fn: {
+    label: 'Qwen3.8 Flash Next', desc: 'MoE, 512 experts (10 active), 12 QSA + 36 GDN layers, MTP 3',
+    kind: 'pages', weightsGiB: 69.72, hostGiB: 25.4, overhead: 3, native: 262144, K: 131072, G: 32768,
+    attn: 12, mtp: 1, gdn: 36, extraRec: 1, kvHeads: 2, headDim: 256, qheads: 24,
+    lin: { kh: 16, kd: 128, vh: 48, vd: 128, conv: 4 }, layout: 'perlayer', qsa: { compress: 4, indexDim: 128, indexBytes: 2 },
+    s: 3, tau: 2.55, archiveBpt: 26624, three: 'stream',
+    tp: { Wfix: 5.3 * GiB, Wexp: 61.26 * GiB, E: 512, k: 10, Wdraft: 0.48 * GiB, active: 3.5e9, layers: 48, hidden: 2560 },
+  },
+  ds4: {
+    label: 'DeepSeek V4.1 Flash', desc: 'MoE, 256 experts (6 active), 43 layers of compressed sparse attention, MTP 1',
+    kind: 'bytes', weightsGiB: 153, hostGiB: 0, overhead: 3, native: 1048576, K: 131072, G: 32768,
+    s: 1, tau: 1.8, archiveBpt: 3807, gpuBpt: 2423, fixedReq: 10e6, three: 'stream',
+    // compressed entries: 21 layers at 4x with a 128-dim indexer, 20 layers at 128x, 128-token sliding window
+    r4: 21, r128: 20, entryGpu: 320, entryCpu: 576, indexKey: 132, topk: 512,
+    tp: { Wfix: 3.8 * GB, Wexp: 155.8 * GB, E: 256, k: 6, Wdraft: 0.4 * GB, WdraftExp: 3.6 * GB, active: 13.3e9, layers: 43, hidden: 4096 },
+  },
+};
+
+// ---------------- geometry (Qwen) ----------------
+function gdnLayerBytes(m, tp, s) {
+  const L = m.lin;
+  return (L.vh / tp) * L.kd * L.vd * 4 + ((2 * L.kh * L.kd + L.vh * L.vd) / tp) * (L.conv - 1 + s) * 2;
+}
+function geometry(m, tp, kvBytes) {
+  const s = m.s;
+  const kvhRank = Math.max(1, m.kvHeads / tp);
+  let tokLayer = 2 * kvhRank * m.headDim * kvBytes;
+  if (m.qsa) tokLayer += m.qsa.indexDim * m.qsa.indexBytes / m.qsa.compress;
+  const gdnLayer = gdnLayerBytes(m, tp, s);
+  const attnLayers = m.attn + m.mtp;
+  const pageTokens = 16 * Math.ceil(gdnLayer / tokLayer / 16);
+  let pageBytes, attnGroups, recGroups;
+  if (m.layout === 'shared') { pageBytes = attnLayers * tokLayer * pageTokens; attnGroups = 1; recGroups = Math.ceil(m.gdn / attnLayers); }
+  else { pageBytes = tokLayer * pageTokens; attnGroups = attnLayers; recGroups = m.gdn + m.extraRec; }
+  return { tokLayer, pageTokens, pageBytes, attnGroups, recGroups, attnLayers, recPages: recGroups * (1 + s),
+    hostTokenBytes: Math.max(m.kvHeads, Math.min(tp, 8)) * m.headDim };
+}
+const windowPages = (g, tokens) => g.attnGroups * Math.ceil(tokens / g.pageTokens);
+function qsaCarvePages(g, m, S, fp, hot, ring) {
+  if (S <= 0) return 0;
+  const compressedPage = g.pageTokens / m.qsa.compress * m.qsa.indexDim * m.qsa.indexBytes;
+  const perNative = Math.max(1, Math.floor(g.pageBytes / compressedPage));
+  const selector = g.attnLayers * Math.ceil(S * fp / perNative);
+  const maxGroups = fp * g.pageTokens / 4, hotGroups = hot * g.pageTokens / 4;
+  const mapBytes = S * g.attnLayers * (4 * maxGroups + 17 * hotGroups + 4 * (hot + ring)) + S * 64 + 8192 * 16;
+  return selector + 2 * fp + Math.ceil(mapBytes / g.pageBytes);
+}
+
+// ---------------- per-request costs ----------------
+// Returns, per GPU: bytes per request in each mode, a shared reserve function, and host/NVMe bytes.
+function costs(m, tp, L, kvBytes) {
+  const W = Math.min(L, m.K + m.G);
+  if (m.kind === 'pages') {
+    const g = geometry(m, tp, kvBytes);
+    const pb = g.pageBytes;
+    const vPages = windowPages(g, L) + g.recPages, kPages = windowPages(g, W) + g.recPages;
+    const out = { g, W, unit: pb, v: vPages * pb, two: kPages * pb, stateBytes: g.recPages * pb, reserve3: () => 0, three: kPages * pb,
+      host3: 0, hist: L * m.archiveBpt };
+    if (m.three === 'stream') {
+      const hot = 3, ring = 1, fp = Math.ceil((m.K + m.G + m.s + 1) / g.pageTokens);
+      out.three = (g.attnLayers * (hot + ring) + g.recPages) * pb;
+      out.reserve3 = S => qsaCarvePages(g, m, S, fp, hot, ring) * pb;
+      out.host3 = g.attnLayers * 2 * fp * g.pageTokens * g.hostTokenBytes;   // pinned FP8 window
+    }
+    return out;
+  }
+  // bytes model (DeepSeek V4): the compressed latent is replicated on every TP rank
+  const gpu = tokens => tokens * m.gpuBpt + m.fixedReq;
+  const frame = m.K + m.G;
+  const three = m.r4 * (frame / 4) * m.indexKey + m.r4 * 3 * m.topk * m.entryGpu + m.r128 * (frame / 128) * m.entryGpu + m.fixedReq;
+  return { W, unit: 1, v: gpu(L), two: gpu(W), stateBytes: m.fixedReq, three, reserve3: S => S > 0 ? 2 * (frame / 4) * m.entryGpu : 0,
+    host3: frame * m.archiveBpt, hist: L * m.archiveBpt };
+}
+
+// ---------------- decode step time ----------------
+function stepTime(m, gp, tp, B, kvReadReq, stateReq, attnFlopsReq) {
+  if (B <= 0) return null;
+  const t = m.tp, s = m.s, T = B * (1 + s);
+  const f = t.Wexp ? 1 - Math.pow(1 - t.k / t.E, T) : 0;
+  const fd = t.Wexp ? 1 - Math.pow(1 - t.k / t.E, B * s) : 0;
+  const weights = (t.Wfix + t.Wexp * f + s * (t.Wdraft + (t.WdraftExp || 0) * fd)) / tp;
+  const tkv = m.kind === 'bytes' ? 1 : Math.min(tp, m.kvHeads);
+  const mem = weights + B * (kvReadReq / tkv + stateReq / tp);
+  const tMem = mem / (gp.bw * GB * 0.75);
+  const tCmp = (2 * t.active * T + B * attnFlopsReq) / tp / (gp.peak * 1e12 * 0.5);
+  const nAR = 2 * t.layers + 2 * s;
+  const tComm = tp > 1 ? nAR * gp.alpha * 1e-6 + nAR * T * t.hidden * 2 * (2 * (tp - 1) / tp) / (gp.link * GB) : 0;
+  return { t: 0.006 + Math.max(tMem, tCmp) + tComm, tMem, tCmp, tComm, mem };
+}
+function decodeTraffic(m, mode, L, W, kvBytes) {
+  // bytes of KV and recurrent state one request reads/writes per decode step, plus attention FLOPs
+  if (m.kind === 'pages') {
+    const stateRW = (m.gdn + m.extraRec) * gdnLayerBytes(m, 1, 0) * (2 + m.s);
+    if (m.qsa) {
+      const tok = 2 * m.kvHeads * m.headDim * kvBytes;
+      const span = mode === 'v' ? L : W;
+      return { kv: (m.attn + m.mtp) * (2048 * tok + span * 64), state: stateRW, flops: 4 * m.attn * m.qheads * m.headDim * 2048 * (1 + m.s) };
+    }
+    const span = mode === 'v' ? L : W;
+    return { kv: span * (m.attn + m.mtp) * 2 * m.kvHeads * m.headDim * kvBytes, state: stateRW, flops: 4 * m.attn * m.qheads * m.headDim * span * (1 + m.s) };
+  }
+  const span = mode === 'v' ? L : W;
+  const kv = m.r4 * ((span / 4) * m.indexKey + m.topk * m.entryGpu) + m.r128 * (span / 128) * m.entryGpu + m.fixedReq;
+  const flops = (1 + m.s) * (m.r4 * 64 * 128 * 2 * (span / 4) + 43 * 64 * 512 * 4 * m.topk);
+  return { kv, state: 0, flops };
+}
+
+// ---------------- estimate ----------------
+function fitTP(m, gp, gpus) {
+  const opts = [1, 2, 4, 8, 16].filter(t => t <= gpus);
+  const pool = t => gp.gib * 0.9 - m.weightsGiB / t - m.overhead;
+  for (const t of opts) if (pool(t) >= 8) return { tp: t, pool: pool(t) };
+  let best = null;
+  for (const t of opts) if (pool(t) > 1 && (!best || pool(t) > best.pool)) best = { tp: t, pool: pool(t) };
+  if (best) return best;
+  let need = null;
+  for (const t of [1, 2, 4, 8, 16, 32, 64]) if (pool(t) > 1) { need = t; break; }
+  return { tp: 0, pool: 0, need };
+}
+function estimate(st) {
+  const m = MODELS[st.model], gp = GPUS.find(g => g.id === st.gpu);
+  const kvBytes = 0.5625;                      // NVFP4 KV on the GPU
+  const fit = fitTP(m, gp, st.gpus);
+  const L = st.ctx;
+  const ramTotal = st.ramPerGpu * st.gpus * GB;
+  const ssdTotal = st.ssd * GB;
+  const out = { m, gp, fit, L, ramTotal, ssdTotal, modes: {} };
+  if (!fit.tp) return out;
+  const tp = fit.tp, replicas = Math.floor(st.gpus / tp);
+  const c = costs(m, tp, L, kvBytes);
+  const poolBytes = fit.pool * GiB;
+  const usableUnits = Math.max(0, Math.floor(poolBytes / c.unit) - (m.kind === 'pages' ? 1 : 0)) * c.unit;
+  const hostModel = m.hostGiB * GiB * replicas;
+  const ramUsable = Math.max(0, ramTotal - Math.max(16 * GiB, 0.15 * ramTotal) - hostModel);
+  const pinnedCap = Math.min(ramUsable, 0.5 * ramTotal);
+  Object.assign(out, { tp, replicas, c, poolBytes: usableUnits, hostModel, ramUsable });
+
+  const mk = (key, n, perGpu, reserve, bounds, cpuUsed, ssdUsed, cpuWhat, ssdWhat) => {
+    const perRep = replicas ? n / replicas : 0;
+    const traffic = decodeTraffic(m, key, L, c.W, kvBytes);
+    const st2 = stepTime(m, gp, tp, perRep, traffic.kv, traffic.state, traffic.flops);
+    const tput = st2 ? replicas * perRep * m.tau / st2.t : 0;
+    return { n, perGpu, reserve, bounds, cpuUsed, ssdUsed, cpuWhat, ssdWhat, tput, step: st2 };
+  };
+  // vLLM: whole context on the GPU
+  {
+    const gpuN = replicas * Math.floor(usableUnits / c.v);
+    const n = L > m.native ? 0 : gpuN;
+    out.modes.v = mk('v', n, c.v, 0, { gpu: gpuN, native: L > m.native }, hostModel, 0, null, null);
+  }
+  // KVMem 2-layer: K + G window on the GPU, full history in RAM
+  {
+    const gpuN = replicas * Math.floor(usableUnits / c.two);
+    const cpuN = Math.floor(ramUsable / c.hist);
+    const n = Math.min(gpuN, cpuN);
+    out.modes.two = mk('two', n, c.two, 0, { gpu: gpuN, cpu: cpuN }, hostModel + n * c.hist, 0, 'history', null);
+  }
+  // KVMem 3-layer
+  {
+    let gpuS = 0;
+    while (gpuS < 4096 && (gpuS + 1) * c.three + c.reserve3(gpuS + 1) <= usableUnits) gpuS++;
+    const gpuN = replicas * gpuS;
+    const ssdN = Math.floor(ssdTotal / c.hist);
+    let cpuN, cpuUsedFn, cpuWhat;
+    if (m.three === 'stream') {
+      cpuN = Math.floor(pinnedCap / c.host3);
+      cpuUsedFn = n => hostModel + n * c.host3; cpuWhat = 'window';
+    } else {
+      const staging = 16 * GiB * replicas;
+      cpuN = ramUsable >= staging ? Infinity : 0;
+      cpuUsedFn = () => hostModel + staging; cpuWhat = 'staging';
+    }
+    const n = Math.min(gpuN, cpuN, ssdN);
+    const reserveN = replicas ? c.reserve3(Math.ceil(n / replicas)) : 0;
+    out.modes.three = mk('three', n, c.three, reserveN, { gpu: gpuN, cpu: cpuN, ssd: ssdN }, cpuUsedFn(n), n * c.hist, cpuWhat, 'history');
+  }
+  return out;
+}
+
+// ---------------- formatting ----------------
+const fmtInt = n => Number.isFinite(n) ? Math.round(n).toLocaleString('en-US') : '—';
+const fmtTok = t => t >= 1048576 ? (t / 1048576) + 'M' : (t / 1024) + 'K';
+function fmtB(b) {
+  if (b >= 1e12) return (b / 1e12).toFixed(b >= 1e13 ? 0 : 1) + ' TB';
+  if (b >= 1e9) return (b / 1e9).toFixed(b >= 1e11 ? 0 : 1) + ' GB';
+  return Math.round(b / 1e6).toLocaleString('en-US') + ' MB';
+}
+const fmtGiB = b => (b / GiB).toFixed(1) + ' GiB';
+function fmtRate(r) { return r >= 10000 ? Math.round(r / 100) * 100 : r >= 1000 ? Math.round(r / 10) * 10 : Math.round(r); }
+function ratio(a, b) { if (!b) return a > 0 ? 'vLLM cannot' : ''; const r = a / b; return (r >= 10 ? r.toFixed(0) : r.toFixed(1)) + '× vLLM'; }
+
+// ---------------- state ----------------
+const DEFAULT = { model: 'q27', gpu: 'pro6000', gpus: 8, ramPerGpu: 192, ssd: 8000, ctx: 262144 };
+let state = Object.assign({}, DEFAULT);
+const STORE = 'kvmem-capacity-v3';
+try {
+  const s = JSON.parse(localStorage.getItem(STORE) || 'null');
+  if (s && MODELS[s.model] && GPUS.some(g => g.id === s.gpu)) state = Object.assign({}, DEFAULT, s);
+} catch (e) { /* storage unavailable */ }
+const save = () => { try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (e) {} };
+
+const $ = id => document.getElementById(id);
+const tip = $('tip');
+function el(tag, attrs, children) {
+  const e = document.createElement(tag);
+  if (attrs) for (const k in attrs) {
+    if (k === 'class') e.className = attrs[k]; else if (k === 'text') e.textContent = attrs[k]; else e.setAttribute(k, attrs[k]);
+  }
+  (children || []).forEach(c => e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+  return e;
+}
+function rich(parts) { return parts.map(p => typeof p === 'string' ? document.createTextNode(p) : el(p.tag || 'b', p.cls ? { class: p.cls } : null, [p.text])); }
+function fill(id, opts) { const s = $(id); s.textContent = ''; opts.forEach(([v, l]) => s.appendChild(el('option', { value: String(v), text: l }))); }
+
+// ---------------- controls ----------------
+function build() {
+  fill('model', Object.entries(MODELS).map(([id, m]) => [id, m.label]));
+  fill('gpu', GPUS.map(g => [g.id, g.label]));
+  fill('ssd', SSD_OPTIONS.map(v => [v, (v / 1000) + ' TB']));
+  fill('ctx', CTX_OPTIONS.map(v => [v, fmtTok(v) + ' tokens']));
+  const set = (k, v) => { state[k] = v; update(); };
+  $('model').addEventListener('change', () => set('model', $('model').value));
+  $('gpu').addEventListener('change', () => set('gpu', $('gpu').value));
+  $('ssd').addEventListener('change', () => set('ssd', +$('ssd').value));
+  $('ctx').addEventListener('change', () => set('ctx', +$('ctx').value));
+  $('gpus-dec').addEventListener('click', () => set('gpus', Math.max(1, state.gpus - 1)));
+  $('gpus-inc').addEventListener('click', () => set('gpus', Math.min(16, state.gpus + 1)));
+  document.querySelectorAll('input[name="ram"]').forEach(r => r.addEventListener('change', () => set('ramPerGpu', +r.value)));
+}
+function writeControls() {
+  $('model').value = state.model; $('gpu').value = state.gpu; $('ssd').value = String(state.ssd); $('ctx').value = String(state.ctx);
+  $('gpus').textContent = String(state.gpus); $('gpus-dec').disabled = state.gpus <= 1; $('gpus-inc').disabled = state.gpus >= 16;
+  const r = $('ram-' + state.ramPerGpu); if (r) r.checked = true;
+}
+
+// ---------------- render ----------------
+const MODES = [
+  { key: 'v', name: 'vLLM', color: 'var(--s1)' },
+  { key: 'two', name: 'KVMem 2-layer', color: 'var(--s2)' },
+  { key: 'three', name: 'KVMem 3-layer', color: 'var(--s3)' },
+];
+function update() { writeControls(); save(); render(estimate(state)); }
+
+function render(e) {
+  const { m, gp, fit } = e;
+  // fit line
+  const fitBox = $('fit'); fitBox.textContent = '';
+  if (!fit.tp) {
+    fitBox.appendChild(el('p', { class: 'note bad' }, rich([
+      m.label + ' does not fit on ' + state.gpus + '× ' + gp.short + '. Its NVFP4 weights take ' + fmtGiB(m.weightsGiB * GiB) + '; ',
+      fit.need ? { text: 'at least ' + fit.need + ' GPUs' } : 'more GPUs', fit.need ? ' are needed to split them and leave room for KV.' : ' are needed.',
+    ])));
+  } else {
+    fitBox.appendChild(el('p', { class: 'ok' }, rich([
+      'Fits: ', { text: fmtGiB(m.weightsGiB * GiB / e.tp) }, ' of weights per GPU at ', { text: 'TP ' + e.tp },
+      e.replicas > 1 ? ' (' + e.replicas + ' replicas)' : '', ', leaving a ', { text: fmtGiB(e.poolBytes) }, ' KV pool on each GPU.',
+      state.gpus - e.replicas * e.tp > 0 ? ' ' + (state.gpus - e.replicas * e.tp) + ' GPU idle.' : '',
+    ])));
+  }
+
+  // verdict
+  const v = $('verdict'); v.textContent = '';
+  if (!fit.tp) { v.appendChild(document.createTextNode('Pick more GPUs or a larger GPU to see an estimate.')); }
+  else {
+    const md = e.modes, best = md.three.n >= md.two.n ? md.three : md.two, bestName = md.three.n >= md.two.n ? '3-layer' : '2-layer';
+    const head = state.gpus + '× ' + gp.short + ', ' + fmtTok(state.ctx) + '-token requests: ';
+    if (md.v.n > 0) v.append(...rich([head + 'KVMem ' + bestName + ' runs ', { text: fmtInt(best.n), tag: 'em' }, ' requests at once against ' + fmtInt(md.v.n) + ' for vLLM, for about ',
+      { text: fmtInt(fmtRate(best.tput)) + ' tok/s', tag: 'em' }, ' of decode against ' + fmtInt(fmtRate(md.v.tput)) + '.']));
+    else v.append(...rich([head + 'vLLM cannot run any; KVMem ' + bestName + ' runs ', { text: fmtInt(best.n), tag: 'em' }, ' at once, about ', { text: fmtInt(fmtRate(best.tput)) + ' tok/s', tag: 'em' }, ' of decode.']));
+  }
+
+  renderGrid(e);
+  renderMethod(e);
+}
+
+function bar(segs, total) {
+  const b = el('div', { class: 'bar' });
+  segs.forEach(s => {
+    if (!(s.v > 0)) return;
+    const i = el('i', { class: s.cls || '', style: 'width:calc(' + Math.min(100, 100 * s.v / total).toFixed(3) + '% - 2px)' + (s.color ? ';background:' + s.color : ''), 'data-tip': s.tip });
+    b.appendChild(i);
+  });
+  return b;
+}
+function renderGrid(e) {
+  const grid = $('grid'); grid.textContent = '';
+  const { m, gp, fit } = e;
+  const add = (node, cls) => { if (cls) node.className = (node.className ? node.className + ' ' : '') + cls; grid.appendChild(node); };
+  const stream = m.three === 'stream';
+  const desc = {
+    v: 'The whole context stays in GPU memory.',
+    two: 'A ' + fmtTok(m.K + m.G) + '-token window on the GPU, the full history in CPU RAM.',
+    three: stream ? 'Only the attended pages on the GPU, the window in pinned CPU RAM, the history on NVMe.'
+                  : 'The window on the GPU, the full history on NVMe instead of RAM.',
+  };
+  // header row
+  add(el('div', { class: 'rowhead' }, [el('span', { class: 'label', text: m.label }), el('span', { class: 'spec', text: m.desc })]));
+  MODES.forEach(md => add(el('div', { class: 'colhead' }, [
+    el('div', { class: 'name' }, [el('i', { class: 'key', style: 'background:' + md.color }), md.name]),
+    el('p', { class: 'desc', text: desc[md.key] }),
+  ])));
+  const ok = !!fit.tp;
+  const R = ok ? e.modes : {};
+  // concurrency
+  add(el('div', { class: 'rowhead' }, [el('span', { class: 't', text: 'Requests at once' }), el('span', { class: 'spec', text: 'Most ' + fmtTok(state.ctx) + '-token requests decoding together' })]));
+  MODES.forEach(md => {
+    const r = R[md.key];
+    const c = el('div', { class: 'res' });
+    c.appendChild(el('div', { class: 'big-n', text: ok ? fmtInt(r.n) : '—' }));
+    if (ok && md.key !== 'v') c.appendChild(el('span', { class: 'x' + (r.n > R.v.n ? ' up' : ''), text: ratio(r.n, R.v.n) }));
+    if (ok && md.key === 'v' && r.bounds.native) c.appendChild(el('span', { class: 'x', text: 'beyond native context' }));
+    add(c);
+  });
+  // throughput
+  add(el('div', { class: 'rowhead' }, [el('span', { class: 't', text: 'Decode throughput' }), el('span', { class: 'spec', text: 'Output tokens per second at that concurrency, estimated' })]));
+  MODES.forEach(md => {
+    const r = R[md.key];
+    const c = el('div', { class: 'res' });
+    c.appendChild(el('div', { class: 'mid-n' }, [ok && r.n > 0 ? fmtInt(fmtRate(r.tput)) : '—', el('span', { class: 'unit', text: 'tok/s' })]));
+    if (ok && md.key !== 'v' && r.n > 0) c.appendChild(el('span', { class: 'x' + (r.tput > R.v.tput ? ' up' : ''), text: ratio(r.tput, R.v.tput) }));
+    if (ok && r.step) c.appendChild(el('span', { class: 'x', text: Math.round(r.step.t * 1000) + ' ms per step, ' + fmtInt(r.n / e.replicas) + ' per replica' }));
+    add(c);
+  });
+
+  // GPU tier
+  const gpuTotal = gp.gib * GiB;
+  add(el('div', { class: 'rowhead' }, [el('span', { class: 't', text: 'GPU' }),
+    el('span', { class: 'spec', text: state.gpus + ' × ' + gp.gib.toFixed(1) + ' GiB, ' + (gp.bw / 1000).toFixed(2) + ' TB/s each' }),
+    el('span', { class: 'spec', text: gp.linkName + ', about ' + gp.link + ' GB/s' })]));
+  MODES.forEach(md => {
+    const c = el('div', { class: 'cell' });
+    if (!ok) { c.appendChild(el('p', { class: 'idle', text: 'Model does not fit' })); add(c); return; }
+    const r = R[md.key];
+    const perRep = r.n / e.replicas;
+    const fixed = m.weightsGiB * GiB / e.tp + m.overhead * GiB + gpuTotal * 0.1;
+    const used = perRep * r.perGpu;
+    c.appendChild(bar([
+      { v: fixed, cls: 'fixed', tip: 'Weights ' + fmtGiB(m.weightsGiB * GiB / e.tp) + ', activations ' + m.overhead + ' GiB, 10% kept free' },
+      { v: r.reserve, cls: 'res-h', tip: 'Shared reserve: selector keys, staging and maps, ' + fmtB(r.reserve) },
+      { v: used, color: md.color, tip: fmtInt(perRep) + ' requests × ' + fmtGiB(r.perGpu) + ' = ' + fmtGiB(used) },
+    ], gpuTotal));
+    const isLimit = r.n > 0 && r.n === r.bounds.gpu;
+    const what = md.key === 'v' ? fmtTok(state.ctx) + ' of KV' : md.key === 'two' || !stream ? fmtTok(e.c.W) + ' window' : 'attended pages';
+    c.appendChild(el('div', { class: 'cap' }, [
+      el('span', { class: 'what' }, [fmtGiB(r.perGpu) + ' per request (' + what + (e.c.stateBytes > 1e8 ? ', of which ' + fmtGiB(e.c.stateBytes) + ' GDN state' : '') + ')'].concat(isLimit ? [el('span', { class: 'limit', text: 'limit' })] : [])),
+      el('span', { class: 'amt', text: fmtGiB(fixed + r.reserve + used) + ' of ' + fmtGiB(gpuTotal) }),
+    ]));
+    add(c);
+  });
+
+  // CPU tier
+  const ramT = e.ramTotal;
+  add(el('div', { class: 'rowhead' }, [el('span', { class: 't', text: 'CPU RAM' }),
+    el('span', { class: 'spec', text: state.gpus + ' × ' + state.ramPerGpu + ' GB = ' + fmtB(ramT) }),
+    el('span', { class: 'spec', text: 'about ' + fmtB(Math.max(16 * GiB, 0.15 * ramT)) + ' kept for the OS and vLLM' })]));
+  MODES.forEach(md => {
+    const c = el('div', { class: 'cell' });
+    if (!ok) { add(c, 'cellempty'); return; }
+    const r = R[md.key];
+    const reserveOs = Math.max(16 * GiB, 0.15 * ramT);
+    const kv = r.cpuUsed - e.hostModel;
+    c.appendChild(bar([
+      { v: reserveOs + e.hostModel, cls: 'fixed', tip: 'OS and vLLM ' + fmtB(reserveOs) + (e.hostModel ? ', model tables in RAM ' + fmtB(e.hostModel) : '') },
+      { v: kv, color: md.color, tip: r.cpuWhat === 'history' ? fmtInt(r.n) + ' histories × ' + fmtB(e.c.hist) : r.cpuWhat === 'window' ? fmtInt(r.n) + ' pinned windows × ' + fmtB(e.c.host3) : 'Staging for NVMe reads: ' + fmtB(kv) },
+    ], ramT));
+    let text, isLimit = false;
+    if (md.key === 'v') text = e.hostModel ? 'Model tables only (' + fmtB(e.hostModel) + ')' : 'Not used for KV';
+    else if (r.cpuWhat === 'history') { text = fmtB(e.c.hist) + ' of history per request'; isLimit = r.n > 0 && r.n === r.bounds.cpu && r.bounds.cpu < r.bounds.gpu; }
+    else if (r.cpuWhat === 'window') { text = fmtB(e.c.host3) + ' pinned window per request'; isLimit = r.n > 0 && r.n === r.bounds.cpu && r.bounds.cpu < r.bounds.gpu; }
+    else text = 'Staging buffers for NVMe reads';
+    c.appendChild(el('div', { class: 'cap' }, [
+      el('span', { class: 'what' }, [text].concat(isLimit ? [el('span', { class: 'limit', text: 'limit' })] : [])),
+      el('span', { class: 'amt', text: fmtB(reserveOs + r.cpuUsed) + ' of ' + fmtB(ramT) }),
+    ]));
+    add(c);
+  });
+
+  // SSD tier
+  add(el('div', { class: 'rowhead last' }, [el('span', { class: 't', text: 'NVMe' }), el('span', { class: 'spec', text: fmtB(e.ssdTotal) + ' for KV history' })]));
+  MODES.forEach(md => {
+    const c = el('div', { class: 'cell last' });
+    if (!ok) { add(c); return; }
+    const r = R[md.key];
+    if (md.key !== 'three') { c.appendChild(bar([], e.ssdTotal)); c.appendChild(el('p', { class: 'idle', text: 'Not used' })); add(c); return; }
+    c.appendChild(bar([{ v: r.ssdUsed, color: md.color, tip: fmtInt(r.n) + ' histories × ' + fmtB(e.c.hist) }], e.ssdTotal));
+    const isLimit = r.n > 0 && r.n === r.bounds.ssd && r.bounds.ssd < r.bounds.gpu;
+    c.appendChild(el('div', { class: 'cap' }, [
+      el('span', { class: 'what' }, [fmtB(e.c.hist) + ' of history per request'].concat(isLimit ? [el('span', { class: 'limit', text: 'limit' })] : [])),
+      el('span', { class: 'amt', text: fmtB(r.ssdUsed) + ' of ' + fmtB(e.ssdTotal) }),
+    ]));
+    add(c);
+  });
+
+  const lg = $('legend'); lg.textContent = '';
+  [['var(--fixed)', 'Weights, runtime and OS'], ['var(--s1)', 'vLLM KV'], ['var(--s2)', 'KVMem 2-layer KV'], ['var(--s3)', 'KVMem 3-layer KV']].forEach(([c, t]) =>
+    lg.appendChild(el('span', null, [el('i', { style: 'background:' + c }), t])));
+  lg.appendChild(el('span', { class: 'foot', text: '"limit" marks the tier that caps each mode.' }));
+}
+
+function renderMethod(e) {
+  const box = $('method'); if (box.dataset.done) return; box.dataset.done = '1';
+  const items = [
+    ['Models. ', 'All three use NVFP4 weights (27B 20.0 GiB and Flash Next 69.7 GiB on the GPU, as loaded by vLLM; DeepSeek V4.1 Flash about 153 GiB, from its 284B parameters) and an NVFP4 KV cache on the GPU. KVMem keeps its CPU and NVMe copy of the history in FP8: 34,816 B per token for 27B, 26,624 for Flash Next and about 3,800 for DeepSeek V4 Flash. Flash Next also keeps its 25 GiB per-layer embedding table in host RAM.'],
+    ['Fit and parallelism. ', 'The smallest tensor-parallel size that leaves at least 8 GiB of KV pool per GPU; the rest of the GPUs run more replicas. KV pool = 0.9 × GPU memory − weights ÷ TP − activations (2–3 GiB).'],
+    ['vLLM. ', 'Each request keeps its whole context on the GPU, plus its recurrent (GDN) state with one copy per MTP draft token. Qwen page sizes follow vLLM\'s hybrid allocator and match server captures exactly.'],
+    ['KVMem 2-layer. ', 'Each request keeps a window of K + G tokens on the GPU (27B: 36,864 + 16,384; Flash Next and DeepSeek: 131,072 + 32,768) and its full history in CPU RAM. Usable RAM is total RAM minus max(16 GiB, 15%).'],
+    ['KVMem 3-layer. ', 'For sparse-attention models (Flash Next QSA, DeepSeek) the GPU keeps only the selector keys of the window and the pages attention reads (3 hot pages and 1 ring page per layer for QSA), the window sits in pinned CPU RAM (at most half of RAM) and the history on NVMe. For 27B, whose attention reads the whole window, the window stays on the GPU and the history moves from RAM to NVMe, so RAM no longer limits it.'],
+    ['Throughput. ', 'Decode step time = 6 ms of host work + max(memory traffic ÷ (75% of HBM bandwidth), compute ÷ 50% of peak) + tensor-parallel all-reduces over the GPU link (2 per layer, latency plus ring volume). Memory traffic per step: the dense weights, the share of MoE experts the batch touches (1 − (1 − k/E)^tokens), the MTP draft layers, each request\'s KV reads and its recurrent-state reads and writes. Tokens per step per request: 3.5 for 27B with MTP 4 and 2.55 for Flash Next with MTP 3 (measured), 1.8 for DeepSeek with MTP 1 (assumed). At full batch this lands within about 12% of the measured runs below.'],
+    ['Caveats. ', 'H100 and RTX 4090 have no FP4 tensor cores, so NVFP4 weights run through weight-only kernels, and NVFP4 KV has only been measured on Blackwell; their throughput is less certain. Flash Next was measured at TP 1 only. KVMem does not support DeepSeek V4 yet; its figures apply the same window and tier design to the V4 Flash architecture. Contexts beyond a model\'s native length assume the window still answers well, which was not measured.'],
+    ['Not modeled. ', 'Prefill and time to first token, KVMem\'s window refreshes (about 2% of decode time at K128K), PCIe traffic for 3-layer page misses (about 2%), max_num_seqs, and how the window affects answer quality.'],
+  ];
+  const ul = el('ul');
+  items.forEach(([b, t]) => ul.appendChild(el('li', null, [el('b', { text: b }), t])));
+  box.appendChild(ul);
+  box.appendChild(el('p', { class: 'foot', text: 'Sources: kvmem-vllm apps/planner (geometry, memory budget), core/compressed_pages.py (QSA carve), docs/qsa-three-tier-kv.md, server captures and run summaries from November 2026.' }));
+  renderCalib();
+}
+
+function renderCalib() {
+  const t = $('calib');
+  const q = MODELS.q27, f = MODELS.fn;
+  const g1 = geometry(q, 2, 1);
+  const v1 = Math.floor(427 / (windowPages(g1, 262144) + g1.recPages));
+  const k1 = Math.floor(386 / (windowPages(g1, 53248) + g1.recPages));
+  const g2 = geometry(f, 1, 1);
+  const res2 = Math.floor(4361 / (windowPages(g2, 163840) + g2.recPages));
+  const fp = Math.ceil((163840 + 4) / g2.pageTokens), per3 = 13 * 4 + g2.recPages;
+  let S = 0; while ((S + 1) * per3 + qsaCarvePages(g2, f, S + 1, fp, 3, 1) <= 4361) S++;
+  // throughput checks with each run's own settings
+  const run = (m, gpId, tp, B, mode, L, W, kvB, tau) => {
+    const tr = decodeTraffic(m, mode, L, W, kvB);
+    const st = stepTime(m, GPUS.find(g => g.id === gpId), tp, B, tr.kv, tr.state, tr.flops);
+    return Math.round(B * tau / st.t);
+  };
+  const rows = [
+    ['2× RTX 4090, 27B GPTQ-Int4, TP 2, FP8 KV, 256K', 'vLLM requests at once (428-page pool)', v1, 2],
+    ['', 'KVMem 2-layer requests at once (387-page pool)', k1, 8],
+    ['', 'vLLM decode, 2 requests', run(q, 'rtx4090', 2, 2, 'v', 262144, 53248, 1, 3.5) + ' tok/s', '186 tok/s'],
+    ['', 'KVMem decode, 8 requests', run(q, 'rtx4090', 2, 8, 'two', 262144, 53248, 1, 3.5) + ' tok/s', '608 tok/s'],
+    ['RTX PRO 6000, 27B NVFP4, 256K, 4 requests', 'KVMem decode, FP8 KV', run(q, 'pro6000', 1, 4, 'two', 262144, 53248, 1, 3.64) + ' tok/s', '514 tok/s'],
+    ['', 'KVMem decode, NVFP4 KV', run(q, 'pro6000', 1, 4, 'two', 262144, 53248, 0.5625, 3.84) + ' tok/s', '553 tok/s'],
+    ['RTX PRO 6000, Flash Next NVFP4, FP8 KV, 184K', 'Resident window requests at once (4,361-page pool)', res2, 5],
+    ['', '3-layer requests by GPU pages', S, '17 (run capped at 16)'],
+    ['', '3-layer decode, 16 requests', run(f, 'pro6000', 1, 16, 'three', 196608, 163840, 1, 2.55) + ' tok/s', '753 tok/s'],
+  ];
+  t.appendChild(el('thead', null, [el('tr', null, [el('th', { text: 'Run' }), el('th', { text: 'Compared' }), el('th', { class: 'r', text: 'Estimate' }), el('th', { class: 'r', text: 'Measured' })])]));
+  const body = el('tbody');
+  rows.forEach(r => body.appendChild(el('tr', null, [el('td', { text: r[0] }), el('td', { text: r[1] }), el('td', { class: 'r', text: String(r[2]) }), el('td', { class: 'r', text: String(r[3]) })])));
+  t.appendChild(body);
+}
+
+// tooltips for bar segments
+document.addEventListener('pointerover', ev => {
+  const n = ev.target.closest && ev.target.closest('[data-tip]');
+  if (!n) return; tip.textContent = n.getAttribute('data-tip'); tip.hidden = false;
+});
+document.addEventListener('pointermove', ev => {
+  const n = ev.target.closest && ev.target.closest('[data-tip]');
+  if (!n) return;
+  let left = ev.pageX + 12;
+  if (left + 290 > window.scrollX + document.documentElement.clientWidth) left = ev.pageX - 300;
+  tip.style.left = Math.max(window.scrollX + 8, left) + 'px'; tip.style.top = (ev.pageY + 14) + 'px';
+});
+document.addEventListener('pointerout', ev => {
+  const n = ev.target.closest && ev.target.closest('[data-tip]');
+  if (n && !(ev.relatedTarget && n.contains(ev.relatedTarget))) tip.hidden = true;
+});
+
+build();
+update();
+})();
+</script>
+</body>
+</html>
