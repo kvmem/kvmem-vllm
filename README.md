@@ -6,6 +6,9 @@ KVMem for vLLM brings [KVMem](https://github.com/kvmem/kvmem)'s memory managemen
 
 [Quick start](#quick-start) · [Documentation](docs/README.md) · [Benchmarks](docs/benchmarks.md) · [Contributing](CONTRIBUTING.md)
 
+**[Estimate how many more requests KVMem can serve for you →](https://kvmem.github.io/kvmem-vllm/)**
+Pick a model and a GPU server to compare concurrent requests and decode throughput for vLLM and KVMem's 2-layer (GPU + CPU) and 3-layer (GPU + CPU + SSD) modes.
+
 ![Native vLLM and KVMem: eight requests merged into one terminal per side, with measured generation throughput and GPU memory](docs/assets/deepswe-generation-throughput.gif)
 
 Historical fixed-length output and GPU memory recording, looping at the same 2.5× playback speed on both sides. This replay does not execute new agent tasks. [Measurement conditions](docs/benchmarks.md#long-history-generation-throughput).
