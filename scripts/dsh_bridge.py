@@ -7,6 +7,7 @@ caching remains disabled. The key only identifies an owned KVMem session.
 import argparse
 import asyncio
 import codecs
+from dataclasses import asdict, replace
 from functools import lru_cache
 import hashlib
 import json
@@ -19,8 +20,9 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from benchmarks.deepswe.claude_bridge import Planner, Protocol, Trajectory, backend_request, canonical
-from scripts.dsh_query_epoch import prepare_with_query_provenance
+from benchmarks.deepswe.claude_bridge import BridgeCompaction, Planner, Protocol, Trajectory, backend_request, canonical
+from scripts.dsh_query_epoch import prepare_with_query_provenance, verified_query
+from vllm_kvmem.apps.compaction import CompactionLimitError, History, Snapshot, add_compaction_args, write_snapshot
 from vllm_kvmem.core.request_records import RequestRecords, load_request
 
 
@@ -209,8 +211,17 @@ def restore_trajectory(planner,owner,directories):
     for turn,path in sorted(turns.items()):
         if turn!=state.turns+1:raise ValueError('Accepted history has a missing turn; refusing an inexact restore')
         body=load_request(path/'request.json');payload=to_anthropic(body)
-        prepared,_=prepare_with_query_provenance(planner,payload,state,body)
         saved=json.loads((path/'plan.json').read_text())
+        indices = None
+        if saved.get('compaction'):
+            snapshot = Snapshot.decode(saved['compaction'])
+            source = verified_query(body)
+            history = History(payload, (owner, planner.protocol.template), source[0] if source else None, 1)
+            if not history.matches(snapshot):
+                raise ValueError('Saved compacted turn does not match its raw history or template')
+            view = history.view(snapshot)
+            payload, indices = view.payload, view.indices
+        prepared,_=prepare_with_query_provenance(planner,payload,state,body,indices=indices)
         if len(prepared[0])!=saved['prompt_tokens'] or prepared[5]!=saved['exact_output_prefix_reused']:
             raise ValueError('Accepted history does not match its recorded prompt prefix')
         # Extra mandatory pins were removed by this deployment before submit.
@@ -289,6 +300,7 @@ def create_app(args,tokenizer):
     request_records={}   # owner -> RequestRecords: each turn saves only what changed
     def log(value):
         with (args.output/'requests.jsonl').open('a') as f:f.write(json.dumps(value,ensure_ascii=False)+'\n')
+    compaction = BridgeCompaction.create(args, planner, client, host_work, log)
     @app.get('/health')
     async def health():
         result=await client.get(args.backend+'/health')
@@ -317,6 +329,8 @@ def create_app(args,tokenizer):
                     max_tokens=1,temperature=0,kvmem_reselect='off',kvmem_mandatory_spans=[],
                     kv_transfer_params=dict(kvmem_release_session=True)))
                 response.raise_for_status()
+                if compaction:
+                    write_snapshot(args.output/owner/'compaction.json', None)
                 log(dict(at=time.time(),event='history_released',owner=owner,session_id=key,
                     cleanup_request_id=response.json()['id']))
                 del owners[owner];restored.discard(owner);released.append(owner);request_records.pop(owner,None)
@@ -336,8 +350,8 @@ def create_app(args,tokenizer):
             ceiling=output_cap if output_cap is not None else args.gen_budget*segments
             if type(limit) is not int or not 1<=limit<=ceiling:
                 raise ValueError(f'Requested output must be between 1 and {ceiling} tokens')
-            payload=await host_work(to_anthropic,body) if optimized else to_anthropic(body)
-            owner=session_owner(key,payload,getattr(args,'owner_namespace','dsh'))
+            normalized=await host_work(to_anthropic,body) if optimized else to_anthropic(body)
+            owner=session_owner(key,normalized,getattr(args,'owner_namespace','dsh'))
             if owner not in owners:
                 if len(owners)>=args.max_sessions:raise ValueError('Local DSH session capacity exhausted; restart/release before adding owners')
                 owners[owner]=(asyncio.Lock(),Trajectory())
@@ -348,26 +362,37 @@ def create_app(args,tokenizer):
             return JSONResponse(dict(error=dict(message=str(error),type='invalid_request_error')),status_code=400)
         async def generate(emit=None):
             if key in closed_keys:raise ValueError('Session has been released')
-            lock,state=owners[owner]
+            lock=owners[owner][0]
             async with lock:
                 if key in closed_keys:raise ValueError('Session has been released')
+                state=owners[owner][1]
                 if owner not in restored:
                     sources=[*getattr(args,'restore_from',[]),args.output]
                     state=await asyncio.to_thread(restore_trajectory,planner,owner,sources)
                     owners[owner]=(lock,state);restored.add(owner)
                     if state.turns:log(dict(at=time.time(),owner=owner,restored_turns=state.turns))
                 started=time.time()
+                first_limit=limit if output_cap is not None else min(limit,args.gen_budget)
+                required = getattr(args,'require_query_provenance',False)
+                payload, indices = normalized, None
+                if compaction:
+                    source = await host_work(verified_query, body, required=required)
+                    directories = [d/owner for d in [*getattr(args, 'restore_from', []), args.output]]
+                    view, saved = await compaction.project(payload, owner, first_limit, directories, state,
+                                                           source_index=source[0] if source else None)
+                    payload, indices = view.payload, view.indices
                 prepared,query_source=await host_work(prepare_with_query_provenance,
-                    planner,payload,state,body,required=getattr(args,'require_query_provenance',False))
+                    planner,payload,state,body,required=required,indices=indices)
                 handoff_timings={'prepare_seconds':time.time()-started}
                 tokens,plan,rendered,*_=prepared
                 # Locality/query coordinates remain available for graph recall;
                 # transport policy explicitly disables all semantic extra pins.
                 plan['kvmem_mandatory_parts']='none';plan['kvmem_mandatory_spans']=[]
                 if getattr(args,'observation_tool_spans',False):observation_tool_spans(plan)
-                first_limit=limit if output_cap is not None else min(limit,args.gen_budget)
                 if len(tokens)+first_limit>args.max_model_len:
                     raise ValueError('Complete history plus output exceeds the logical context limit')
+                if compaction and view.snapshot != saved:
+                    write_snapshot(args.output/owner/'compaction.json', view.snapshot)
                 # Reserve the same first native segment as the original route.
                 # A larger logical reply cap must not discard input or reduce
                 # the formerly supported input size. Later segments stop at
@@ -386,6 +411,7 @@ def create_app(args,tokenizer):
                     directory.name,body,base=f'{state.turns:05d}' if state.turns else None)
                 await record(directory/'request.json',saved_request)
                 await record(directory/'plan.json',{k:v for k,v in data.items() if k!='prompt'}|
+                    ({'compaction': asdict(view.snapshot)} if compaction and view.snapshot else {}) |
                     dict(prompt_tokens=len(tokens),exact_output_prefix_reused=prepared[5],
                          input_closure_tokens=getattr(prepared,'input_closure_tokens',0),
                          query_source=query_source))
@@ -469,10 +495,17 @@ def create_app(args,tokenizer):
                     if optimized else planner.response(wire.raw,rendered['tools'],body['model'],usage,finish))
                 if emit is not None:output,tail=wire.finish(response)
                 else:output=to_openai(response)
-                await host_work(planner.commit,state,prepared,payload,response,output_ids)
-                await record(directory/'response.json',output)
-                # Keep exact IDs for restart/recovery and independent streaming audits.
-                await record(directory/'accepted.json',dict(token_ids=output_ids,metrics=metrics))
+                def publish_turn():
+                    completed = replace(state)
+                    planner.commit(completed,prepared,payload,response,output_ids)
+                    (directory/'response.json').write_text(json.dumps(output,ensure_ascii=False))
+                    # Restore observes accepted.json only after the complete journal is available.
+                    pending = directory/'accepted.tmp'
+                    pending.write_text(json.dumps(dict(token_ids=output_ids,metrics=metrics),ensure_ascii=False))
+                    pending.replace(directory/'accepted.json')
+                    owners[owner] = (lock, completed)
+                    return completed
+                state = await host_work(publish_turn)
                 handoff_timings['finalize_seconds']=time.time()-finishing
                 log(dict(at=time.time(),owner=owner,turn=state.turns,request_id=request_id,
                     prompt_tokens=len(tokens),output_tokens=len(output_ids),
@@ -502,6 +535,8 @@ def create_app(args,tokenizer):
                     if not job.done():job.cancel()
                     await asyncio.gather(job,return_exceptions=True)
             try:return await respond()
+            except CompactionLimitError as error:
+                return JSONResponse(dict(error=dict(message=str(error),type='invalid_request_error')),status_code=400)
             except (ValueError,httpx.HTTPError) as error:
                 log(dict(at=time.time(),owner=owner,error=str(error)))
                 return JSONResponse(dict(error=dict(message=str(error),type='api_error')),status_code=502)
@@ -528,7 +563,8 @@ def create_app(args,tokenizer):
                 yield 'data: [DONE]\n\n'
             except (ValueError,httpx.HTTPError) as error:
                 log(dict(at=time.time(),owner=owner,error=str(error)))
-                yield 'data: '+json.dumps(dict(error=dict(message=str(error),type='api_error')))+'\n\n'
+                kind = 'invalid_request_error' if isinstance(error, CompactionLimitError) else 'api_error'
+                yield 'data: '+json.dumps(dict(error=dict(message=str(error),type=kind)))+'\n\n'
             finally:
                 if pending is not None:pending.cancel();await asyncio.gather(pending,return_exceptions=True)
                 if not job.done():job.cancel()
@@ -539,6 +575,7 @@ def create_app(args,tokenizer):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
+    add_compaction_args(p)
     p.add_argument('--protocol',type=Path,required=True);p.add_argument('--tokenizer',required=True)
     p.add_argument('--backend',default='http://127.0.0.1:18846');p.add_argument('--model',default='kvmem-dsh-dflash2')
     p.add_argument('--output',type=Path,required=True);p.add_argument('--port',type=int,default=18381)

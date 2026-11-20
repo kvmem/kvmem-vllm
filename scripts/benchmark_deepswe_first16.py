@@ -327,6 +327,9 @@ def prepare(a):
         'network':'Dedicated internal Docker bridge, no WAN; protocol bridge binds its gateway only',
         'agent_timeout':'Original unlimited','verifier_timeout':'Original 30m'}
     manifest['optimized_handoff'] = bool(getattr(a, 'optimized_handoff', False))
+    if getattr(a, 'compaction', None) == 'gateway':
+        manifest['compaction'] = 'gateway'
+        manifest['differences'].append('The bridge replaces older closed turns with private model-generated summaries')
     manifest['cpu_admission']={'budget_gib':72,'active_agent_clients':a.workers,
         'short_trajectory_reserve_tokens':49152,'long_trajectory_reserve_tokens':1048576,
         'long_trajectory_slots':1,'policy':'CPU-only; preserve parked histories, no eviction/recompute. Up to eight clients while short, one long trajectory at a time. Release finished histories before admitting further growth.'}
@@ -353,6 +356,9 @@ def run(a):
         raise ValueError('Workspace snapshots require a finite observation window')
     if a.bash_repeat_limit and a.bash_repeat_limit<2:raise ValueError('Bash repetition limit must be zero or at least two')
     m=json.loads((a.output/'manifest.json').read_text()) if a.adopt_controller or a.use_prepared else prepare(a)
+    compaction = m.get('compaction', 'framework')
+    if getattr(a, 'compaction', None) not in (None, compaction):
+        raise ValueError('Requested compaction mode differs from the prepared manifest')
     if type(getattr(a, 'seed', 1000)) is not int or not 0 <= getattr(a, 'seed', 1000) < 2**32:
         raise ValueError('Benchmark seed must be an unsigned 32-bit integer')
     if getattr(a, 'seed', 1000) != m.get('seed', 1000):
@@ -451,6 +457,7 @@ def run(a):
                 '--gen-budget',str(generation_tokens),
                 '--seed',str(m.get('seed', 1000)),
                 *(['--optimized-handoff'] if getattr(a, 'optimized_handoff', False) else []),
+                *(['--compaction','gateway'] if compaction == 'gateway' else []),
                 *(['--cpu-admission-policy','engine','--cache-geometry',str(out/'server/capture/cache-geometry.json'),
                    '--cpu-admission-bytes',str(cfg['kvmem']['cpu_read_cache_bytes'])]
                   if a.backend_kind == 'kvmem' and cfg['kvmem'].get('cpu_history_coordination') else [])],out/'bridge.log',
@@ -871,5 +878,7 @@ if __name__=='__main__':
     p.add_argument('--use-prepared',action='store_true',help='Use the immutable prevalidated task manifest')
     p.add_argument('--bridge-port',type=int,default=18483);p.add_argument('--prepare-only',action='store_true')
     p.add_argument('--optimized-handoff',action='store_true')
+    p.add_argument('--compaction', choices=('framework', 'gateway'),
+                   help='Opt in to gateway summaries for this run; prepared runs inherit their manifest')
     p.add_argument('--startup-timeout-seconds',type=int,default=1800)
     run(p.parse_args())
