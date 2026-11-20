@@ -22,7 +22,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm_kvmem.apps.compaction import (
-    CompactionController, CompactionLimitError, DIRECTIVE, History, add_compaction_args, read_snapshot, write_snapshot,
+    CompactionController, CompactionLimitError, DIRECTIVE, History, UnusableSummary,
+    add_compaction_args, read_snapshot, write_snapshot,
 )
 
 
@@ -601,17 +602,23 @@ class BridgeCompaction:
             data = backend_request(model=self.args.model, tokens=tokens, session=owner, max_tokens=quota,
                                    plan=plan, backend_kind=getattr(self.args, 'backend_kind', 'kvmem'))
             data.update(temperature=0, thinking_token_budget=0)
-            reply = await self.client.post(self.args.backend+'/v1/completions', json=data)
-            reply.raise_for_status()
+            try:
+                reply = await self.client.post(self.args.backend+'/v1/completions', json=data)
+                reply.raise_for_status()
+            except httpx.HTTPError as error:
+                raise UnusableSummary(f'Private summary request failed: {error}') from error
             native = reply.json()
             choice, usage = native['choices'][0], native['usage']
             if (choice.get('finish_reason') != 'stop' or not isinstance(choice.get('token_ids'), list)
                     or not 0 < len(choice['token_ids']) == usage['completion_tokens'] <= quota):
-                raise ValueError('Private summary did not finish within its token budget')
-            parsed = self.planner.response(choice['text'], rendered['tools'], self.args.model, usage, 'stop')
+                raise UnusableSummary('Private summary did not finish within its token budget')
+            try:
+                parsed = self.planner.response(choice['text'], rendered['tools'], self.args.model, usage, 'stop')
+            except ValueError as error:
+                raise UnusableSummary('Private summary could not be parsed') from error
             text = ''.join(b['text'] for b in parsed['content'] if b['type'] == 'text').strip()
             if parsed['stop_reason'] != 'end_turn' or not text:
-                raise ValueError('Private summary must contain final text and no tool call')
+                raise UnusableSummary('Private summary must contain final text and no tool call')
             self.log(dict(event='compaction_summary', owner=owner, seconds=time.monotonic()-started,
                           input_tokens=len(tokens), output_tokens=usage['completion_tokens']))
             return text
@@ -620,6 +627,8 @@ class BridgeCompaction:
             return await self.count(payload, state)
 
         view = await self.policy.project(history, saved, output, count, summarize)
+        if view.fallback_reason:
+            self.log(dict(event='compaction_fallback', owner=owner, reason=view.fallback_reason))
         return view, saved
 
 

@@ -75,6 +75,7 @@ class Projection:
     # Raw normalized message index at each effective position. None represents the summary.
     indices: tuple[int | None, ...] | None = None
     snapshot: Snapshot | None = None
+    fallback_reason: str | None = None
 
 
 def _groups(messages):
@@ -158,6 +159,10 @@ class History:
         return {**self.payload, "messages": [*selected, {"role": "user", "content": DIRECTIVE}]}
 
 
+class UnusableSummary(ValueError):
+    """A private generation failed to produce a usable handoff."""
+
+
 class CompactionLimitError(ValueError):
     def __init__(self, input_tokens):
         self.input_tokens = input_tokens
@@ -230,7 +235,15 @@ class CompactionController:
             if best is None:
                 break
             end, request = best
-            summary = await summarize(request, self.quota)
+            try:
+                summary = await summarize(request, self.quota)
+            except UnusableSummary as error:
+                if size > budget:
+                    raise
+                # The high watermark is advisory. The last validated projection
+                # can still serve this request within the hard model limit.
+                view.fallback_reason = str(error)
+                return view
             revision += 1
             candidate = Snapshot(revision, end, history.digests[end - 1], history.keep(end), summary)
             candidate_view = history.view(candidate)

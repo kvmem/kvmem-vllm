@@ -264,6 +264,32 @@ def test_incomplete_private_result_never_becomes_visible_or_committed(mode, tmp_
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("kind", ["anthropic", "openai"])
+def test_soft_watermark_keeps_serving_when_private_summary_is_truncated(kind, tmp_path, monkeypatch):
+    async def run():
+        backend = Backend()
+        backend.fail = "length"
+        client, transport, args = setup_bridge(kind, tmp_path, monkeypatch, backend)
+        path = "/task/task/v1/messages" if kind == "anthropic" else "/v1/chat/completions"
+        renderer = MessagesProtocol(None)
+        body = dict(model="m", max_tokens=100, prompt_cache_key="soft", stream=True)
+        for end in range(1, len(trace())+1):
+            body["messages"] = trace()[:end]
+            raw = body if kind == "anthropic" else dsh.to_anthropic(body)
+            expected = renderer(request=raw)["prompt"].encode()
+            if 1000 < len(expected) <= 1200:
+                break
+        async with client, transport:
+            reply = await client.post(path, json=body)
+            assert "visible answer" in reply.text and "event: error" not in reply.text
+            assert backend.private and len(backend.public) == 1
+            assert bytes(backend.public[0]["prompt"]) == expected
+            assert not list(args.output.glob("*/compaction.json"))
+            events = [json.loads(row) for row in (args.output/"requests.jsonl").read_text().splitlines()]
+            assert any(e.get("event") == "compaction_fallback" for e in events)
+    asyncio.run(run())
+
+
 def test_cancelled_summary_preserves_previous_branch(tmp_path, monkeypatch):
     async def run():
         backend = Backend()

@@ -38,6 +38,9 @@ current user request or verified Query, tool definitions, recent messages
 and outstanding tool transactions remain available verbatim. The bridge
 checks both the private and visible input plus output quotas. A large indivisible
 tool transaction or protected prompt can still exceed the context limit.
+If a private summary fails or reaches its output limit, the bridge can still
+answer from the last verified context when it fits the public request budget.
+It records that fallback in `requests.jsonl`.
 
 The client sees the ordinary response and its usage. The bridge records private
 model time and token counts in `requests.jsonl`. Each owner directory stores
