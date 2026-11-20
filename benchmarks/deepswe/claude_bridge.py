@@ -8,7 +8,7 @@ import argparse
 import asyncio
 from bisect import bisect_right
 import ctypes
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from decimal import Decimal
 import hashlib
 import json
@@ -20,6 +20,11 @@ import os
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+
+from vllm_kvmem.apps.compaction import (
+    CompactionController, CompactionLimitError, DIRECTIVE, History, UnusableSummary,
+    add_compaction_args, read_snapshot, write_snapshot,
+)
 
 
 def canonical(value):
@@ -236,7 +241,7 @@ class Planner:
     def encode(self, text):
         return self.tokenizer.encode(text, add_special_tokens=False)
 
-    def prepare(self, payload, state, *, finalize_plan=None):
+    def prepare(self, payload, state, *, finalize_plan=None, count_only=False):
         rendered = self.protocol(request=payload)
         text = rendered['prompt'].encode()
         optimized = getattr(self, 'optimized_handoff', False)
@@ -325,6 +330,8 @@ class Planner:
                 value=encoded.count(point)
                 locations[location(point)]=value
                 return value
+        if count_only:
+            return len(tokens)
         plan = {'kvmem_mandatory_spans': [], 'kvmem_reselect':'auto'}
         for span in rendered['spans']:
             if span['role'] != 'assistant' and (not (reused or prompt_reused) or span['begin']>=boundary):
@@ -544,6 +551,87 @@ def bounded_task_query(payload, instruction, replay_budget):
     return finalize
 
 
+class BridgeCompaction:
+    """Use the same renderer, tokenizer, admission and owner as the visible request."""
+
+    def __init__(self, policy, args, planner, client, host_work, log):
+        self.policy, self.args, self.planner = policy, args, planner
+        self.client, self.host_work, self.log = client, host_work, log
+
+    @classmethod
+    def create(cls, args, planner, client, host_work, log):
+        policy = CompactionController.from_args(args)
+        return cls(policy, args, planner, client, host_work, log) if policy else None
+
+    async def count(self, payload, state=None):
+        def measure():
+            if state is not None and state.tokens:
+                # A re-encoding may have a different length from accepted output IDs.
+                return self.planner.prepare(payload, state, count_only=True)
+            return len(self.planner.encode(self.planner.protocol(request=payload)['prompt']))
+        return await self.host_work(measure)
+
+    async def history(self, payload, owner, directories, source_index=None):
+        history = await self.host_work(History, payload, (owner, self.planner.protocol.template),
+                                       source_index, self.policy.keep_recent)
+        saved = await self.host_work(read_snapshot, [d/'compaction.json' for d in directories])
+        return history, saved
+
+    async def project(self, payload, owner, output, directories, state, *, source_index=None, admit=None):
+        history, saved = await self.history(payload, owner, directories, source_index)
+
+        async def summarize(request, quota):
+            started = time.monotonic()
+            def select_directive(prepared):
+                rendered = prepared[2]
+                # The harness may select an earlier task as its Query. This private
+                # call always queries with the final, bridge-authored directive.
+                span = rendered['spans'][-1]
+                begin, end = span['content_begin'], span['content_end']
+                if span['role'] != 'user' or rendered['prompt'].encode()[begin:end] != DIRECTIVE.encode():
+                    raise ValueError('Compaction directive has no exact rendered span')
+                prepared[1].update(kvmem_query_span=[prepared.coordinate(begin), prepared.coordinate(end)],
+                                   kvmem_mandatory_parts='none', kvmem_mandatory_spans=[])
+            prepared = await self.host_work(self.planner.prepare, request, state,
+                                            finalize_plan=select_directive)
+            tokens, plan, rendered = prepared[:3]
+            if len(tokens) + quota > self.policy.limit:
+                raise ValueError('Private summary exceeds the logical context')
+            if admit:
+                await admit(len(tokens), quota)
+            data = backend_request(model=self.args.model, tokens=tokens, session=owner, max_tokens=quota,
+                                   plan=plan, backend_kind=getattr(self.args, 'backend_kind', 'kvmem'))
+            data.update(temperature=0, thinking_token_budget=0)
+            try:
+                reply = await self.client.post(self.args.backend+'/v1/completions', json=data)
+                reply.raise_for_status()
+            except httpx.HTTPError as error:
+                raise UnusableSummary(f'Private summary request failed: {error}') from error
+            native = reply.json()
+            choice, usage = native['choices'][0], native['usage']
+            if (choice.get('finish_reason') != 'stop' or not isinstance(choice.get('token_ids'), list)
+                    or not 0 < len(choice['token_ids']) == usage['completion_tokens'] <= quota):
+                raise UnusableSummary('Private summary did not finish within its token budget')
+            try:
+                parsed = self.planner.response(choice['text'], rendered['tools'], self.args.model, usage, 'stop')
+            except ValueError as error:
+                raise UnusableSummary('Private summary could not be parsed') from error
+            text = ''.join(b['text'] for b in parsed['content'] if b['type'] == 'text').strip()
+            if parsed['stop_reason'] != 'end_turn' or not text:
+                raise UnusableSummary('Private summary must contain final text and no tool call')
+            self.log(dict(event='compaction_summary', owner=owner, seconds=time.monotonic()-started,
+                          input_tokens=len(tokens), output_tokens=usage['completion_tokens']))
+            return text
+
+        async def count(payload):
+            return await self.count(payload, state)
+
+        view = await self.policy.project(history, saved, output, count, summarize)
+        if view.fallback_reason:
+            self.log(dict(event='compaction_fallback', owner=owner, reason=view.fallback_reason))
+        return view, saved
+
+
 def create_app(args, tokenizer):
     app = FastAPI()
     backend_kind = getattr(args, 'backend_kind', 'kvmem')
@@ -587,6 +675,8 @@ def create_app(args, tokenizer):
     def log(row):
         with (args.output/'requests.jsonl').open('a') as stream:
             stream.write(json.dumps(row,ensure_ascii=False)+'\n')
+
+    compaction = BridgeCompaction.create(args, planner, client, asyncio.to_thread, log)
 
     async def reserve(task, amount):
         nonlocal long_owner, engine_admission_verified
@@ -642,6 +732,8 @@ def create_app(args, tokenizer):
                 result.raise_for_status()
                 cleanup_id = result.json()['id']
             states[task]=Trajectory()
+            if compaction:
+                write_snapshot(args.output/task/'compaction.json', None)
             async with changed:
                 credits.pop(task,None)
                 if long_owner==task:long_owner=None
@@ -661,18 +753,42 @@ def create_app(args, tokenizer):
     async def count_tokens(task:str, request:Request):
         if task not in allowed:return JSONResponse({'error':'unknown task'},status_code=404)
         payload = await request.json()
+        if compaction:
+            async with locks[task]:
+                owner = args.run_id+'-'+task
+                history, saved = await compaction.history(payload, owner, [args.output/task])
+                view = history.view(saved if history.matches(saved) else None)
+                return {'input_tokens': await compaction.count(view.payload, states[task])}
         value = await asyncio.to_thread(planner.protocol,request=payload)
         return {'input_tokens':len(await asyncio.to_thread(planner.encode,value['prompt']))}
 
     @app.post('/task/{task}/v1/messages')
     async def messages(task:str, request:Request):
         if task not in allowed:return JSONResponse({'error':'unknown task'},status_code=404)
-        payload = await request.json()
+        raw_payload = await request.json()
         async def generate():
-            nonlocal inflight
+            nonlocal inflight, long_owner
             async with locks[task]:
                 state = states[task]
                 started=time.time()
+                session=args.run_id+'-'+task
+                payload = raw_payload
+                requested = payload.get('max_tokens', output_cap)
+                if type(requested) is not int or requested <= 0:
+                    raise ValueError('max_tokens must be a positive integer')
+                max_tokens = min(requested, output_cap)
+                if compaction:
+                    async def admit(prompt_size, quota):
+                        await reserve(task, ((prompt_size+quota+31)//32)*32*17*4*256*3)
+                    try:
+                        view, saved = await compaction.project(payload, session, max_tokens,
+                                                              [args.output/task], state, admit=admit)
+                    except CompactionLimitError as error:
+                        log(dict(event='context_limit', task=task, turn=state.turns+1, at=time.time(),
+                                 prompt_tokens=error.input_tokens, requested_output_tokens=max_tokens,
+                                 max_model_len=args.max_model_len))
+                        raise
+                    payload = view.payload
                 query_root = getattr(args, 'task_instructions_root', None)
                 options = {}
                 if query_root is not None and task != 'preflight':
@@ -683,19 +799,14 @@ def create_app(args, tokenizer):
                 tokens, plan, rendered, _, _, reused, _=prepared
                 directory=args.output/task/f'{state.turns+1:05d}'
                 directory.mkdir(parents=True,exist_ok=True)
-                saved_request = await asyncio.to_thread(request_records[task].record, directory.name, payload,
+                saved_request = await asyncio.to_thread(request_records[task].record, directory.name, raw_payload,
                     base=f'{state.turns:05d}' if state.turns else None)
                 (directory/'request.json').write_text(json.dumps(saved_request,ensure_ascii=False))
-                requested = payload.get('max_tokens', output_cap)
-                if type(requested) is not int or requested <= 0:
-                    raise ValueError('max_tokens must be a positive integer')
-                max_tokens = min(requested, output_cap)
                 if len(tokens)+max_tokens>args.max_model_len:
                     log({'event':'context_limit','task':task,'turn':state.turns+1,'at':time.time(),
                          'prompt_tokens':len(tokens),'requested_output_tokens':max_tokens,
                          'max_model_len':args.max_model_len})
                     raise ValueError('Complete trajectory exceeds configured logical context; no truncation/compaction applied')
-                session=args.run_id+'-'+task
                 data=backend_request(model=args.model, tokens=tokens, session=session,
                     max_tokens=max_tokens, plan=plan, backend_kind=backend_kind,
                     seed=cases[task]['seed'] if task in cases else getattr(args, 'seed', 1000))
@@ -704,7 +815,10 @@ def create_app(args, tokenizer):
                                    len(state.tokens) if prompt_reused else 0)
                 amount=((len(tokens)+data['max_tokens']+31)//32)*32*17*4*256*3
                 cpu_queue_seconds=await reserve(task,amount)
+                if compaction and view.snapshot != saved:
+                    write_snapshot(args.output/task/'compaction.json', view.snapshot)
                 (directory/'plan.json').write_text(json.dumps({k:v for k,v in data.items() if k!='prompt'}|
+                    ({'compaction': asdict(view.snapshot)} if compaction and view.snapshot else {}) |
                     {'prompt_tokens':len(tokens),'exact_output_prefix_reused':reused,
                      'prompt_prefix_reused':prompt_reused,
                      'token_sha256':hashlib.sha256(canonical(tokens).encode()).hexdigest(),
@@ -722,13 +836,17 @@ def create_app(args, tokenizer):
                     choice=native['choices'][0]
                     response=planner.response(choice['text'],rendered['tools'],payload['model'],native['usage'],choice['finish_reason'])
                     output=choice['token_ids']
-                    await asyncio.to_thread(planner.commit,state,prepared,payload,response,output)
+                    completed = replace(state)
+                    await asyncio.to_thread(planner.commit,completed,prepared,payload,response,output)
                     if backend_kind == 'kvmem':
                         async with changed:
                             credits[task]=((len(tokens)+len(output)+31)//32)*32*17*4*256*3
+                            if compaction and long_owner == task and credits[task] <= short_limit:
+                                long_owner = None
                             changed.notify_all()
                     (directory/'response.json').write_text(json.dumps(response,ensure_ascii=False))
                     (directory/'native.json').write_text(json.dumps({**native,'choices':[{k:v for k,v in choice.items() if k!='prompt_token_ids'}]},ensure_ascii=False))
+                    states[task] = state = completed
                     log({'event':'finish','task':task,'turn':state.turns,'at':time.time(),'seconds':time.time()-started,
                          'cpu_queue_seconds':cpu_queue_seconds,'native_seconds':time.time()-admitted,
                          'prompt_tokens':len(tokens),'new_input_tokens':len(tokens)-previous_tokens,
@@ -743,14 +861,16 @@ def create_app(args, tokenizer):
                             if isinstance(error,httpx.HTTPStatusError) else {})})
                     raise
                 finally:inflight-=1
-        if not payload.get('stream'):
+        if not raw_payload.get('stream'):
             try:return await generate()
+            except CompactionLimitError as error:
+                return JSONResponse({'type':'error','error':{'type':'invalid_request_error','message':str(error)}},status_code=400)
             except (ValueError,httpx.HTTPError) as error:
                 return JSONResponse({'type':'error','error':{'type':'api_error','message':str(error)}},status_code=500)
         async def stream():
             job=asyncio.create_task(generate())
             yield event('message_start',message={'id':'msg_'+uuid.uuid4().hex,'type':'message','role':'assistant',
-                'model':payload['model'],'content':[],'stop_reason':None,'stop_sequence':None,
+                'model':raw_payload['model'],'content':[],'stop_reason':None,'stop_sequence':None,
                 'usage':{'input_tokens':0,'output_tokens':0}})
             try:
                 while not job.done():
@@ -758,7 +878,8 @@ def create_app(args, tokenizer):
                     if not done:yield event('ping')
                 for item in response_events(job.result()):yield item
             except (ValueError,httpx.HTTPError) as error:
-                yield event('error',error={'type':'api_error','message':str(error)})
+                kind = 'invalid_request_error' if isinstance(error, CompactionLimitError) else 'api_error'
+                yield event('error',error={'type':kind,'message':str(error)})
             finally:
                 if not job.done():job.cancel()
                 await asyncio.gather(job,return_exceptions=True)
@@ -768,6 +889,7 @@ def create_app(args, tokenizer):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
+    add_compaction_args(p)
     for name in ('protocol','tasks','output'):p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--tokenizer',required=True);p.add_argument('--backend',required=True)
     p.add_argument('--model',required=True);p.add_argument('--run-id',required=True)

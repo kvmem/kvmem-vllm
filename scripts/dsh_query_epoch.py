@@ -3,7 +3,7 @@ import hashlib
 import json
 
 
-def prepare_with_query_provenance(planner, payload, state, body, *, required=False):
+def prepare_with_query_provenance(planner, payload, state, body, *, required=False, indices=None):
     """Resolve the verified source before validating the final replay budget.
 
     Terminal feedback can be larger than G while the actual task Question is
@@ -18,18 +18,18 @@ def prepare_with_query_provenance(planner, payload, state, body, *, required=Fal
     source = {}
 
     def finalize(prepared):
-        source.update(apply_query_provenance(body, prepared, required=True))
+        source.update(apply_query_provenance(body, prepared, required=True, indices=indices))
 
     prepared = planner.prepare(payload, state, finalize_plan=finalize)
     return prepared, source
 
 
-def apply_query_provenance(body, prepared, *, required=False):
+def verified_query(body, *, required=False):
     proof = body.get('kvmem_query_provenance')
     if proof is None:
         if required:
             raise ValueError('DSH Query source metadata is required for this route')
-        return {'status': 'legacy-role-query'}
+        return None
     if not isinstance(proof, dict) or proof.get('schema_version') != 1:
         raise ValueError('Invalid DSH Query source metadata')
     if proof.get('session_id') != body.get('prompt_cache_key'):
@@ -45,19 +45,33 @@ def apply_query_provenance(body, prepared, *, required=False):
     if digest != proof.get('user_messages_sha256'):
         raise ValueError('DSH Query source differs from wire user messages')
     ordinal, identity = proof.get('query_user_ordinal'), proof.get('query_message_id')
-    plan, rendered, locations = prepared[1], prepared[2], prepared[6]
     if ordinal is None:
         if identity is not None:
             raise ValueError('DSH Query identity has no user message')
+        return None, ordinal, identity
+    if type(ordinal) is not int or not 0 <= ordinal < len(users) or not isinstance(identity, str) or not identity:
+        raise ValueError('Invalid DSH Query user ordinal or identity')
+    wire_index = users[ordinal][0]
+    index = sum(m['role'] not in ('system', 'developer') for m in body['messages'][:wire_index])
+    return index, ordinal, identity
+
+
+def apply_query_provenance(body, prepared, *, required=False, indices=None):
+    source = verified_query(body, required=required)
+    if source is None:
+        return {'status': 'legacy-role-query'}
+    index, ordinal, identity = source
+    plan, rendered, locations = prepared[1], prepared[2], prepared[6]
+    if index is None:
         plan.pop('kvmem_query_span', None)
         plan['kvmem_reselect'] = 'off'
     else:
-        if type(ordinal) is not int or not 0 <= ordinal < len(users) or not isinstance(identity, str) or not identity:
-            raise ValueError('Invalid DSH Query user ordinal or identity')
-        wire_index = users[ordinal][0]
-        index = sum(m['role'] not in ('system', 'developer') for m in body['messages'][:wire_index])
         # The frozen Qwen renderer prepends its merged system/control message.
-        count = sum(m['role'] not in ('system', 'developer') for m in body['messages'])
+        if indices is None:
+            count = sum(m['role'] not in ('system', 'developer') for m in body['messages'])
+        else:
+            index = indices.index(index)  # Same verified raw source in the compacted request.
+            count = len(indices)
         prefix = len(rendered['messages']) - count
         if prefix < 0 or any(m['role'] != 'system' for m in rendered['messages'][:prefix]):
             raise ValueError('DSH Query renderer changed the message index domain')

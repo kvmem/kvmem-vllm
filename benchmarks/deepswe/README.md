@@ -14,8 +14,45 @@ are retained as outcomes. Missing scores, duplicate attempts and other exception
 cannot qualify as task-quality evidence. The official task agent timeout is
 preserved (`--agent-timeout-multiplier 1.0`); installation/verifier infrastructure
 uses the existing 4x multiplier. The inherited per-shell and model-call limits
-are documented in the adapter. No context compaction or synthetic prompt
-substitution is introduced.
+are documented in the adapter. The qualification runner uses full history by default.
+
+## Optional model-generated history summaries
+
+Both the Anthropic Messages bridge in this directory and the OpenAI Chat
+Completions bridge in [dsh_bridge.py](../../scripts/dsh_bridge.py) accept
+`--compaction framework` (the default) and `--compaction gateway`. Use the
+default for agents that already request summaries. For agents that resend their
+entire transcript, enable gateway mode on the bridge command. For example, add
+the following flags to the existing launch command.
+
+```sh
+--compaction gateway --compaction-trigger 0.80 --compaction-target 0.55 \
+  --compaction-summary-tokens 2048 --compaction-keep-messages 4
+```
+
+Fractions apply to the input budget after reserving the public response.
+The bridge sends the same model a private completion with the older history
+and a handoff instruction. It can summarize several closed segments when the
+incoming raw request already exceeds the model limit. The original task,
+current user request or verified Query, tool definitions, recent messages
+and outstanding tool transactions remain available verbatim. The bridge
+checks both the private and visible input plus output quotas. A large indivisible
+tool transaction or protected prompt can still exceed the context limit.
+If a private summary fails or reaches its output limit, the bridge can still
+answer from the last verified context when it fits the public request budget.
+It records that fallback in `requests.jsonl`.
+
+The client sees the ordinary response and its usage. The bridge records private
+model time and token counts in `requests.jsonl`. Each owner directory stores
+its current `compaction.json` alongside the existing raw turn journal.
+The source-prefix digest, model, control messages, template, and tools must
+match for reuse. Route each owner to one bridge writer and use the normal
+per-task URL or DSH conversation key. Anthropic `count_tokens` measures the
+committed projection without generating a summary. A client that rejects an
+oversized request locally still needs sufficient headroom to reach the bridge.
+The first16 runner also accepts `--compaction gateway` and records the mode
+in its run manifest for comparisons with the default full-history run.
+
 
 ## Sequence
 
